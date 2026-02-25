@@ -8,10 +8,12 @@ from pathlib import Path
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
+from hdri_viewer.main import _preload_native_modules
 from hdri_viewer.viewer.widget import ViewerWindow
 
 
 def measure_time_to_first_frame(path: Path, timeout_seconds: float) -> float:
+    _preload_native_modules()
     app = QApplication(sys.argv)
     t0 = time.perf_counter()
     window = ViewerWindow(initial_path=path)

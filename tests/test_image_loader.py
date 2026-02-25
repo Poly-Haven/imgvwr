@@ -87,13 +87,13 @@ def test_load_image_dispatches_to_direct_when_subprocess_disabled(monkeypatch: p
 def test_subprocess_loader_invokes_module_and_parses_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source_pixels = np.array(
         [
-            [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
-            [[9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]],
+            [[1.0, 2.0, 3.0], [5.0, 6.0, 7.0]],
+            [[9.0, 10.0, 11.0], [13.0, 14.0, 15.0]],
         ],
         dtype=np.float32,
     )
     np.save(tmp_path / "pixels.npy", source_pixels)
-    (tmp_path / "meta.json").write_text('{"width": 2, "height": 2, "channels": 4}', encoding="utf-8")
+    (tmp_path / "meta.json").write_text('{"width": 2, "height": 2, "channels": 3}', encoding="utf-8")
 
     class _FakeTemporaryDirectory:
         def __enter__(self) -> str:

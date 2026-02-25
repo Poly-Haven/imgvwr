@@ -57,25 +57,19 @@ def _normalize_rgb_channels_with_progress(
         _emit_progress(progress_callback, end_progress)
         return np.zeros((height, width, 3), dtype=pixels.dtype)
 
-    output = np.empty((height, width, 3), dtype=pixels.dtype)
-    row_step = max(min(256, height), 1)
     progress_span = max(end_progress - start_progress, 0.0)
+    _emit_progress(progress_callback, start_progress + progress_span * 0.25)
 
-    for row_begin in range(0, height, row_step):
-        row_end = min(row_begin + row_step, height)
+    if channels == 1:
+        output = np.repeat(pixels[:, :, 0:1], repeats=3, axis=2)
+    elif channels == 2:
+        output = np.empty((height, width, 3), dtype=pixels.dtype)
+        output[:, :, 0:2] = pixels[:, :, 0:2]
+        output[:, :, 2] = 0
+    else:
+        output = pixels[:, :, :3]
 
-        if channels == 1:
-            gray = pixels[row_begin:row_end, :, 0:1]
-            output[row_begin:row_end, :, :] = np.repeat(gray, repeats=3, axis=2)
-        elif channels == 2:
-            output[row_begin:row_end, :, 0:2] = pixels[row_begin:row_end, :, 0:2]
-            output[row_begin:row_end, :, 2] = 0
-        else:
-            output[row_begin:row_end, :, :] = pixels[row_begin:row_end, :, :3]
-
-        row_progress = row_end / height
-        _emit_progress(progress_callback, start_progress + row_progress * progress_span)
-
+    _emit_progress(progress_callback, end_progress)
     return output
 
 
@@ -110,60 +104,17 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
         width = int(spec.width)
         height = int(spec.height)
         channels = int(spec.nchannels)
-        tile_width = int(spec.tile_width)
-        tile_height = int(spec.tile_height)
+        _emit_progress(progress_callback, 0.05)
+        pixels_raw = input_file.read_image(oiio_module.FLOAT)
+        if pixels_raw is None:
+            error_text = input_file.geterror()
+            raise RuntimeError(f"Failed to read image data: {error_text}")
 
-        pixels = np.empty((height, width, channels), dtype=np.float32)
+        pixels = np.asarray(pixels_raw, dtype=np.float32)
+        if pixels.ndim == 1:
+            pixels = pixels.reshape((height, width, channels))
 
-        if tile_width > 0 and tile_height > 0:
-            y_step = max(tile_height, 1)
-            for y_begin in range(0, height, y_step):
-                y_end = min(y_begin + y_step, height)
-                pixels_raw = input_file.read_tiles(
-                    0,
-                    width,
-                    y_begin,
-                    y_end,
-                    0,
-                    1,
-                    0,
-                    channels,
-                    oiio_module.FLOAT,
-                )
-                if pixels_raw is None:
-                    error_text = input_file.geterror()
-                    raise RuntimeError(f"Failed to read image data: {error_text}")
-
-                chunk = np.asarray(pixels_raw, dtype=np.float32)
-                if chunk.ndim == 1:
-                    chunk = chunk.reshape((y_end - y_begin, width, channels))
-
-                pixels[y_begin:y_end, :, :] = chunk
-                read_progress = (y_end / height) * _READ_PROGRESS_WEIGHT
-                _emit_progress(progress_callback, read_progress)
-        else:
-            y_step = max(min(128, height), 1)
-            for y_begin in range(0, height, y_step):
-                y_end = min(y_begin + y_step, height)
-                pixels_raw = input_file.read_scanlines(
-                    y_begin,
-                    y_end,
-                    0,
-                    0,
-                    channels,
-                    oiio_module.FLOAT,
-                )
-                if pixels_raw is None:
-                    error_text = input_file.geterror()
-                    raise RuntimeError(f"Failed to read image data: {error_text}")
-
-                chunk = np.asarray(pixels_raw, dtype=np.float32)
-                if chunk.ndim == 1:
-                    chunk = chunk.reshape((y_end - y_begin, width, channels))
-
-                pixels[y_begin:y_end, :, :] = chunk
-                read_progress = (y_end / height) * _READ_PROGRESS_WEIGHT
-                _emit_progress(progress_callback, read_progress)
+        _emit_progress(progress_callback, _READ_PROGRESS_WEIGHT)
 
         rgb_pixels = np.ascontiguousarray(
             _normalize_rgb_channels_with_progress(pixels, progress_callback, 0.90, 0.99),
@@ -234,20 +185,15 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
         _emit_progress(progress_callback, 0.92)
         metadata = json.loads(meta_path.read_text(encoding="utf-8"))
         _emit_progress(progress_callback, 0.94)
-        source_pixels = np.load(pixels_path, mmap_mode="r")
-        _emit_progress(progress_callback, 0.96)
-        rgb_pixels = np.ascontiguousarray(
-            _normalize_rgb_channels_with_progress(source_pixels, progress_callback, 0.96, 0.995),
-            dtype=np.float32,
-        )
-        del source_pixels
+        rgb_pixels = np.load(pixels_path)
+        _emit_progress(progress_callback, 0.995)
         _emit_progress(progress_callback, 1.0)
 
         return ImageData(
             source_path=path,
             width=int(metadata["width"]),
             height=int(metadata["height"]),
-            channels=3,
+            channels=int(metadata["channels"]),
             dtype_name="float32",
             pixels=rgb_pixels,
         )

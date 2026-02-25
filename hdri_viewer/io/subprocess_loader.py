@@ -29,11 +29,11 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
         tile_width = int(spec.tile_width)
         tile_height = int(spec.tile_height)
 
-        pixels_memmap = np.lib.format.open_memmap(
+        rgb_pixels = np.lib.format.open_memmap(
             pixels_path,
             mode="w+",
             dtype=np.float32,
-            shape=(height, width, channels),
+            shape=(height, width, 3),
         )
 
         if tile_width > 0 and tile_height > 0:
@@ -48,11 +48,19 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
                 if chunk.ndim == 1:
                     chunk = chunk.reshape((y_end - y_begin, width, channels))
 
-                pixels_memmap[y_begin:y_end, :, :] = chunk
+                if channels == 1:
+                    gray = chunk[:, :, 0:1]
+                    rgb_pixels[y_begin:y_end, :, :] = np.repeat(gray, repeats=3, axis=2)
+                elif channels == 2:
+                    rgb_pixels[y_begin:y_end, :, 0:2] = chunk[:, :, 0:2]
+                    rgb_pixels[y_begin:y_end, :, 2] = 0
+                else:
+                    rgb_pixels[y_begin:y_end, :, :] = chunk[:, :, :3]
+
                 progress = int((y_end / height) * _READ_PROGRESS_WEIGHT * 100.0)
                 _emit_progress(progress)
         else:
-            y_step = max(min(128, height), 1)
+            y_step = max(min(1024, height), 1)
             for y_begin in range(0, height, y_step):
                 y_end = min(y_begin + y_step, height)
                 pixels_raw = input_file.read_scanlines(y_begin, y_end, 0, 0, channels, oiio.FLOAT)
@@ -63,14 +71,22 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
                 if chunk.ndim == 1:
                     chunk = chunk.reshape((y_end - y_begin, width, channels))
 
-                pixels_memmap[y_begin:y_end, :, :] = chunk
+                if channels == 1:
+                    gray = chunk[:, :, 0:1]
+                    rgb_pixels[y_begin:y_end, :, :] = np.repeat(gray, repeats=3, axis=2)
+                elif channels == 2:
+                    rgb_pixels[y_begin:y_end, :, 0:2] = chunk[:, :, 0:2]
+                    rgb_pixels[y_begin:y_end, :, 2] = 0
+                else:
+                    rgb_pixels[y_begin:y_end, :, :] = chunk[:, :, :3]
+
                 progress = int((y_end / height) * _READ_PROGRESS_WEIGHT * 100.0)
                 _emit_progress(progress)
 
-        del pixels_memmap
+        del rgb_pixels
         _emit_progress(88)
         with meta_path.open("w", encoding="utf-8") as file:
-            json.dump({"width": width, "height": height, "channels": channels}, file)
+            json.dump({"width": width, "height": height, "channels": 3}, file)
         _emit_progress(90)
     finally:
         input_file.close()

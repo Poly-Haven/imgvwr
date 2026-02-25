@@ -12,7 +12,7 @@ from typing import Any, Callable, Final
 import numpy as np
 
 _SUPPORTED_EXTENSIONS: Final[set[str]] = {".exr", ".hdr", ".jpg", ".jpeg"}
-_READ_PROGRESS_WEIGHT: Final[float] = 0.95
+_READ_PROGRESS_WEIGHT: Final[float] = 0.90
 
 ProgressCallback = Callable[[float], None]
 
@@ -38,18 +38,45 @@ def is_supported_image_path(path: Path) -> bool:
 def normalize_rgb_channels(pixels: np.ndarray) -> np.ndarray:
     """Normalizes image channels to RGB without changing precision."""
 
+    return _normalize_rgb_channels_with_progress(pixels, None, 0.0, 1.0)
+
+
+def _normalize_rgb_channels_with_progress(
+    pixels: np.ndarray,
+    progress_callback: ProgressCallback | None,
+    start_progress: float,
+    end_progress: float,
+) -> np.ndarray:
+    """Normalizes channels to RGB while emitting staged progress updates."""
+
     if pixels.ndim != 3:
         raise ValueError("Expected HxWxC image array.")
 
-    channels = pixels.shape[2]
-    if channels == 3:
-        return pixels
-    if channels == 1:
-        return np.repeat(pixels, repeats=3, axis=2)
-    if channels == 2:
-        zeros = np.zeros((pixels.shape[0], pixels.shape[1], 1), dtype=pixels.dtype)
-        return np.concatenate((pixels, zeros), axis=2)
-    return pixels[:, :, :3]
+    height, width, channels = pixels.shape
+    if height == 0 or width == 0:
+        _emit_progress(progress_callback, end_progress)
+        return np.zeros((height, width, 3), dtype=pixels.dtype)
+
+    output = np.empty((height, width, 3), dtype=pixels.dtype)
+    row_step = max(min(256, height), 1)
+    progress_span = max(end_progress - start_progress, 0.0)
+
+    for row_begin in range(0, height, row_step):
+        row_end = min(row_begin + row_step, height)
+
+        if channels == 1:
+            gray = pixels[row_begin:row_end, :, 0:1]
+            output[row_begin:row_end, :, :] = np.repeat(gray, repeats=3, axis=2)
+        elif channels == 2:
+            output[row_begin:row_end, :, 0:2] = pixels[row_begin:row_end, :, 0:2]
+            output[row_begin:row_end, :, 2] = 0
+        else:
+            output[row_begin:row_end, :, :] = pixels[row_begin:row_end, :, :3]
+
+        row_progress = row_end / height
+        _emit_progress(progress_callback, start_progress + row_progress * progress_span)
+
+    return output
 
 
 def load_image(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData:
@@ -138,7 +165,10 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
                 read_progress = (y_end / height) * _READ_PROGRESS_WEIGHT
                 _emit_progress(progress_callback, read_progress)
 
-        rgb_pixels = np.ascontiguousarray(normalize_rgb_channels(pixels), dtype=np.float32)
+        rgb_pixels = np.ascontiguousarray(
+            _normalize_rgb_channels_with_progress(pixels, progress_callback, 0.90, 0.99),
+            dtype=np.float32,
+        )
         _emit_progress(progress_callback, 1.0)
 
         return ImageData(
@@ -166,7 +196,7 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
         "import numpy as np\n"
         "import OpenImageIO as oiio\n"
         "import sys\n"
-        "_READ_PROGRESS_WEIGHT = 0.95\n"
+        "_READ_PROGRESS_WEIGHT = 0.85\n"
         "path = Path(sys.argv[1])\n"
         "meta_path = Path(sys.argv[2])\n"
         "pixels_path = Path(sys.argv[3])\n"
@@ -181,7 +211,7 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
         "    channels = int(spec.nchannels)\n"
         "    tile_width = int(spec.tile_width)\n"
         "    tile_height = int(spec.tile_height)\n"
-        "    pixels = np.empty((height, width, channels), dtype=np.float32)\n"
+        "    pixels_memmap = np.lib.format.open_memmap(pixels_path, mode='w+', dtype=np.float32, shape=(height, width, channels))\n"
         "    if tile_width > 0 and tile_height > 0:\n"
         "        y_step = max(tile_height, 1)\n"
         "        for y_begin in range(0, height, y_step):\n"
@@ -192,7 +222,7 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
         "            chunk = np.asarray(raw, dtype=np.float32)\n"
         "            if chunk.ndim == 1:\n"
         "                chunk = chunk.reshape((y_end - y_begin, width, channels))\n"
-        "            pixels[y_begin:y_end, :, :] = chunk\n"
+        "            pixels_memmap[y_begin:y_end, :, :] = chunk\n"
         "            progress = int((y_end / height) * _READ_PROGRESS_WEIGHT * 100.0)\n"
         "            print(f'PROGRESS:{progress}', flush=True)\n"
         "    else:\n"
@@ -205,13 +235,14 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
         "            chunk = np.asarray(raw, dtype=np.float32)\n"
         "            if chunk.ndim == 1:\n"
         "                chunk = chunk.reshape((y_end - y_begin, width, channels))\n"
-        "            pixels[y_begin:y_end, :, :] = chunk\n"
+        "            pixels_memmap[y_begin:y_end, :, :] = chunk\n"
         "            progress = int((y_end / height) * _READ_PROGRESS_WEIGHT * 100.0)\n"
         "            print(f'PROGRESS:{progress}', flush=True)\n"
-        "    np.save(pixels_path, pixels)\n"
+        "    del pixels_memmap\n"
+        "    print('PROGRESS:88', flush=True)\n"
         "    with meta_path.open('w', encoding='utf-8') as file:\n"
         "        json.dump({'width': width, 'height': height, 'channels': channels}, file)\n"
-        "    print('PROGRESS:100', flush=True)\n"
+        "    print('PROGRESS:90', flush=True)\n"
         "finally:\n"
         "    inp.close()\n"
     )
@@ -258,16 +289,23 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
         if not meta_path.exists() or not pixels_path.exists():
             raise RuntimeError("Image loader subprocess did not produce output files.")
 
+        _emit_progress(progress_callback, 0.92)
         metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-        source_pixels = np.load(pixels_path)
-        rgb_pixels = np.ascontiguousarray(normalize_rgb_channels(source_pixels), dtype=np.float32)
+        _emit_progress(progress_callback, 0.94)
+        source_pixels = np.load(pixels_path, mmap_mode="r")
+        _emit_progress(progress_callback, 0.96)
+        rgb_pixels = np.ascontiguousarray(
+            _normalize_rgb_channels_with_progress(source_pixels, progress_callback, 0.96, 0.995),
+            dtype=np.float32,
+        )
+        del source_pixels
         _emit_progress(progress_callback, 1.0)
 
         return ImageData(
             source_path=path,
             width=int(metadata["width"]),
             height=int(metadata["height"]),
-            channels=int(metadata["channels"]),
+            channels=3,
             dtype_name="float32",
             pixels=rgb_pixels,
         )

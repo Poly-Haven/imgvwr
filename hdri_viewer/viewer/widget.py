@@ -164,6 +164,8 @@ class HdriViewerWidget(QOpenGLWidget):
         self._exposure_stops = 0.0
         self._file_info = FileInfo()
         self._active_loader_signals: _ImageLoadSignals | None = None
+        self._load_progress_value = 0.0
+        self._awaiting_first_present = False
 
         self._overlay_label = QLabel("", self)
         self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -224,6 +226,10 @@ class HdriViewerWidget(QOpenGLWidget):
         """Delegates frame rendering to the OpenGL renderer."""
 
         self._renderer.render(self._camera.state)
+        if self._awaiting_first_present and self._renderer.has_texture:
+            self._awaiting_first_present = False
+            self._set_loading_overlay("", False)
+            self._set_overlay_text("")
 
     def resizeEvent(self, event: QResizeEvent | None) -> None:
         """Keeps overlay label in sync with widget geometry."""
@@ -374,8 +380,11 @@ class HdriViewerWidget(QOpenGLWidget):
             return
 
         self._loading = True
+        self._load_progress_value = 0.0
+        self._awaiting_first_present = False
         self._set_overlay_text("")
-        self._set_loading_overlay("Loading…", True)
+        self._set_loading_overlay("Opening file…", True)
+        self._loading_progress_bar.set_progress(0.0)
         self.update()
 
         if not self._threaded_loading_enabled:
@@ -444,6 +453,10 @@ class HdriViewerWidget(QOpenGLWidget):
             self._on_image_load_failed("Unexpected loader payload type.")
             return
 
+        upload_progress = max(self._load_progress_value, 0.995)
+        self._set_loading_overlay("Uploading to GPU… 99%", True)
+        self._loading_progress_bar.set_progress(upload_progress)
+
         self.makeCurrent()
         self._renderer.set_image(image)
         self.doneCurrent()
@@ -458,8 +471,10 @@ class HdriViewerWidget(QOpenGLWidget):
 
         self._loading = False
         self._active_loader_signals = None
-        self._set_loading_overlay("", False)
-        self._set_overlay_text("")
+        self._load_progress_value = upload_progress
+        self._loading_progress_bar.set_progress(1.0)
+        self._set_loading_overlay("Rendering frame… 100%", True)
+        self._awaiting_first_present = True
         parent_window = self.window()
         if parent_window is not None:
             parent_window.setWindowTitle(f"imgvwr - {image.source_path.name}")
@@ -470,6 +485,7 @@ class HdriViewerWidget(QOpenGLWidget):
 
         self._loading = False
         self._active_loader_signals = None
+        self._load_progress_value = 0.0
         self._set_loading_overlay("", False)
         self._set_overlay_text(f"Load failed: {message}")
         self.update()
@@ -477,9 +493,27 @@ class HdriViewerWidget(QOpenGLWidget):
     def _on_image_load_progress(self, progress_value: float) -> None:
         """Updates loading overlay according to actual load progress."""
 
-        progress_percent = int(round(max(0.0, min(1.0, progress_value)) * 100.0))
-        self._set_loading_overlay(f"Loading… {progress_percent}%", True)
-        self._loading_progress_bar.set_progress(progress_value)
+        bounded_progress = max(0.0, min(1.0, progress_value))
+        if bounded_progress < self._load_progress_value:
+            return
+
+        self._load_progress_value = bounded_progress
+        progress_percent = int(round(self._load_progress_value * 100.0))
+        self._set_loading_overlay(self._build_loading_status(progress_percent), True)
+        self._loading_progress_bar.set_progress(self._load_progress_value)
+
+    def _build_loading_status(self, progress_percent: int) -> str:
+        """Returns stage-specific status text for current loading progress."""
+
+        if progress_percent < 5:
+            return f"Opening file… {progress_percent}%"
+        if progress_percent < 90:
+            return f"Reading image data… {progress_percent}%"
+        if progress_percent < 95:
+            return f"Converting channels… {progress_percent}%"
+        if progress_percent < 99:
+            return f"Preparing pixel buffer… {progress_percent}%"
+        return f"Finalizing image… {progress_percent}%"
 
     def _schedule_initial_open_if_ready(self) -> None:
         """Queues initial file opening after GL initialization and first show."""

@@ -189,64 +189,6 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
     if not is_supported_image_path(path):
         raise ValueError(f"Unsupported image format: {path.suffix}")
 
-    loader_script = (
-        "from __future__ import annotations\n"
-        "from pathlib import Path\n"
-        "import json\n"
-        "import numpy as np\n"
-        "import OpenImageIO as oiio\n"
-        "import sys\n"
-        "_READ_PROGRESS_WEIGHT = 0.85\n"
-        "path = Path(sys.argv[1])\n"
-        "meta_path = Path(sys.argv[2])\n"
-        "pixels_path = Path(sys.argv[3])\n"
-        "inp = oiio.ImageInput.open(str(path))\n"
-        "if inp is None:\n"
-        "    raise RuntimeError(f'Failed to open image: {path}. {oiio.geterror()}')\n"
-        "try:\n"
-        "    print('PROGRESS:0', flush=True)\n"
-        "    spec = inp.spec()\n"
-        "    width = int(spec.width)\n"
-        "    height = int(spec.height)\n"
-        "    channels = int(spec.nchannels)\n"
-        "    tile_width = int(spec.tile_width)\n"
-        "    tile_height = int(spec.tile_height)\n"
-        "    pixels_memmap = np.lib.format.open_memmap(pixels_path, mode='w+', dtype=np.float32, shape=(height, width, channels))\n"
-        "    if tile_width > 0 and tile_height > 0:\n"
-        "        y_step = max(tile_height, 1)\n"
-        "        for y_begin in range(0, height, y_step):\n"
-        "            y_end = min(y_begin + y_step, height)\n"
-        "            raw = inp.read_tiles(0, width, y_begin, y_end, 0, 1, 0, channels, oiio.FLOAT)\n"
-        "            if raw is None:\n"
-        "                raise RuntimeError(inp.geterror())\n"
-        "            chunk = np.asarray(raw, dtype=np.float32)\n"
-        "            if chunk.ndim == 1:\n"
-        "                chunk = chunk.reshape((y_end - y_begin, width, channels))\n"
-        "            pixels_memmap[y_begin:y_end, :, :] = chunk\n"
-        "            progress = int((y_end / height) * _READ_PROGRESS_WEIGHT * 100.0)\n"
-        "            print(f'PROGRESS:{progress}', flush=True)\n"
-        "    else:\n"
-        "        y_step = max(min(128, height), 1)\n"
-        "        for y_begin in range(0, height, y_step):\n"
-        "            y_end = min(y_begin + y_step, height)\n"
-        "            raw = inp.read_scanlines(y_begin, y_end, 0, 0, channels, oiio.FLOAT)\n"
-        "            if raw is None:\n"
-        "                raise RuntimeError(inp.geterror())\n"
-        "            chunk = np.asarray(raw, dtype=np.float32)\n"
-        "            if chunk.ndim == 1:\n"
-        "                chunk = chunk.reshape((y_end - y_begin, width, channels))\n"
-        "            pixels_memmap[y_begin:y_end, :, :] = chunk\n"
-        "            progress = int((y_end / height) * _READ_PROGRESS_WEIGHT * 100.0)\n"
-        "            print(f'PROGRESS:{progress}', flush=True)\n"
-        "    del pixels_memmap\n"
-        "    print('PROGRESS:88', flush=True)\n"
-        "    with meta_path.open('w', encoding='utf-8') as file:\n"
-        "        json.dump({'width': width, 'height': height, 'channels': channels}, file)\n"
-        "    print('PROGRESS:90', flush=True)\n"
-        "finally:\n"
-        "    inp.close()\n"
-    )
-
     with tempfile.TemporaryDirectory(prefix="imgvwr_loader_") as directory:
         work_dir = Path(directory)
         meta_path = work_dir / "meta.json"
@@ -255,8 +197,8 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
         process = subprocess.Popen(
             [
                 sys.executable,
-                "-c",
-                loader_script,
+                "-m",
+                "hdri_viewer.io.subprocess_loader",
                 str(path),
                 str(meta_path),
                 str(pixels_path),

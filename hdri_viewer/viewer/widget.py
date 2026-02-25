@@ -306,6 +306,23 @@ class HdriViewerWidget(QOpenGLWidget):
         self._camera.rotate_radians(yaw_delta, pitch_delta)
         self.update()
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent | None) -> None:
+        """Toggles fullscreen mode on left-button double click."""
+
+        if event is None or event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        window = self.window()
+        if window is None:
+            return
+
+        if window.isFullScreen():
+            window.showNormal()
+        else:
+            window.showFullScreen()
+
+        event.accept()
+
     def wheelEvent(self, event: QWheelEvent | None) -> None:
         """Adjusts FOV or exposure based on Ctrl modifier."""
 
@@ -336,6 +353,13 @@ class HdriViewerWidget(QOpenGLWidget):
             self._exposure_stops += 1.0
             self._renderer.set_exposure(self._exposure_stops)
             self.update()
+            return
+        if event.key() == Qt.Key.Key_Escape or event.key() == Qt.Key.Key_Q:
+            window = self.window()
+            if window is not None and window.isFullScreen():
+                window.showNormal()
+            elif window is not None:
+                window.close()
             return
 
         super().keyPressEvent(event)

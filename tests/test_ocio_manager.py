@@ -5,13 +5,30 @@ from pathlib import Path
 from hdri_viewer.color.ocio_manager import DisplayView, OcioManager
 
 
-def test_choose_default_view_prefers_filmic_terms() -> None:
+def test_choose_default_view_prefers_standard_srgb() -> None:
     views = [
+        DisplayView("Rec.1886", "Filmic"),
+        DisplayView("sRGB", "Standard"),
         DisplayView("sRGB", "Raw"),
-        DisplayView("Main", "ACES 1.0 SDR-video"),
     ]
     chosen = OcioManager._choose_default_view(views)
     assert chosen == views[1]
+
+
+def test_choose_default_view_falls_back_to_standard_then_srgb() -> None:
+    standard_only = [
+        DisplayView("Display P3", "AgX"),
+        DisplayView("Rec.1886", "Standard"),
+    ]
+    chosen_standard = OcioManager._choose_default_view(standard_only)
+    assert chosen_standard == standard_only[1]
+
+    srgb_only = [
+        DisplayView("Display P3", "AgX"),
+        DisplayView("sRGB", "Filmic"),
+    ]
+    chosen_srgb = OcioManager._choose_default_view(srgb_only)
+    assert chosen_srgb == srgb_only[1]
 
 
 def test_custom_config_path_has_priority(tmp_path: Path) -> None:

@@ -25,11 +25,9 @@ def _preload_native_modules() -> None:
     which can cause unstable startup behavior on some Windows environments.
     """
 
-    ocio_enabled = os.environ.get("IMGVWR_DISABLE_OCIO", "0") != "1"
-    if os.name == "nt" and os.environ.get("IMGVWR_ENABLE_OCIO", "0") != "1":
-        ocio_enabled = False
+    ocio_preload_enabled = os.environ.get("IMGVWR_PRELOAD_OCIO", "0") == "1"
 
-    if ocio_enabled:
+    if ocio_preload_enabled and os.environ.get("IMGVWR_DISABLE_OCIO", "0") != "1":
         try:
             import PyOpenColorIO  # noqa: F401
         except ImportError:

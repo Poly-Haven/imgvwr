@@ -7,7 +7,7 @@ import math
 
 import numpy as np
 
-from hdri_viewer.color.ocio_manager import OcioShader
+from hdri_viewer.color.ocio_manager import OcioShader, OcioTexture2D, OcioTexture3D
 from hdri_viewer.io.image_loader import ImageData
 from hdri_viewer.viewer.camera import CameraState
 
@@ -36,9 +36,10 @@ class PanoramaRenderer:
         self._fragment_template: str = ""
         self._vertex_source: str = ""
         self._ocio_shader = OcioShader(shader_text="", function_name="")
-        self._shader_cache_key: tuple[str, str] | None = None
+        self._shader_cache_key: tuple[str, str, str] | None = None
         self._projection_2d_enabled = False
         self._image_aspect = 1.0
+        self._ocio_lut_textures: list[tuple[Any, int]] = []
 
     @property
     def has_texture(self) -> bool:
@@ -146,6 +147,9 @@ class PanoramaRenderer:
         self._set_uniform_if_changed("u_projection_mode", float(1.0 if self._projection_2d_enabled else 0.0))
         self._set_uniform_if_changed("u_image_aspect", float(self._image_aspect))
 
+        for texture, binding_index in self._ocio_lut_textures:
+            texture.use(location=binding_index)
+
         self._texture.use(location=0)
         self._vao.render(mode=self._ctx.TRIANGLE_STRIP)
 
@@ -174,6 +178,7 @@ class PanoramaRenderer:
             return
 
         key = (self._ocio_shader.shader_text, self._ocio_shader.function_name)
+        key = (self._ocio_shader.shader_text, self._ocio_shader.function_name, self._ocio_shader.signature)
         if not force and self._shader_cache_key == key:
             return
 
@@ -191,10 +196,95 @@ class PanoramaRenderer:
         if self._program is not None:
             self._program.release()
 
+        self._release_ocio_lut_textures()
+
         self._program = self._ctx.program(
             vertex_shader=self._vertex_source,
             fragment_shader=fragment_source,
         )
+
+        self._bind_ocio_lut_textures()
+
         self._vao = self._ctx.vertex_array(self._program, [(self._vbo, "2f", "in_position")])
         self._uniform_cache.clear()
         self._shader_cache_key = key
+
+    def _release_ocio_lut_textures(self) -> None:
+        """Releases OCIO-generated LUT textures bound to the current program."""
+
+        for texture, _ in self._ocio_lut_textures:
+            try:
+                texture.release()
+            except Exception:
+                pass
+        self._ocio_lut_textures.clear()
+
+    def _bind_ocio_lut_textures(self) -> None:
+        """Uploads OCIO LUT textures and binds corresponding sampler uniforms."""
+
+        if self._ctx is None or self._program is None:
+            return
+
+        for descriptor in self._ocio_shader.textures_2d:
+            self._bind_ocio_2d_texture(descriptor)
+
+        for descriptor in self._ocio_shader.textures_3d:
+            self._bind_ocio_3d_texture(descriptor)
+
+    def _bind_ocio_2d_texture(self, descriptor: OcioTexture2D) -> None:
+        """Uploads one OCIO 2D LUT texture and links it to a sampler uniform."""
+
+        if self._ctx is None or self._program is None:
+            return
+
+        texture = self._ctx.texture(
+            size=(descriptor.width, descriptor.height),
+            components=descriptor.components,
+            data=descriptor.values,
+            dtype="f4",
+        )
+
+        interpolation = descriptor.interpolation.upper()
+        if "NEAREST" in interpolation:
+            texture.filter = (self._ctx.NEAREST, self._ctx.NEAREST)
+        else:
+            texture.filter = (self._ctx.LINEAR, self._ctx.LINEAR)
+        texture.repeat_x = False
+        if hasattr(texture, "repeat_y"):
+            texture.repeat_y = False
+        texture.use(location=descriptor.binding_index)
+        self._ocio_lut_textures.append((texture, descriptor.binding_index))
+
+        try:
+            self._program[descriptor.sampler_name].value = descriptor.binding_index
+        except KeyError:
+            pass
+
+    def _bind_ocio_3d_texture(self, descriptor: OcioTexture3D) -> None:
+        """Uploads one OCIO 3D LUT texture and links it to a sampler uniform."""
+
+        if self._ctx is None or self._program is None:
+            return
+
+        texture = self._ctx.texture3d(
+            size=(descriptor.edge_len, descriptor.edge_len, descriptor.edge_len),
+            components=descriptor.components,
+            data=descriptor.values,
+            dtype="f4",
+        )
+
+        interpolation = descriptor.interpolation.upper()
+        if "NEAREST" in interpolation:
+            texture.filter = (self._ctx.NEAREST, self._ctx.NEAREST)
+        else:
+            texture.filter = (self._ctx.LINEAR, self._ctx.LINEAR)
+        texture.repeat_x = False
+        texture.repeat_y = False
+        texture.repeat_z = False
+        texture.use(location=descriptor.binding_index)
+        self._ocio_lut_textures.append((texture, descriptor.binding_index))
+
+        try:
+            self._program[descriptor.sampler_name].value = descriptor.binding_index
+        except KeyError:
+            pass

@@ -88,7 +88,7 @@ class HdriViewerWidget(QOpenGLWidget):
         self._last_mouse_pos = QPoint()
         self._image_path: Path | None = None
         self._pending_initial_path: Path | None = None
-        self._exposure_stops = 2.0
+        self._exposure_stops = 0.0
         self._file_info = FileInfo()
         self._active_loader_signals: _ImageLoadSignals | None = None
 

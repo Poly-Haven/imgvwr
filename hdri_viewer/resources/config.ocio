@@ -1,0 +1,35 @@
+ocio_profile_version: 2
+
+strictparsing: true
+
+roles:
+  scene_linear: Linear
+
+file_rules:
+  - !<Rule> {name: Default, colorspace: Linear}
+
+displays:
+  sRGB:
+    - !<View> {name: AGX, colorspace: sRGB}
+    - !<View> {name: Raw, colorspace: Linear}
+
+active_displays: [sRGB]
+active_views: [AGX, Raw]
+
+colorspaces:
+  - !<ColorSpace>
+    name: Linear
+    family: Utility
+    bitdepth: 32f
+    isdata: false
+    allocation: lg2
+    to_scene_reference: !<MatrixTransform> {matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: sRGB
+    family: Display
+    bitdepth: 32f
+    isdata: false
+    from_scene_reference: !<ExponentWithLinearTransform> {gamma: [2.2, 2.2, 2.2, 1.0], offset: [0, 0, 0, 0]}
+
+looks: []

@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imgvwr"
+version = "0.1.0"
+description = "Minimal GPU-accelerated HDRI viewer built with PyQt6, ModernGL, OpenImageIO, and OpenColorIO."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "imgvwr contributors" }]
+dependencies = [
+  "PyQt6>=6.7",
+  "moderngl>=5.10",
+  "numpy>=1.26",
+  "OpenImageIO>=2.5",
+  "opencolorio>=2.3",
+]
+
+[project.optional-dependencies]
+dev = ["black>=25.0", "mypy>=1.11", "pytest>=8.0"]
+
+[project.scripts]
+imgvwr = "hdri_viewer.main:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hdri_viewer*"]
+
+[tool.setuptools.package-data]
+hdri_viewer = [
+  "resources/*.ocio",
+  "resources/ocio_configs/*.ocio",
+  "viewer/shaders/*.glsl",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+show_error_codes = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-q"
+testpaths = ["tests"]

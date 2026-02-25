@@ -281,13 +281,13 @@ class HdriViewerWidget(QOpenGLWidget):
     def mousePressEvent(self, event: QMouseEvent | None) -> None:
         """Stores start position for drag-based camera rotation."""
 
-        if event is not None and event.button() == Qt.MouseButton.LeftButton:
+        if event is not None and event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             self._last_mouse_pos = event.position().toPoint()
 
     def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
-        """Rotates camera while dragging with left mouse button."""
+        """Rotates/pans camera while dragging with left or middle mouse button."""
 
-        if event is None or not event.buttons() & Qt.MouseButton.LeftButton:
+        if event is None or not (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.MiddleButton)):
             return
 
         pos = event.position().toPoint()

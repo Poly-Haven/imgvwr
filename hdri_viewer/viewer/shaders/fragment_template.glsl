@@ -37,7 +37,7 @@ vec2 direction_to_equirect_uv(vec3 dir) {
     float longitude = atan(dir.z, dir.x);
     float latitude = asin(clamp(dir.y, -1.0, 1.0));
 
-    float u = (longitude / (2.0 * 3.14159265358979323846)) + 0.5;
+    float u = 1.0 - ((longitude / (2.0 * 3.14159265358979323846)) + 0.5);
     float v = 0.5 - (latitude / 3.14159265358979323846);
     return vec2(u, v);
 }

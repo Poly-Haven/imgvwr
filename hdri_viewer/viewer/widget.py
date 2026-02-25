@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 from pathlib import Path
 from typing import Callable
@@ -197,7 +198,18 @@ class HdriViewerWidget(QOpenGLWidget):
         delta = pos - self._last_mouse_pos
         self._last_mouse_pos = pos
 
-        self._camera.rotate(delta.x(), -delta.y())
+        viewport_width = max(self.width(), 1)
+        viewport_height = max(self.height(), 1)
+        tan_half_fov = math.tan(math.radians(self._camera.state.fov_degrees) * 0.5)
+        aspect = viewport_width / viewport_height
+
+        yaw_radians_per_pixel = (2.0 * aspect * tan_half_fov) / viewport_width
+        pitch_radians_per_pixel = (2.0 * tan_half_fov) / viewport_height
+
+        yaw_delta = float(delta.x()) * yaw_radians_per_pixel
+        pitch_delta = float(delta.y()) * pitch_radians_per_pixel
+
+        self._camera.rotate_radians(yaw_delta, pitch_delta)
         self.update()
 
     def wheelEvent(self, event: QWheelEvent | None) -> None:
@@ -206,12 +218,13 @@ class HdriViewerWidget(QOpenGLWidget):
         if event is None:
             return
 
-        steps = event.angleDelta().y() / 120.0
+        steps = event.angleDelta().y() / 20.0
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self._exposure_stops += steps * 0.1
             self._renderer.set_exposure(self._exposure_stops)
         else:
-            self._camera.adjust_fov(-steps * 2.0)
+            fov_scale = max(0.25, self._camera.state.fov_degrees / 90.0)
+            self._camera.adjust_fov(-steps * 2.0 * fov_scale)
         self.update()
 
     def keyPressEvent(self, event: QKeyEvent | None) -> None:

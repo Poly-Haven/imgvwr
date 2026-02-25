@@ -18,8 +18,8 @@ class CameraController:
 
     _MIN_PITCH_RAD = math.radians(-89.0)
     _MAX_PITCH_RAD = math.radians(89.0)
-    _MIN_FOV_DEG = 20.0
-    _MAX_FOV_DEG = 120.0
+    _MIN_FOV_DEG = 5.0
+    _MAX_FOV_DEG = 140.0
 
     def __init__(self, state: CameraState | None = None) -> None:
         self._state = state if state is not None else CameraState()
@@ -33,8 +33,13 @@ class CameraController:
     def rotate(self, delta_x: float, delta_y: float, sensitivity: float = 0.005) -> None:
         """Updates yaw and pitch from pointer drag deltas in pixels."""
 
-        self._state.yaw_radians += delta_x * sensitivity
-        next_pitch = self._state.pitch_radians + delta_y * sensitivity
+        self.rotate_radians(delta_x * sensitivity, delta_y * sensitivity)
+
+    def rotate_radians(self, delta_yaw: float, delta_pitch: float) -> None:
+        """Updates yaw/pitch with direct radian deltas."""
+
+        self._state.yaw_radians += delta_yaw
+        next_pitch = self._state.pitch_radians + delta_pitch
         self._state.pitch_radians = max(self._MIN_PITCH_RAD, min(self._MAX_PITCH_RAD, next_pitch))
 
     def adjust_fov(self, delta_degrees: float) -> None:

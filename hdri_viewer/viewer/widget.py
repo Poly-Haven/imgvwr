@@ -6,20 +6,23 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QPoint, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal, QObject
+from PyQt6.QtCore import QPoint, QRectF, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import (
     QAction,
+    QColor,
     QContextMenuEvent,
     QDragEnterEvent,
     QDropEvent,
     QKeyEvent,
     QMouseEvent,
+    QPaintEvent,
+    QPainter,
     QResizeEvent,
     QShowEvent,
     QWheelEvent,
 )
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-from PyQt6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMenu
+from PyQt6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMenu, QWidget
 
 from hdri_viewer.color.ocio_manager import DisplayView, OcioManager
 from hdri_viewer.io.image_loader import ImageData, is_supported_image_path, load_image
@@ -31,6 +34,7 @@ class _ImageLoadSignals(QObject):
     """Qt signal bridge used by background image loading tasks."""
 
     loaded = pyqtSignal(object)
+    progress = pyqtSignal(float)
     failed = pyqtSignal(str)
 
 
@@ -46,11 +50,80 @@ class _ImageLoadTask(QRunnable):
         """Loads image and emits completion or failure signal."""
 
         try:
-            image = load_image(self._path)
+            image = load_image(self._path, progress_callback=self._emit_progress)
         except Exception as error:  # pragma: no cover - tested via signal path
             self._signals.failed.emit(str(error))
             return
         self._signals.loaded.emit(image)
+
+    def _emit_progress(self, value: float) -> None:
+        """Relays loading progress from loader thread to UI signal."""
+
+        self._signals.progress.emit(value)
+
+
+class _LoadingProgressBar(QWidget):
+    """Minimal determinate loading bar with rounded fill."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._progress = 0.0
+
+    def start(self) -> None:
+        """Resets bar to start state."""
+
+        self.set_progress(0.0)
+
+    def stop(self) -> None:
+        """Resets bar after loading is complete."""
+
+        self._progress = 0.0
+        self.update()
+
+    def set_progress(self, value: float) -> None:
+        """Sets progress value in the inclusive range [0, 1]."""
+
+        bounded = max(0.0, min(1.0, value))
+        if abs(self._progress - bounded) < 1e-6:
+            return
+        self._progress = bounded
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent | None) -> None:
+        """Renders rounded border and moving rounded white capsule."""
+
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        outer = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        if outer.width() <= 0.0 or outer.height() <= 0.0:
+            painter.end()
+            return
+
+        radius = outer.height() * 0.5
+        painter.setPen(QColor("white"))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(outer, radius, radius)
+
+        inner = outer.adjusted(2, 2, -2, -2)
+        if inner.width() <= 0.0 or inner.height() <= 0.0:
+            painter.end()
+            return
+
+        chunk_width = inner.width() * self._progress
+        clipped_chunk = QRectF(inner.left(), inner.top(), chunk_width, inner.height())
+
+        if clipped_chunk.width() > 0.0 and clipped_chunk.height() > 0.0:
+            chunk_radius = clipped_chunk.height() * 0.5
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("white"))
+            painter.drawRoundedRect(clipped_chunk, chunk_radius, chunk_radius)
+
+        painter.end()
 
 
 @dataclass(slots=True)
@@ -80,7 +153,7 @@ class HdriViewerWidget(QOpenGLWidget):
         )
 
         self._thread_pool = QThreadPool.globalInstance()
-        default_threaded_loading = "0" if os.name == "nt" else "1"
+        default_threaded_loading = "1"
         self._threaded_loading_enabled = os.environ.get("IMGVWR_THREADED_LOAD", default_threaded_loading) == "1"
         self._gl_initialized = False
         self._initial_open_scheduled = False
@@ -96,6 +169,21 @@ class HdriViewerWidget(QOpenGLWidget):
         self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._overlay_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._overlay_label.setStyleSheet("color: white; background: transparent;")
+
+        self._loading_overlay = QWidget(self)
+        self._loading_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._loading_overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._loading_overlay.setStyleSheet("background: transparent;")
+
+        self._loading_status_label = QLabel("", self._loading_overlay)
+        self._loading_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_status_label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._loading_status_label.setStyleSheet("color: white; background: transparent;")
+
+        self._loading_progress_bar = _LoadingProgressBar(self._loading_overlay)
+        self._loading_overlay.setVisible(False)
+
+        self._update_overlay_geometries()
         self._set_overlay_text("Right-click to open a file")
 
     @property
@@ -141,7 +229,7 @@ class HdriViewerWidget(QOpenGLWidget):
         """Keeps overlay label in sync with widget geometry."""
 
         super().resizeEvent(event)
-        self._overlay_label.setGeometry(self.rect())
+        self._update_overlay_geometries()
 
     def contextMenuEvent(self, event: QContextMenuEvent | None) -> None:
         """Shows right-click context menu with file and color transform actions."""
@@ -286,7 +374,8 @@ class HdriViewerWidget(QOpenGLWidget):
             return
 
         self._loading = True
-        self._set_overlay_text("Loading…")
+        self._set_overlay_text("")
+        self._set_loading_overlay("Loading…", True)
         self.update()
 
         if not self._threaded_loading_enabled:
@@ -295,6 +384,7 @@ class HdriViewerWidget(QOpenGLWidget):
 
         signals = _ImageLoadSignals()
         signals.loaded.connect(self._on_image_loaded)
+        signals.progress.connect(self._on_image_load_progress)
         signals.failed.connect(self._on_image_load_failed)
         self._active_loader_signals = signals
 
@@ -308,7 +398,7 @@ class HdriViewerWidget(QOpenGLWidget):
         """Loads image on UI thread as a safe fallback for unstable runtimes."""
 
         try:
-            image = load_image(path)
+            image = load_image(path, progress_callback=self._on_image_load_progress)
         except Exception as error:
             self._on_image_load_failed(str(error))
             return
@@ -368,6 +458,7 @@ class HdriViewerWidget(QOpenGLWidget):
 
         self._loading = False
         self._active_loader_signals = None
+        self._set_loading_overlay("", False)
         self._set_overlay_text("")
         parent_window = self.window()
         if parent_window is not None:
@@ -379,8 +470,16 @@ class HdriViewerWidget(QOpenGLWidget):
 
         self._loading = False
         self._active_loader_signals = None
+        self._set_loading_overlay("", False)
         self._set_overlay_text(f"Load failed: {message}")
         self.update()
+
+    def _on_image_load_progress(self, progress_value: float) -> None:
+        """Updates loading overlay according to actual load progress."""
+
+        progress_percent = int(round(max(0.0, min(1.0, progress_value)) * 100.0))
+        self._set_loading_overlay(f"Loading… {progress_percent}%", True)
+        self._loading_progress_bar.set_progress(progress_value)
 
     def _schedule_initial_open_if_ready(self) -> None:
         """Queues initial file opening after GL initialization and first show."""
@@ -400,6 +499,30 @@ class HdriViewerWidget(QOpenGLWidget):
 
         self._overlay_label.setText(text)
         self._overlay_label.setVisible(bool(text))
+
+    def _set_loading_overlay(self, status_text: str, visible: bool) -> None:
+        """Shows or hides centered loading status and progress bar."""
+
+        was_visible = self._loading_overlay.isVisible()
+        self._loading_status_label.setText(status_text)
+        self._loading_overlay.setVisible(visible)
+        if visible and not was_visible:
+            self._loading_progress_bar.start()
+        elif not visible and was_visible:
+            self._loading_progress_bar.stop()
+
+    def _update_overlay_geometries(self) -> None:
+        """Updates overlay widget positions relative to the current viewport."""
+
+        self._overlay_label.setGeometry(self.rect())
+
+        overlay_width = 260
+        overlay_height = 46
+        x = max((self.width() - overlay_width) // 2, 0)
+        y = max((self.height() - overlay_height) // 2, 0)
+        self._loading_overlay.setGeometry(x, y, overlay_width, overlay_height)
+        self._loading_status_label.setGeometry(0, 0, overlay_width, 20)
+        self._loading_progress_bar.setGeometry(0, 28, overlay_width, 12)
 
 
 class ViewerWindow(QMainWindow):

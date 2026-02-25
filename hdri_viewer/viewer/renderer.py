@@ -37,12 +37,20 @@ class PanoramaRenderer:
         self._vertex_source: str = ""
         self._ocio_shader = OcioShader(shader_text="", function_name="")
         self._shader_cache_key: tuple[str, str] | None = None
+        self._projection_2d_enabled = False
+        self._image_aspect = 1.0
 
     @property
     def has_texture(self) -> bool:
         """Returns whether an image texture is currently available."""
 
         return self._texture is not None
+
+    @property
+    def image_aspect(self) -> float:
+        """Returns currently loaded image aspect ratio (width / height)."""
+
+        return self._image_aspect
 
     def initialize(self) -> None:
         """Initializes ModernGL resources from the current OpenGL context."""
@@ -73,6 +81,11 @@ class PanoramaRenderer:
 
         self._state.exposure_stops = exposure_stops
 
+    def set_projection_2d_enabled(self, enabled: bool) -> None:
+        """Sets whether rendering uses 2D UV pan/zoom instead of equirectangular projection."""
+
+        self._projection_2d_enabled = enabled
+
     def set_viewport(self, width: int, height: int) -> None:
         """Updates viewport dimensions for rendering and aspect ratio calculations."""
 
@@ -102,6 +115,7 @@ class PanoramaRenderer:
         texture.filter = (self._ctx.LINEAR, self._ctx.LINEAR)
         texture.use(location=0)
         self._texture = texture
+        self._image_aspect = float(image_data.width) / max(float(image_data.height), 1.0)
 
     def render(self, camera: CameraState) -> None:
         """Renders the panorama using current camera, exposure, and OCIO transform."""
@@ -129,6 +143,8 @@ class PanoramaRenderer:
         self._set_uniform_if_changed("u_yaw", float(camera.yaw_radians))
         self._set_uniform_if_changed("u_pitch", float(camera.pitch_radians))
         self._set_uniform_if_changed("u_exposure", float(self._state.exposure_stops))
+        self._set_uniform_if_changed("u_projection_mode", float(1.0 if self._projection_2d_enabled else 0.0))
+        self._set_uniform_if_changed("u_image_aspect", float(self._image_aspect))
 
         self._texture.use(location=0)
         self._vao.render(mode=self._ctx.TRIANGLE_STRIP)

@@ -166,6 +166,7 @@ class HdriViewerWidget(QOpenGLWidget):
         self._active_loader_signals: _ImageLoadSignals | None = None
         self._load_progress_value = 0.0
         self._awaiting_first_present = False
+        self._projection_2d_enabled = False
 
         self._overlay_label = QLabel("", self)
         self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -200,6 +201,7 @@ class HdriViewerWidget(QOpenGLWidget):
         self._renderer.initialize()
         self._gl_initialized = True
         self._renderer.set_exposure(self._exposure_stops)
+        self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
         self._ocio_manager.reload()
         self._renderer.update_ocio_shader(self._ocio_manager.build_gpu_shader())
         self._schedule_initial_open_if_ready()
@@ -294,14 +296,28 @@ class HdriViewerWidget(QOpenGLWidget):
 
         viewport_width = max(self.width(), 1)
         viewport_height = max(self.height(), 1)
-        tan_half_fov = math.tan(math.radians(self._camera.state.fov_degrees) * 0.5)
-        aspect = viewport_width / viewport_height
+        if self._projection_2d_enabled:
+            viewport_aspect = viewport_width / viewport_height
+            image_aspect = max(self._renderer.image_aspect, 1e-6)
+            inv_zoom = max(math.tan(math.radians(self._camera.state.fov_degrees) * 0.5), 0.02)
 
-        yaw_radians_per_pixel = (2.0 * aspect * tan_half_fov) / viewport_width
-        pitch_radians_per_pixel = (2.0 * tan_half_fov) / viewport_height
+            scale_x = inv_zoom * (viewport_aspect / image_aspect)
+            scale_y = inv_zoom
 
-        yaw_delta = float(delta.x()) * yaw_radians_per_pixel
-        pitch_delta = float(delta.y()) * pitch_radians_per_pixel
+            pan_u_delta = -(float(delta.x()) * scale_x) / viewport_width
+            pan_v_delta = (float(delta.y()) * scale_y) / viewport_height
+
+            yaw_delta = pan_u_delta * (2.0 * math.pi)
+            pitch_delta = pan_v_delta * math.pi
+        else:
+            tan_half_fov = math.tan(math.radians(self._camera.state.fov_degrees) * 0.5)
+            aspect = viewport_width / viewport_height
+
+            yaw_radians_per_pixel = (2.0 * aspect * tan_half_fov) / viewport_width
+            pitch_radians_per_pixel = (2.0 * tan_half_fov) / viewport_height
+
+            yaw_delta = float(delta.x()) * yaw_radians_per_pixel
+            pitch_delta = float(delta.y()) * pitch_radians_per_pixel
 
         self._camera.rotate_radians(yaw_delta, pitch_delta)
         self.update()
@@ -360,6 +376,11 @@ class HdriViewerWidget(QOpenGLWidget):
                 window.showNormal()
             elif window is not None:
                 window.close()
+            return
+        if event.key() == Qt.Key.Key_P:
+            self._projection_2d_enabled = not self._projection_2d_enabled
+            self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
+            self.update()
             return
 
         super().keyPressEvent(event)

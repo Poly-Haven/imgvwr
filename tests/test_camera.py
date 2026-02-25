@@ -14,6 +14,6 @@ def test_pitch_is_clamped() -> None:
 def test_fov_is_clamped() -> None:
     camera = CameraController()
     camera.adjust_fov(1000.0)
-    assert camera.state.fov_degrees == 120.0
+    assert camera.state.fov_degrees == 140.0
     camera.adjust_fov(-5000.0)
-    assert camera.state.fov_degrees == 20.0
+    assert camera.state.fov_degrees == 5.0

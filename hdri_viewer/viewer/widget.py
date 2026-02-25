@@ -378,12 +378,50 @@ class HdriViewerWidget(QOpenGLWidget):
                 window.close()
             return
         if event.key() == Qt.Key.Key_P:
-            self._projection_2d_enabled = not self._projection_2d_enabled
+            center_u, center_v = self._camera_center_uv(self._projection_2d_enabled)
+            next_projection_2d_enabled = not self._projection_2d_enabled
+            self._set_camera_from_center_uv(center_u, center_v, next_projection_2d_enabled)
+
+            self._projection_2d_enabled = next_projection_2d_enabled
             self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
             self.update()
             return
 
         super().keyPressEvent(event)
+
+    def _camera_center_uv(self, projection_2d_enabled: bool) -> tuple[float, float]:
+        """Returns the current center pixel as equirect UV for the active projection mode."""
+
+        yaw = self._camera.state.yaw_radians
+        pitch = self._camera.state.pitch_radians
+
+        if projection_2d_enabled:
+            center_u = (0.5 + (yaw / (2.0 * math.pi))) % 1.0
+            center_v = 0.5 - (pitch / math.pi)
+        else:
+            center_u = (0.25 - (yaw / (2.0 * math.pi))) % 1.0
+            center_v = 0.5 - (pitch / math.pi)
+
+        return center_u, max(0.0, min(1.0, center_v))
+
+    def _set_camera_from_center_uv(self, center_u: float, center_v: float, projection_2d_enabled: bool) -> None:
+        """Sets camera yaw/pitch so the specified UV remains centered for the target projection mode."""
+
+        if projection_2d_enabled:
+            base_yaw = (center_u - 0.5) * (2.0 * math.pi)
+        else:
+            base_yaw = (0.25 - center_u) * (2.0 * math.pi)
+        target_pitch = (0.5 - center_v) * math.pi
+
+        current_yaw = self._camera.state.yaw_radians
+        while base_yaw - current_yaw > math.pi:
+            base_yaw -= 2.0 * math.pi
+        while base_yaw - current_yaw < -math.pi:
+            base_yaw += 2.0 * math.pi
+
+        pitch_limit = math.radians(89.0)
+        self._camera.state.yaw_radians = base_yaw
+        self._camera.state.pitch_radians = max(-pitch_limit, min(pitch_limit, target_pitch))
 
     def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
         """Accepts drag operations for supported image files."""

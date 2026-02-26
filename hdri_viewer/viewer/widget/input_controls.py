@@ -101,8 +101,9 @@ class InputControlsMixin:
             aspect = viewport_width / viewport_height
 
             if self._fisheye_enabled:
-                yaw_radians_per_pixel = (2.0 * aspect * half_fov_radians) / viewport_width
-                pitch_radians_per_pixel = (2.0 * half_fov_radians) / viewport_height
+                max_lens_radius = max(math.sqrt((aspect * aspect) + 1.0), 1e-6)
+                yaw_radians_per_pixel = (2.0 * aspect * half_fov_radians) / (viewport_width * max_lens_radius)
+                pitch_radians_per_pixel = (2.0 * half_fov_radians) / (viewport_height * max_lens_radius)
             else:
                 tan_half_fov = math.tan(half_fov_radians)
                 yaw_radians_per_pixel = (2.0 * aspect * tan_half_fov) / viewport_width

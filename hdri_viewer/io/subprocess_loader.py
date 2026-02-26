@@ -30,13 +30,18 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
         bits_per_sample = _infer_bits_per_sample(spec)
         color_space_hint = _infer_color_space_hint(spec)
         icc_profile_bytes = _extract_icc_profile_bytes(spec)
+        transfer_kind = _guess_transfer_kind(bits_per_sample=bits_per_sample, color_space_hint=color_space_hint)
+        is_fast_encoded_8bit = transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
         tile_width = int(spec.tile_width)
         tile_height = int(spec.tile_height)
+
+        output_dtype = np.uint8 if is_fast_encoded_8bit else np.float32
+        read_format = oiio.UINT8 if is_fast_encoded_8bit else oiio.FLOAT
 
         rgb_pixels = np.lib.format.open_memmap(
             pixels_path,
             mode="w+",
-            dtype=np.float32,
+            dtype=output_dtype,
             shape=(height, width, 3),
         )
 
@@ -44,11 +49,11 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
             y_step = max(tile_height, 1)
             for y_begin in range(0, height, y_step):
                 y_end = min(y_begin + y_step, height)
-                pixels_raw = input_file.read_tiles(0, width, y_begin, y_end, 0, 1, 0, channels, oiio.FLOAT)
+                pixels_raw = input_file.read_tiles(0, width, y_begin, y_end, 0, 1, 0, channels, read_format)
                 if pixels_raw is None:
                     raise RuntimeError(input_file.geterror())
 
-                chunk = np.asarray(pixels_raw, dtype=np.float32)
+                chunk = np.asarray(pixels_raw, dtype=output_dtype)
                 if chunk.ndim == 1:
                     chunk = chunk.reshape((y_end - y_begin, width, channels))
 
@@ -67,11 +72,11 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
             y_step = max(min(1024, height), 1)
             for y_begin in range(0, height, y_step):
                 y_end = min(y_begin + y_step, height)
-                pixels_raw = input_file.read_scanlines(y_begin, y_end, 0, 0, channels, oiio.FLOAT)
+                pixels_raw = input_file.read_scanlines(y_begin, y_end, 0, 0, channels, read_format)
                 if pixels_raw is None:
                     raise RuntimeError(input_file.geterror())
 
-                chunk = np.asarray(pixels_raw, dtype=np.float32)
+                chunk = np.asarray(pixels_raw, dtype=output_dtype)
                 if chunk.ndim == 1:
                     chunk = chunk.reshape((y_end - y_begin, width, channels))
 
@@ -95,6 +100,7 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
                     "width": width,
                     "height": height,
                     "channels": 3,
+                    "dtype_name": "uint8" if is_fast_encoded_8bit else "float32",
                     "bits_per_sample": bits_per_sample,
                     "color_space_hint": color_space_hint,
                     "icc_profile_b64": base64.b64encode(icc_profile_bytes).decode("ascii") if icc_profile_bytes else "",
@@ -174,6 +180,21 @@ def _extract_icc_profile_bytes(spec: oiio.ImageSpec) -> bytes | None:
         data = np.asarray(payload, dtype=np.uint8).tobytes()
         return data or None
     return None
+
+
+def _guess_transfer_kind(*, bits_per_sample: int | None, color_space_hint: str | None) -> str:
+    if color_space_hint is not None:
+        hint = color_space_hint.strip().lower()
+        if hint:
+            if any(token in hint for token in ("srgb", "rec709", "gamma", "adobe", "display p3", "p3")):
+                return "encoded"
+            if any(token in hint for token in ("scene_linear", "linear", "raw", "acescg", "non-color")):
+                return "linear"
+
+    if bits_per_sample is not None and bits_per_sample <= 8:
+        return "encoded"
+
+    return "linear"
 
 
 def main() -> int:

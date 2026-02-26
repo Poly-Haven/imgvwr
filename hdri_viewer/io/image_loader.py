@@ -29,6 +29,7 @@ class ImageData:
     channels: int
     dtype_name: str
     pixels: np.ndarray
+    input_is_encoded_srgb: bool = False
 
 
 def is_supported_image_path(path: Path) -> bool:
@@ -78,6 +79,11 @@ def _normalize_rgb_channels_with_progress(
 def load_image(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData:
     """Loads an image as float32 scene-linear RGB using metadata-guided heuristics."""
 
+    if _should_use_encoded_fast_path(path):
+        fast_encoded = _load_encoded_image_fast(path, progress_callback)
+        if fast_encoded is not None:
+            return fast_encoded
+
     use_subprocess_loader = os.environ.get("IMGVWR_USE_SUBPROCESS_LOADER", "1") == "1"
     if os.name == "nt" and use_subprocess_loader:
         return _load_image_subprocess(path, progress_callback)
@@ -109,17 +115,43 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
         bits_per_sample = _infer_bits_per_sample(spec)
         color_space_hint = _infer_color_space_hint(spec)
         icc_profile_bytes = _extract_icc_profile_bytes(spec)
+        transfer_kind = _guess_transfer_kind(bits_per_sample=bits_per_sample, color_space_hint=color_space_hint)
+        is_fast_encoded_8bit = transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
         _emit_progress(progress_callback, 0.05)
-        pixels_raw = input_file.read_image(oiio_module.FLOAT)
+
+        read_format = oiio_module.UINT8 if is_fast_encoded_8bit else oiio_module.FLOAT
+        pixels_raw = input_file.read_image(read_format)
         if pixels_raw is None:
             error_text = input_file.geterror()
             raise RuntimeError(f"Failed to read image data: {error_text}")
 
-        pixels = np.asarray(pixels_raw, dtype=np.float32)
+        target_dtype = np.uint8 if is_fast_encoded_8bit else np.float32
+        pixels = np.asarray(pixels_raw, dtype=target_dtype)
         if pixels.ndim == 1:
             pixels = pixels.reshape((height, width, channels))
 
         _emit_progress(progress_callback, _READ_PROGRESS_WEIGHT)
+
+        if is_fast_encoded_8bit:
+            rgb_pixels = np.ascontiguousarray(
+                _normalize_rgb_channels_with_progress(pixels, progress_callback, 0.90, 0.99),
+                dtype=np.uint8,
+            )
+            if _should_apply_icc_transform(color_space_hint):
+                icc_converted_u8 = _apply_icc_profile_to_srgb_u8(rgb_pixels, icc_profile_bytes)
+                if icc_converted_u8 is not None:
+                    rgb_pixels = icc_converted_u8
+
+            _emit_progress(progress_callback, 1.0)
+            return ImageData(
+                source_path=path,
+                width=width,
+                height=height,
+                channels=channels,
+                dtype_name="uint8",
+                pixels=rgb_pixels,
+                input_is_encoded_srgb=True,
+            )
 
         rgb_pixels = np.ascontiguousarray(
             _normalize_rgb_channels_with_progress(pixels, progress_callback, 0.90, 0.99),
@@ -140,6 +172,7 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
             channels=channels,
             dtype_name="float32",
             pixels=rgb_pixels,
+            input_is_encoded_srgb=False,
         )
     finally:
         input_file.close()
@@ -196,13 +229,33 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
         _emit_progress(progress_callback, 0.92)
         metadata = json.loads(meta_path.read_text(encoding="utf-8"))
         _emit_progress(progress_callback, 0.94)
-        rgb_pixels = np.asarray(np.load(pixels_path), dtype=np.float32)
-        rgb_pixels = _maybe_decode_to_scene_linear(
-            rgb_pixels,
-            bits_per_sample=_coerce_optional_int(metadata.get("bits_per_sample")),
-            color_space_hint=_coerce_optional_str(metadata.get("color_space_hint")),
-            icc_profile_bytes=_decode_optional_base64(metadata.get("icc_profile_b64")),
-        )
+        bits_per_sample = _coerce_optional_int(metadata.get("bits_per_sample"))
+        color_space_hint = _coerce_optional_str(metadata.get("color_space_hint"))
+        transfer_kind = _guess_transfer_kind(bits_per_sample=bits_per_sample, color_space_hint=color_space_hint)
+        is_fast_encoded_8bit = transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
+
+        if is_fast_encoded_8bit:
+            rgb_pixels = np.asarray(np.load(pixels_path), dtype=np.uint8)
+            if _should_apply_icc_transform(color_space_hint):
+                icc_converted_u8 = _apply_icc_profile_to_srgb_u8(
+                    rgb_pixels,
+                    _decode_optional_base64(metadata.get("icc_profile_b64")),
+                )
+                if icc_converted_u8 is not None:
+                    rgb_pixels = icc_converted_u8
+            dtype_name = "uint8"
+            input_is_encoded_srgb = True
+        else:
+            rgb_pixels = np.asarray(np.load(pixels_path), dtype=np.float32)
+            rgb_pixels = _maybe_decode_to_scene_linear(
+                rgb_pixels,
+                bits_per_sample=bits_per_sample,
+                color_space_hint=color_space_hint,
+                icc_profile_bytes=_decode_optional_base64(metadata.get("icc_profile_b64")),
+            )
+            dtype_name = "float32"
+            input_is_encoded_srgb = False
+
         _emit_progress(progress_callback, 0.995)
         _emit_progress(progress_callback, 1.0)
 
@@ -211,9 +264,57 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
             width=int(metadata["width"]),
             height=int(metadata["height"]),
             channels=int(metadata["channels"]),
-            dtype_name="float32",
+            dtype_name=dtype_name,
             pixels=rgb_pixels,
+            input_is_encoded_srgb=input_is_encoded_srgb,
         )
+
+
+def _load_encoded_image_fast(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData | None:
+    """Fast in-process loader for 8-bit encoded images using Pillow."""
+
+    if not is_supported_image_path(path):
+        raise ValueError(f"Unsupported image format: {path.suffix}")
+
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+
+    try:
+        with Image.open(path) as image:
+            _emit_progress(progress_callback, 0.05)
+            mode = str(image.mode).upper()
+            if mode not in {"1", "L", "LA", "P", "RGB", "RGBA", "CMYK", "YCBCR"}:
+                return None
+
+            rgb_image = image.convert("RGB")
+            _emit_progress(progress_callback, 0.75)
+
+            icc_profile_bytes = image.info.get("icc_profile")
+            if isinstance(icc_profile_bytes, bytearray):
+                icc_profile_bytes = bytes(icc_profile_bytes)
+            if not isinstance(icc_profile_bytes, bytes):
+                icc_profile_bytes = None
+
+            rgb_pixels = np.ascontiguousarray(np.asarray(rgb_image, dtype=np.uint8))
+            if icc_profile_bytes and not _icc_profile_looks_srgb(icc_profile_bytes):
+                icc_converted_u8 = _apply_icc_profile_to_srgb_u8(rgb_pixels, icc_profile_bytes)
+                if icc_converted_u8 is not None:
+                    rgb_pixels = icc_converted_u8
+
+            _emit_progress(progress_callback, 1.0)
+            return ImageData(
+                source_path=path,
+                width=int(rgb_pixels.shape[1]),
+                height=int(rgb_pixels.shape[0]),
+                channels=3,
+                dtype_name="uint8",
+                pixels=rgb_pixels,
+                input_is_encoded_srgb=True,
+            )
+    except Exception:
+        return None
 
 
 def _maybe_decode_to_scene_linear(
@@ -244,10 +345,10 @@ def _guess_transfer_kind(*, bits_per_sample: int | None, color_space_hint: str |
     if color_space_hint is not None:
         hint = color_space_hint.strip().lower()
         if hint:
-            if any(token in hint for token in ("srgb", "rec709", "gamma", "adobe", "display p3", "p3")):
-                return "encoded"
-            if any(token in hint for token in ("scene_linear", "linear", "raw", "acescg", "non-color")):
+            if any(token in hint for token in ("scene_linear", "linear", "lin_", "raw", "acescg", "non-color")):
                 return "linear"
+            if any(token in hint for token in ("srgb", "gamma", "adobe", "display p3", "p3")):
+                return "encoded"
 
     if bits_per_sample is not None and bits_per_sample <= 8:
         return "encoded"
@@ -314,6 +415,48 @@ def _apply_icc_profile_to_srgb(pixels: np.ndarray, icc_profile_bytes: bytes | No
         return np.asarray(converted, dtype=np.float32) / 255.0
     except Exception:
         return None
+
+
+def _apply_icc_profile_to_srgb_u8(pixels: np.ndarray, icc_profile_bytes: bytes | None) -> np.ndarray | None:
+    """Applies embedded ICC profile to uint8 encoded RGB pixels."""
+
+    if not icc_profile_bytes:
+        return None
+
+    try:
+        from PIL import Image, ImageCms
+    except ImportError:
+        return None
+
+    try:
+        source_image = Image.fromarray(np.ascontiguousarray(pixels, dtype=np.uint8), mode="RGB")
+        source_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile_bytes))
+        destination_profile = ImageCms.createProfile("sRGB")
+        converted = ImageCms.profileToProfile(
+            source_image,
+            source_profile,
+            destination_profile,
+            outputMode="RGB",
+        )
+        return np.ascontiguousarray(np.asarray(converted, dtype=np.uint8))
+    except Exception:
+        return None
+
+
+def _icc_profile_looks_srgb(icc_profile_bytes: bytes) -> bool:
+    """Returns whether embedded ICC profile already represents sRGB-like encoding."""
+
+    try:
+        from PIL import ImageCms
+    except ImportError:
+        return False
+
+    try:
+        profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile_bytes))
+        profile_name = ImageCms.getProfileName(profile).strip().lower()
+        return "srgb" in profile_name
+    except Exception:
+        return False
 
 
 def _srgb_to_linear(values: np.ndarray) -> np.ndarray:
@@ -390,6 +533,12 @@ def _decode_optional_base64(value: Any) -> bytes | None:
     except Exception:
         return None
     return decoded or None
+
+
+def _should_use_encoded_fast_path(path: Path) -> bool:
+    """Returns whether path is a known fast-path encoded format."""
+
+    return path.suffix.lower() in {".jpg", ".jpeg"}
 
 
 def _coerce_optional_int(value: Any) -> int | None:

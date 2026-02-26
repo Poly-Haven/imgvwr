@@ -13,6 +13,7 @@ uniform float u_exposure;
 uniform float u_projection_mode;
 uniform float u_fisheye_enabled;
 uniform float u_image_aspect;
+uniform float u_input_is_encoded_srgb;
 
 __OCIO_DECLARATIONS__
 
@@ -44,6 +45,18 @@ vec2 direction_to_equirect_uv(vec3 dir) {
     float u = 1.0 - ((longitude / (2.0 * 3.14159265358979323846)) + 0.5);
     float v = 0.5 - (latitude / 3.14159265358979323846);
     return vec2(u, v);
+}
+
+vec3 srgb_to_linear(vec3 encoded) {
+    vec3 clipped = clamp(encoded, vec3(0.0), vec3(1.0));
+    bvec3 lower = lessThanEqual(clipped, vec3(0.04045));
+    vec3 low = clipped / 12.92;
+    vec3 high = pow((clipped + 0.055) / 1.055, vec3(2.4));
+    return vec3(
+        lower.x ? low.x : high.x,
+        lower.y ? low.y : high.y,
+        lower.z ? low.z : high.z
+    );
 }
 
 void main() {
@@ -84,6 +97,9 @@ void main() {
     }
 
     vec3 color = texture(u_image, uv).rgb;
+    if (u_input_is_encoded_srgb >= 0.5) {
+        color = srgb_to_linear(color);
+    }
     color *= pow(2.0, u_exposure);
     __OCIO_APPLY__
 

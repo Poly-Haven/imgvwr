@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QEventLoop, QTimer
+from PyQt6.QtWidgets import QApplication
 
 from hdri_viewer.io.image_loader import ImageData, load_image
 
@@ -27,6 +28,10 @@ class LoadingControlsMixin:
         self._loading_progress_bar.set_progress(0.0)
         self.update()
 
+        if path.suffix.lower() in {".jpg", ".jpeg"}:
+            self._load_path_sync(path)
+            return
+
         if not self._threaded_loading_enabled:
             self._load_path_sync(path)
             return
@@ -46,11 +51,15 @@ class LoadingControlsMixin:
     def _load_path_sync(self, path: Path) -> None:
         """Loads image on UI thread as a safe fallback for unstable runtimes."""
 
+        self._sync_loading_in_progress = True
         try:
             image = load_image(path, progress_callback=self._on_image_load_progress)
         except Exception as error:
             self._on_image_load_failed(str(error))
             return
+        finally:
+            self._sync_loading_in_progress = False
+
         self._on_image_loaded(image)
 
     def reload_current(self) -> None:
@@ -82,6 +91,7 @@ class LoadingControlsMixin:
         self._image_path = image.source_path
         self._restore_preferred_view_transform(image.source_path)
         self._renderer.update_ocio_shader(self._ocio_manager.build_gpu_shader())
+
         self._file_info = FileInfo(
             width=image.width,
             height=image.height,
@@ -121,6 +131,10 @@ class LoadingControlsMixin:
         progress_percent = int(round(self._load_progress_value * 100.0))
         self._set_loading_overlay(self._build_loading_status(progress_percent), True)
         self._loading_progress_bar.set_progress(self._load_progress_value)
+
+        if self._sync_loading_in_progress:
+            self._loading_overlay.repaint()
+            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
     def _build_loading_status(self, progress_percent: int) -> str:
         """Returns stage-specific status text for current loading progress."""

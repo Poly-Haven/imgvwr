@@ -62,7 +62,7 @@ def test_load_image_dispatches_to_subprocess_on_windows(monkeypatch: pytest.Monk
     assert result is expected
 
 
-def test_load_image_dispatches_jpeg_to_subprocess_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_image_dispatches_to_fast_encoded_path_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
     expected = image_loader.ImageData(
         source_path=Path("a.jpg"),
         width=1,
@@ -74,7 +74,13 @@ def test_load_image_dispatches_jpeg_to_subprocess_on_windows(monkeypatch: pytest
 
     monkeypatch.setattr(image_loader.os, "name", "nt")
     monkeypatch.setenv("IMGVWR_USE_SUBPROCESS_LOADER", "1")
-    monkeypatch.setattr(image_loader, "_load_image_subprocess", lambda path, cb: expected)
+    monkeypatch.setattr(image_loader, "_should_use_encoded_fast_path", lambda path: True)
+    monkeypatch.setattr(image_loader, "_load_encoded_image_fast", lambda path, cb: expected)
+    monkeypatch.setattr(
+        image_loader,
+        "_load_image_subprocess",
+        lambda path, cb: (_ for _ in ()).throw(AssertionError("Subprocess loader should not be used.")),
+    )
     monkeypatch.setattr(
         image_loader,
         "_load_image_direct",

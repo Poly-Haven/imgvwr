@@ -64,6 +64,7 @@ class HdriViewerWidget(
         self._load_progress_value = 0.0
         self._awaiting_first_present = False
         self._projection_2d_enabled = False
+        self._sync_loading_in_progress = False
 
         self._overlay_label = QLabel("", self)
         self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)

@@ -40,6 +40,7 @@ class PanoramaRenderer:
         self._projection_2d_enabled = False
         self._fisheye_enabled = True
         self._image_aspect = 1.0
+        self._input_is_encoded_srgb = False
         self._ocio_lut_textures: list[tuple[Any, int]] = []
 
     @property
@@ -110,11 +111,14 @@ class PanoramaRenderer:
         if self._texture is not None:
             self._texture.release()
 
+        pixel_dtype = np.asarray(image_data.pixels).dtype
+        texture_dtype = "f1" if pixel_dtype == np.uint8 else "f4"
+
         texture = self._ctx.texture(
             size=(image_data.width, image_data.height),
             components=3,
             data=image_data.pixels.tobytes(),
-            dtype="f4",
+            dtype=texture_dtype,
         )
 
         texture.repeat_x = True
@@ -122,6 +126,7 @@ class PanoramaRenderer:
         texture.filter = (self._ctx.LINEAR, self._ctx.LINEAR)
         texture.use(location=0)
         self._texture = texture
+        self._input_is_encoded_srgb = image_data.input_is_encoded_srgb
         self._image_aspect = float(image_data.width) / max(float(image_data.height), 1.0)
 
     def render(self, camera: CameraState) -> None:
@@ -155,6 +160,7 @@ class PanoramaRenderer:
         self._set_uniform_if_changed("u_projection_mode", float(1.0 if self._projection_2d_enabled else 0.0))
         self._set_uniform_if_changed("u_fisheye_enabled", float(1.0 if self._fisheye_enabled else 0.0))
         self._set_uniform_if_changed("u_image_aspect", float(self._image_aspect))
+        self._set_uniform_if_changed("u_input_is_encoded_srgb", float(1.0 if self._input_is_encoded_srgb else 0.0))
 
         for texture, binding_index in self._ocio_lut_textures:
             texture.use(location=binding_index)

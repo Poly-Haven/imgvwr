@@ -33,6 +33,12 @@ def _preload_native_modules() -> None:
         except ImportError:
             pass
 
+    try:
+        from PIL import Image  # noqa: F401
+        from PIL import ImageCms  # noqa: F401
+    except ImportError:
+        pass
+
     use_subprocess_loader = os.environ.get("IMGVWR_USE_SUBPROCESS_LOADER", "1") == "1"
     if not (os.name == "nt" and use_subprocess_loader):
         try:

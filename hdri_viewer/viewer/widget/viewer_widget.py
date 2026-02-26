@@ -501,6 +501,10 @@ class HdriViewerWidget(
     def _restore_preferred_view_transform(self, path: Path | None = None) -> None:
         """Applies persisted display/view preference for the given file type."""
 
+        if self._projection_2d_enabled:
+            self._apply_standard_view_default()
+            return
+
         preferred = self._preferred_transform_for_path(path)
         if preferred is None:
             self._apply_standard_view_default()
@@ -517,6 +521,9 @@ class HdriViewerWidget(
 
     def _persist_active_view_transform(self, display: str, view: str) -> None:
         """Persists the active display/view under the current image file type key."""
+
+        if self._projection_2d_enabled:
+            return
 
         file_type_key = self._current_file_type_key()
         preferred_by_filetype = dict(self._preferences.preferred_view_transform_by_filetype or {})

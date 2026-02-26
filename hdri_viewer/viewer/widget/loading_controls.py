@@ -95,7 +95,7 @@ class LoadingControlsMixin:
         self._awaiting_first_present = True
         parent_window = self.window()
         if parent_window is not None:
-            parent_window.setWindowTitle(f"imgvwr - {image.source_path.name}")
+            parent_window.setWindowTitle(image.source_path.name)
         self.update()
 
     def _on_image_load_failed(self, message: str) -> None:

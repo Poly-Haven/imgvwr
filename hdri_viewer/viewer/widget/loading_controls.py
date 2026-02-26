@@ -80,6 +80,8 @@ class LoadingControlsMixin:
         self.doneCurrent()
 
         self._image_path = image.source_path
+        self._restore_preferred_view_transform(image.source_path)
+        self._renderer.update_ocio_shader(self._ocio_manager.build_gpu_shader())
         self._file_info = FileInfo(
             width=image.width,
             height=image.height,

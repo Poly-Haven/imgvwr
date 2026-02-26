@@ -19,7 +19,7 @@ class PreferredViewTransform:
 class AppPreferences:
     """Persisted user preferences for imgvwr."""
 
-    preferred_view_transform: PreferredViewTransform | None = None
+    preferred_view_transform_by_filetype: dict[str, PreferredViewTransform] | None = None
 
 
 def preferences_path() -> Path:
@@ -65,29 +65,60 @@ def _decode_preferences(payload: Any) -> AppPreferences:
     if not isinstance(payload, dict):
         return AppPreferences()
 
-    preferred_payload = payload.get("preferred_view_transform")
-    if not isinstance(preferred_payload, dict):
-        return AppPreferences()
+    raw_by_filetype = payload.get("preferred_view_transform_by_filetype")
+    if isinstance(raw_by_filetype, dict):
+        decoded_by_filetype: dict[str, PreferredViewTransform] = {}
+        for raw_extension, raw_transform in raw_by_filetype.items():
+            if not isinstance(raw_extension, str):
+                continue
+            extension = raw_extension.strip().lower()
+            if not extension:
+                continue
 
-    display = preferred_payload.get("display")
-    view = preferred_payload.get("view")
-    if not isinstance(display, str) or not isinstance(view, str):
-        return AppPreferences()
+            preferred_transform = _decode_view_transform(raw_transform)
+            if preferred_transform is None:
+                continue
+            decoded_by_filetype[extension] = preferred_transform
 
-    if not display or not view:
-        return AppPreferences()
+        if decoded_by_filetype:
+            return AppPreferences(preferred_view_transform_by_filetype=decoded_by_filetype)
 
-    return AppPreferences(preferred_view_transform=PreferredViewTransform(display=display, view=view))
+    return AppPreferences()
 
 
 def _encode_preferences(preferences: AppPreferences) -> dict[str, Any]:
-    if preferences.preferred_view_transform is None:
+    preferred_by_filetype = preferences.preferred_view_transform_by_filetype
+    if not preferred_by_filetype:
         return {}
 
-    preferred = preferences.preferred_view_transform
-    return {
-        "preferred_view_transform": {
+    payload_by_filetype: dict[str, Any] = {}
+    for extension, preferred in preferred_by_filetype.items():
+        normalized_extension = extension.strip().lower()
+        if not normalized_extension:
+            continue
+        payload_by_filetype[normalized_extension] = {
             "display": preferred.display,
             "view": preferred.view,
         }
+
+    if not payload_by_filetype:
+        return {}
+
+    return {
+        "preferred_view_transform_by_filetype": payload_by_filetype,
     }
+
+
+def _decode_view_transform(payload: Any) -> PreferredViewTransform | None:
+    if not isinstance(payload, dict):
+        return None
+
+    display = payload.get("display")
+    view = payload.get("view")
+    if not isinstance(display, str) or not isinstance(view, str):
+        return None
+
+    if not display or not view:
+        return None
+
+    return PreferredViewTransform(display=display, view=view)

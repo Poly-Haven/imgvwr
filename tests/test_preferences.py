@@ -17,7 +17,12 @@ def test_load_preferences_returns_defaults_when_missing_file(tmp_path: Path) -> 
 
 def test_save_then_load_preferences_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "prefs" / "preferences.json"
-    source = AppPreferences(preferred_view_transform=PreferredViewTransform(display="sRGB", view="Filmic"))
+    source = AppPreferences(
+        preferred_view_transform_by_filetype={
+            ".exr": PreferredViewTransform(display="sRGB", view="Filmic"),
+            ".jpg": PreferredViewTransform(display="Display P3", view="Standard"),
+        }
+    )
 
     save_preferences(source, path)
     loaded = load_preferences(path)
@@ -27,7 +32,7 @@ def test_save_then_load_preferences_round_trip(tmp_path: Path) -> None:
 
 def test_load_preferences_returns_defaults_for_invalid_payload(tmp_path: Path) -> None:
     path = tmp_path / "preferences.json"
-    path.write_text('{"preferred_view_transform": {"display": "sRGB"}}', encoding="utf-8")
+    path.write_text('{"preferred_view_transform_by_filetype": {".exr": {"display": "sRGB"}}}', encoding="utf-8")
 
     prefs = load_preferences(path)
     assert prefs == AppPreferences()
@@ -39,3 +44,14 @@ def test_save_preferences_clears_payload_when_no_preference(tmp_path: Path) -> N
 
     content = path.read_text(encoding="utf-8").strip()
     assert content == "{}"
+
+
+def test_load_preferences_ignores_legacy_single_transform_payload(tmp_path: Path) -> None:
+    path = tmp_path / "preferences.json"
+    path.write_text(
+        '{"preferred_view_transform": {"display": "sRGB", "view": "Filmic"}}',
+        encoding="utf-8",
+    )
+
+    prefs = load_preferences(path)
+    assert prefs == AppPreferences()

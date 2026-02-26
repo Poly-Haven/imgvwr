@@ -101,7 +101,7 @@ class HdriViewerWidget(
         self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
         self._renderer.set_fisheye_enabled(self._fisheye_enabled)
         self._ocio_manager.reload()
-        self._restore_preferred_view_transform()
+        self._restore_preferred_view_transform(self._pending_initial_path)
         self._renderer.update_ocio_shader(self._ocio_manager.build_gpu_shader())
         self._schedule_initial_open_if_ready()
 
@@ -135,26 +135,76 @@ class HdriViewerWidget(
             self._set_loading_overlay("", False)
             self._set_overlay_text("")
 
-    def _restore_preferred_view_transform(self) -> None:
-        """Applies persisted display/view preference when available in current config."""
+    def _restore_preferred_view_transform(self, path: Path | None = None) -> None:
+        """Applies persisted display/view preference for the given file type."""
 
-        preferred = self._preferences.preferred_view_transform
+        preferred = self._preferred_transform_for_path(path)
         if preferred is None:
+            self._apply_standard_view_default()
             return
 
         self._ocio_manager.set_active_view(preferred.display, preferred.view)
         active = self._ocio_manager.active_view
         if active.display != preferred.display or active.view != preferred.view:
+            self._apply_standard_view_default()
             return
 
         if active.view.lower() != "standard":
             self._preferred_view_by_display[active.display] = active.view
 
     def _persist_active_view_transform(self, display: str, view: str) -> None:
-        """Persists the currently selected display/view preference to disk."""
+        """Persists the active display/view under the current image file type key."""
 
-        self._preferences = AppPreferences(preferred_view_transform=PreferredViewTransform(display=display, view=view))
+        file_type_key = self._current_file_type_key()
+        preferred_by_filetype = dict(self._preferences.preferred_view_transform_by_filetype or {})
+        preferred_by_filetype[file_type_key] = PreferredViewTransform(display=display, view=view)
+        self._preferences = AppPreferences(preferred_view_transform_by_filetype=preferred_by_filetype)
         try:
             save_preferences(self._preferences)
         except OSError:
             return
+
+    def _preferred_transform_for_path(self, path: Path | None) -> PreferredViewTransform | None:
+        """Returns preferred transform for a path extension."""
+
+        preferred_by_filetype = self._preferences.preferred_view_transform_by_filetype or {}
+        file_type_key = self._file_type_key(path)
+        return preferred_by_filetype.get(file_type_key)
+
+    def _apply_standard_view_default(self) -> None:
+        """Selects Standard view when available, preferring current display."""
+
+        active_display = self._ocio_manager.active_view.display
+
+        active_display_views = self._views_for_display(active_display)
+        standard_view = self._find_case_insensitive(active_display_views, "Standard")
+        if standard_view is not None:
+            self._ocio_manager.set_active_view(active_display, standard_view)
+            return
+
+        for display in self._available_displays():
+            display_views = self._views_for_display(display)
+            standard_view = self._find_case_insensitive(display_views, "Standard")
+            if standard_view is not None:
+                self._ocio_manager.set_active_view(display, standard_view)
+                return
+
+    def _current_file_type_key(self) -> str:
+        """Returns current file-type key used for preference persistence."""
+
+        if self._image_path is not None:
+            return self._file_type_key(self._image_path)
+        if self._pending_initial_path is not None:
+            return self._file_type_key(self._pending_initial_path)
+        return "*"
+
+    @staticmethod
+    def _file_type_key(path: Path | None) -> str:
+        """Converts image path to normalized extension key."""
+
+        if path is None:
+            return "*"
+        suffix = path.suffix.strip().lower()
+        if suffix:
+            return suffix
+        return "*"

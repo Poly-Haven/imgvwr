@@ -167,6 +167,9 @@ class HdriViewerWidget(
         if enabled:
             self._camera.set_max_fov_degrees(self._MAX_FOV_DEGREES_2D)
             self._camera.state.fov_degrees = min(self._camera.state.fov_degrees, self._FIT_FOV_DEGREES_2D)
+            self._normalize_2d_pan_offsets_modulo()
+            if not self._projection_2d_wrap_enabled:
+                self._clamp_2d_pan_to_image_bounds()
             return
 
         if self._fisheye_enabled:
@@ -175,6 +178,13 @@ class HdriViewerWidget(
 
         viewport_aspect = max(self.width(), 1) / max(self.height(), 1)
         self._camera.set_max_fov_degrees(self._rectilinear_max_fov_degrees(viewport_aspect))
+
+    def _normalize_2d_pan_offsets_modulo(self) -> None:
+        """Normalizes 2D horizontal pan offset to modulo 1.0 in signed [-0.5, 0.5) range."""
+
+        pan_u = self._camera.state.yaw_radians / (2.0 * math.pi)
+        pan_u = ((pan_u + 0.5) % 1.0) - 0.5
+        self._camera.state.yaw_radians = pan_u * (2.0 * math.pi)
 
     def _set_projection_2d_wrap_enabled(self, enabled: bool) -> None:
         """Sets 2D wrap mode: tiled repeat on both axes or no wrapping."""
@@ -311,6 +321,22 @@ class HdriViewerWidget(
             pan_v = min(max(pan_v, min_pan_v), max_pan_v)
         else:
             pan_v = 0.0
+
+        self._camera.state.yaw_radians = pan_u * (2.0 * math.pi)
+        self._camera.state.pitch_radians = -pan_v * math.pi
+
+    def _clamp_2d_pan_for_drag(self) -> None:
+        """Clamps 2D drag pan so image corners can reach viewport center."""
+
+        if not self._projection_2d_enabled or self._projection_2d_wrap_enabled:
+            return
+        if not self._renderer.has_texture:
+            return
+
+        pan_u = self._camera.state.yaw_radians / (2.0 * math.pi)
+        pan_v = -self._camera.state.pitch_radians / math.pi
+        pan_u = min(max(pan_u, -0.9), 0.9)
+        pan_v = min(max(pan_v, -0.9), 0.9)
 
         self._camera.state.yaw_radians = pan_u * (2.0 * math.pi)
         self._camera.state.pitch_radians = -pan_v * math.pi

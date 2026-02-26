@@ -53,6 +53,14 @@ class InputControlsMixin:
 
             yaw_delta = pan_u_delta * (2.0 * math.pi)
             pitch_delta = pan_v_delta * math.pi
+
+            self._camera.state.yaw_radians += yaw_delta
+            self._camera.state.pitch_radians += pitch_delta
+            if not self._projection_2d_wrap_enabled:
+                self._clamp_2d_pan_for_drag()
+
+            self.update()
+            return
         else:
             half_fov_radians = math.radians(self._camera.state.fov_degrees) * 0.5
             aspect = viewport_width / viewport_height

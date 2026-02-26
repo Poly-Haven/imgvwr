@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import base64
 from pathlib import Path
 
 import numpy as np
@@ -58,6 +59,29 @@ def test_load_image_dispatches_to_subprocess_on_windows(monkeypatch: pytest.Monk
     )
 
     result = image_loader.load_image(Path("a.exr"))
+    assert result is expected
+
+
+def test_load_image_dispatches_jpeg_to_subprocess_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = image_loader.ImageData(
+        source_path=Path("a.jpg"),
+        width=1,
+        height=1,
+        channels=3,
+        dtype_name="float32",
+        pixels=np.zeros((1, 1, 3), dtype=np.float32),
+    )
+
+    monkeypatch.setattr(image_loader.os, "name", "nt")
+    monkeypatch.setenv("IMGVWR_USE_SUBPROCESS_LOADER", "1")
+    monkeypatch.setattr(image_loader, "_load_image_subprocess", lambda path, cb: expected)
+    monkeypatch.setattr(
+        image_loader,
+        "_load_image_direct",
+        lambda path, cb: (_ for _ in ()).throw(AssertionError("Direct loader should not be used.")),
+    )
+
+    result = image_loader.load_image(Path("a.jpg"))
     assert result is expected
 
 
@@ -140,6 +164,71 @@ def test_emit_progress_clamps_to_bounds() -> None:
     image_loader._emit_progress(values.append, 2.0)
 
     assert values == [0.0, 0.5, 1.0]
+
+
+def test_srgb_to_linear_matches_reference_points() -> None:
+    source = np.array([0.0, 0.04045, 0.5, 1.0], dtype=np.float32)
+    linear = image_loader._srgb_to_linear(source)
+
+    expected = np.array(
+        [
+            0.0,
+            0.04045 / 12.92,
+            ((0.5 + 0.055) / 1.055) ** 2.4,
+            1.0,
+        ],
+        dtype=np.float32,
+    )
+    assert np.allclose(linear, expected, atol=1e-6)
+
+
+def test_guess_transfer_kind_prefers_hint_over_bit_depth() -> None:
+    assert image_loader._guess_transfer_kind(bits_per_sample=16, color_space_hint="sRGB") == "encoded"
+    assert image_loader._guess_transfer_kind(bits_per_sample=8, color_space_hint="Linear Rec.709") == "linear"
+    assert image_loader._guess_transfer_kind(bits_per_sample=8, color_space_hint="srgb_rec709_scene") == "encoded"
+
+
+def test_guess_transfer_kind_uses_bit_depth_when_hint_missing() -> None:
+    assert image_loader._guess_transfer_kind(bits_per_sample=8, color_space_hint=None) == "encoded"
+    assert image_loader._guess_transfer_kind(bits_per_sample=16, color_space_hint=None) == "linear"
+
+
+def test_should_apply_icc_transform_skips_known_srgb_hints() -> None:
+    assert image_loader._should_apply_icc_transform("srgb_rec709_scene") is False
+    assert image_loader._should_apply_icc_transform("Rec709") is False
+    assert image_loader._should_apply_icc_transform(None) is True
+    assert image_loader._should_apply_icc_transform("Display P3") is True
+
+
+def test_maybe_decode_to_scene_linear_for_encoded_8bit() -> None:
+    encoded = np.array([[[128.0, 128.0, 128.0]]], dtype=np.float32)
+    decoded = image_loader._maybe_decode_to_scene_linear(
+        encoded,
+        bits_per_sample=8,
+        color_space_hint=None,
+        icc_profile_bytes=None,
+    )
+
+    expected_channel = ((128.0 / 255.0 + 0.055) / 1.055) ** 2.4
+    assert decoded.shape == (1, 1, 3)
+    assert np.allclose(decoded[0, 0, :], expected_channel, atol=1e-6)
+
+
+def test_extract_icc_profile_bytes_from_numpy_array() -> None:
+    class _Spec:
+        def getattribute(self, name: str) -> object:
+            if name == "ICCProfile":
+                return np.array([1, 2, 3], dtype=np.uint8)
+            return None
+
+    extracted = image_loader._extract_icc_profile_bytes(_Spec())
+    assert extracted == b"\x01\x02\x03"
+
+
+def test_decode_optional_base64_round_trip() -> None:
+    source = b"abc123"
+    encoded = base64.b64encode(source).decode("ascii")
+    assert image_loader._decode_optional_base64(encoded) == source
 
 
 def test_subprocess_loader_raises_on_nonzero_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

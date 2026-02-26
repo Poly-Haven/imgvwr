@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 import json
 import sys
@@ -26,6 +27,9 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
         width = int(spec.width)
         height = int(spec.height)
         channels = int(spec.nchannels)
+        bits_per_sample = _infer_bits_per_sample(spec)
+        color_space_hint = _infer_color_space_hint(spec)
+        icc_profile_bytes = _extract_icc_profile_bytes(spec)
         tile_width = int(spec.tile_width)
         tile_height = int(spec.tile_height)
 
@@ -86,10 +90,90 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
         del rgb_pixels
         _emit_progress(88)
         with meta_path.open("w", encoding="utf-8") as file:
-            json.dump({"width": width, "height": height, "channels": 3}, file)
+            json.dump(
+                {
+                    "width": width,
+                    "height": height,
+                    "channels": 3,
+                    "bits_per_sample": bits_per_sample,
+                    "color_space_hint": color_space_hint,
+                    "icc_profile_b64": base64.b64encode(icc_profile_bytes).decode("ascii") if icc_profile_bytes else "",
+                },
+                file,
+            )
         _emit_progress(90)
     finally:
         input_file.close()
+
+
+def _infer_bits_per_sample(spec: oiio.ImageSpec) -> int | None:
+    for attribute_name in ("oiio:BitsPerSample", "BitsPerSample", "Exif:BitsPerSample"):
+        value = spec.getattribute(attribute_name)
+        parsed = _coerce_optional_int(value)
+        if parsed is not None and parsed > 0:
+            return parsed
+
+    pixel_format = getattr(spec, "format", None)
+    if pixel_format is not None:
+        try:
+            base_size = int(pixel_format.basesize())
+            if base_size > 0:
+                return base_size * 8
+        except Exception:
+            pass
+
+    return None
+
+
+def _infer_color_space_hint(spec: oiio.ImageSpec) -> str | None:
+    for attribute_name in ("oiio:ColorSpace", "ColorSpace"):
+        text = _coerce_optional_str(spec.getattribute(attribute_name))
+        if text:
+            return text
+
+    exif_color_space = _coerce_optional_int(spec.getattribute("Exif:ColorSpace"))
+    if exif_color_space == 1:
+        return "sRGB"
+    return None
+
+
+def _coerce_optional_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_optional_str(value: object) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+    return None
+
+
+def _extract_icc_profile_bytes(spec: oiio.ImageSpec) -> bytes | None:
+    payload = spec.getattribute("ICCProfile")
+    if isinstance(payload, bytes):
+        return payload or None
+    if isinstance(payload, bytearray):
+        data = bytes(payload)
+        return data or None
+    if isinstance(payload, np.ndarray):
+        if payload.size == 0:
+            return None
+        data = np.asarray(payload, dtype=np.uint8).tobytes()
+        return data or None
+    return None
 
 
 def main() -> int:

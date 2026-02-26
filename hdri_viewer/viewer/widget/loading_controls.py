@@ -14,6 +14,15 @@ from .types import FileInfo
 class LoadingControlsMixin:
     """Image loading, reload, and loading-state lifecycle helpers."""
 
+    @staticmethod
+    def _should_default_to_2d_projection(path: Path, width: int, height: int) -> bool:
+        """Returns whether a loaded image should default to 2D projection."""
+
+        if height <= 0:
+            return False
+
+        return width != (height * 2)
+
     def open_path(self, path: Path) -> None:
         """Starts background image loading and updates UI state."""
 
@@ -87,6 +96,13 @@ class LoadingControlsMixin:
         self.makeCurrent()
         self._renderer.set_image(image)
         self.doneCurrent()
+
+        self._projection_2d_enabled = self._should_default_to_2d_projection(
+            image.source_path,
+            image.width,
+            image.height,
+        )
+        self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
 
         self._image_path = image.source_path
         self._restore_preferred_view_transform(image.source_path)

@@ -62,6 +62,7 @@ class HdriViewerWidget(
         self._image_path: Path | None = None
         self._pending_initial_path: Path | None = None
         self._exposure_stops = 0.0
+        self._gamma = 1.0
         self._file_info = FileInfo()
         self._preferred_view_by_display: dict[str, str] = {}
         self._preferences = load_preferences()
@@ -124,6 +125,7 @@ class HdriViewerWidget(
         self._renderer.initialize()
         self._gl_initialized = True
         self._renderer.set_exposure(self._exposure_stops)
+        self._renderer.set_gamma(self._gamma)
         self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
         self._renderer.set_projection_2d_wrap_enabled(self._projection_2d_wrap_enabled)
         self._renderer.set_fisheye_enabled(self._fisheye_enabled)

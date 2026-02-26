@@ -17,6 +17,7 @@ class RenderState:
     """Current renderer state for uniform and resource tracking."""
 
     exposure_stops: float = 0.0
+    gamma: float = 1.0
     viewport_width: int = 1
     viewport_height: int = 1
 
@@ -84,6 +85,11 @@ class PanoramaRenderer:
         """Updates linear exposure in stops."""
 
         self._state.exposure_stops = exposure_stops
+
+    def set_gamma(self, gamma: float) -> None:
+        """Updates display gamma adjustment factor."""
+
+        self._state.gamma = max(float(gamma), 1e-6)
 
     def set_projection_2d_enabled(self, enabled: bool) -> None:
         """Sets whether rendering uses 2D UV pan/zoom instead of equirectangular projection."""
@@ -163,6 +169,7 @@ class PanoramaRenderer:
         self._set_uniform_if_changed("u_yaw", float(camera.yaw_radians))
         self._set_uniform_if_changed("u_pitch", float(camera.pitch_radians))
         self._set_uniform_if_changed("u_exposure", float(self._state.exposure_stops))
+        self._set_uniform_if_changed("u_gamma", float(self._state.gamma))
         self._set_uniform_if_changed("u_projection_mode", float(1.0 if self._projection_2d_enabled else 0.0))
         self._set_uniform_if_changed(
             "u_projection_2d_wrap_enabled",

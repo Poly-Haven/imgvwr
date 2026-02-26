@@ -10,6 +10,7 @@ uniform float u_half_fov_radians;
 uniform float u_tan_half_fov;
 uniform float u_aspect;
 uniform float u_exposure;
+uniform float u_gamma;
 uniform float u_projection_mode;
 uniform float u_projection_2d_wrap_enabled;
 uniform float u_fisheye_enabled;
@@ -115,6 +116,7 @@ void main() {
     }
     color *= pow(2.0, u_exposure);
     __OCIO_APPLY__
+    color = pow(max(color, vec3(0.0)), vec3(1.0 / max(u_gamma, 0.000001)));
 
     frag_color = vec4(color, 1.0);
 }

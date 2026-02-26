@@ -215,9 +215,23 @@ class InputControlsMixin:
         self.update()
 
     def keyPressEvent(self, event: QKeyEvent | None) -> None:
-        """Handles exposure hotkeys and interaction mode toggles."""
+        """Handles exposure/gamma hotkeys and interaction mode toggles."""
 
         if event is None:
+            return
+
+        control_pressed = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+
+        if control_pressed and event.key() == Qt.Key.Key_Comma:
+            self._gamma = max(0.1, self._gamma - 0.1)
+            self._renderer.set_gamma(self._gamma)
+            self.update()
+            return
+
+        if control_pressed and event.key() == Qt.Key.Key_Period:
+            self._gamma = min(4.0, self._gamma + 0.1)
+            self._renderer.set_gamma(self._gamma)
+            self.update()
             return
 
         if event.key() == Qt.Key.Key_Comma:

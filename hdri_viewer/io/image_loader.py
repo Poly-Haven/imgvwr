@@ -14,6 +14,30 @@ from typing import Any, Callable, Final
 import numpy as np
 
 _READ_PROGRESS_WEIGHT: Final[float] = 0.90
+_RAW_EXTENSIONS: Final[frozenset[str]] = frozenset(
+    {
+        ".3fr",
+        ".arw",
+        ".cr2",
+        ".cr3",
+        ".crw",
+        ".dng",
+        ".fff",
+        ".iiq",
+        ".nef",
+        ".nrw",
+        ".orf",
+        ".pef",
+        ".ptx",
+        ".raf",
+        ".raw",
+        ".rw2",
+        ".rwl",
+        ".sr2",
+        ".srf",
+        ".x3f",
+    }
+)
 
 ProgressCallback = Callable[[float], None]
 
@@ -94,6 +118,11 @@ def load_image(path: Path, progress_callback: ProgressCallback | None = None) ->
 def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData:
     """Loads an image directly in-process via OpenImageIO."""
 
+    if _is_raw_image_path(path):
+        raw_image = _load_raw_image_with_rawpy(path, progress_callback)
+        if raw_image is not None:
+            return raw_image
+
     import OpenImageIO as oiio
 
     oiio_module: Any = oiio
@@ -112,7 +141,11 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
         bits_per_sample = _infer_bits_per_sample(spec)
         color_space_hint = _infer_color_space_hint(spec)
         icc_profile_bytes = _extract_icc_profile_bytes(spec)
-        transfer_kind = _guess_transfer_kind(bits_per_sample=bits_per_sample, color_space_hint=color_space_hint)
+        transfer_kind = _guess_transfer_kind(
+            bits_per_sample=bits_per_sample,
+            color_space_hint=color_space_hint,
+            source_path=path,
+        )
         is_fast_encoded_8bit = transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
         _emit_progress(progress_callback, 0.05)
 
@@ -159,6 +192,7 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
             bits_per_sample=bits_per_sample,
             color_space_hint=color_space_hint,
             icc_profile_bytes=icc_profile_bytes,
+            source_path=path,
         )
         _emit_progress(progress_callback, 1.0)
 
@@ -225,7 +259,11 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
         _emit_progress(progress_callback, 0.94)
         bits_per_sample = _coerce_optional_int(metadata.get("bits_per_sample"))
         color_space_hint = _coerce_optional_str(metadata.get("color_space_hint"))
-        transfer_kind = _guess_transfer_kind(bits_per_sample=bits_per_sample, color_space_hint=color_space_hint)
+        transfer_kind = _guess_transfer_kind(
+            bits_per_sample=bits_per_sample,
+            color_space_hint=color_space_hint,
+            source_path=path,
+        )
         is_fast_encoded_8bit = transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
 
         if is_fast_encoded_8bit:
@@ -246,6 +284,7 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
                 bits_per_sample=bits_per_sample,
                 color_space_hint=color_space_hint,
                 icc_profile_bytes=_decode_optional_base64(metadata.get("icc_profile_b64")),
+                source_path=path,
             )
             dtype_name = "float32"
             input_is_encoded_srgb = False
@@ -308,16 +347,60 @@ def _load_encoded_image_fast(path: Path, progress_callback: ProgressCallback | N
         return None
 
 
+def _load_raw_image_with_rawpy(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData | None:
+    """Loads full-resolution RAW files via rawpy as scene-linear float32 RGB."""
+
+    if not _is_raw_image_path(path):
+        return None
+
+    try:
+        import rawpy
+    except ImportError:
+        return None
+
+    try:
+        _emit_progress(progress_callback, 0.05)
+        with rawpy.imread(str(path)) as raw_file:
+            rgb_u16 = raw_file.postprocess(
+                output_bps=16,
+                gamma=(1.0, 1.0),
+                no_auto_bright=True,
+                use_camera_wb=True,
+                output_color=rawpy.ColorSpace.sRGB,
+            )
+
+        _emit_progress(progress_callback, _READ_PROGRESS_WEIGHT)
+        rgb_pixels = np.ascontiguousarray(np.asarray(rgb_u16, dtype=np.float32) / 65535.0, dtype=np.float32)
+        _emit_progress(progress_callback, 1.0)
+
+        return ImageData(
+            source_path=path,
+            width=int(rgb_pixels.shape[1]),
+            height=int(rgb_pixels.shape[0]),
+            channels=3,
+            dtype_name="float32",
+            pixels=rgb_pixels,
+            input_is_encoded_srgb=False,
+        )
+    except Exception:
+        return None
+
+
 def _maybe_decode_to_scene_linear(
     pixels: np.ndarray,
     *,
     bits_per_sample: int | None,
     color_space_hint: str | None,
     icc_profile_bytes: bytes | None,
+    source_path: Path | None = None,
 ) -> np.ndarray:
     """Converts encoded RGB to scene-linear when metadata heuristics indicate it is needed."""
 
-    transfer_kind = _guess_transfer_kind(bits_per_sample=bits_per_sample, color_space_hint=color_space_hint)
+    transfer_kind = _guess_transfer_kind(
+        bits_per_sample=bits_per_sample,
+        color_space_hint=color_space_hint,
+        source_path=source_path,
+    )
     if transfer_kind == "linear":
         return np.ascontiguousarray(pixels, dtype=np.float32)
 
@@ -330,8 +413,16 @@ def _maybe_decode_to_scene_linear(
     return np.ascontiguousarray(_srgb_to_linear(source_encoded), dtype=np.float32)
 
 
-def _guess_transfer_kind(*, bits_per_sample: int | None, color_space_hint: str | None) -> str:
+def _guess_transfer_kind(
+    *,
+    bits_per_sample: int | None,
+    color_space_hint: str | None,
+    source_path: Path | None = None,
+) -> str:
     """Returns either "linear" or "encoded" based on source metadata heuristics."""
+
+    if source_path is not None and source_path.suffix.lower() in _RAW_EXTENSIONS:
+        return "linear"
 
     if color_space_hint is not None:
         hint = color_space_hint.strip().lower()
@@ -530,6 +621,12 @@ def _should_use_encoded_fast_path(path: Path) -> bool:
     """Returns whether path is a known fast-path encoded format."""
 
     return path.suffix.lower() in {".jpg", ".jpeg"}
+
+
+def _is_raw_image_path(path: Path) -> bool:
+    """Returns whether path suffix is a known camera RAW format."""
+
+    return path.suffix.lower() in _RAW_EXTENSIONS
 
 
 def _coerce_optional_int(value: Any) -> int | None:

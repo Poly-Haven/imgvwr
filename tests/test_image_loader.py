@@ -17,6 +17,37 @@ def test_supported_extension_check() -> None:
     assert is_supported_image_path(Path("c.png"))
 
 
+def test_raw_extensions_include_common_camera_formats() -> None:
+    expected = {
+        ".cr2",
+        ".cr3",
+        ".crw",
+        ".nef",
+        ".nrw",
+        ".arw",
+        ".srf",
+        ".sr2",
+        ".raf",
+        ".orf",
+        ".rw2",
+        ".raw",
+        ".pef",
+        ".ptx",
+        ".dng",
+        ".rwl",
+        ".3fr",
+        ".fff",
+        ".iiq",
+        ".x3f",
+    }
+    assert expected.issubset(image_loader._RAW_EXTENSIONS)
+
+
+def test_is_raw_image_path_detects_known_raw_suffix() -> None:
+    assert image_loader._is_raw_image_path(Path("capture.nef")) is True
+    assert image_loader._is_raw_image_path(Path("capture.jpg")) is False
+
+
 def test_channel_normalization_from_one_channel() -> None:
     source = np.ones((2, 3, 1), dtype=np.float32)
     rgb = normalize_rgb_channels(source)
@@ -114,6 +145,23 @@ def test_load_image_dispatches_to_direct_when_subprocess_disabled(monkeypatch: p
     assert result is expected
 
 
+def test_load_image_direct_prefers_rawpy_for_raw_extension(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = image_loader.ImageData(
+        source_path=Path("a.nef"),
+        width=4,
+        height=2,
+        channels=3,
+        dtype_name="float32",
+        pixels=np.zeros((2, 4, 3), dtype=np.float32),
+    )
+
+    monkeypatch.setattr(image_loader, "_is_raw_image_path", lambda path: True)
+    monkeypatch.setattr(image_loader, "_load_raw_image_with_rawpy", lambda path, cb: expected)
+
+    result = image_loader._load_image_direct(Path("a.nef"))
+    assert result is expected
+
+
 def test_subprocess_loader_invokes_module_and_parses_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source_pixels = np.array(
         [
@@ -199,6 +247,17 @@ def test_guess_transfer_kind_uses_bit_depth_when_hint_missing() -> None:
     assert image_loader._guess_transfer_kind(bits_per_sample=16, color_space_hint=None) == "linear"
 
 
+def test_guess_transfer_kind_treats_raw_extension_as_linear() -> None:
+    assert (
+        image_loader._guess_transfer_kind(
+            bits_per_sample=8,
+            color_space_hint="sRGB",
+            source_path=Path("photo.NEF"),
+        )
+        == "linear"
+    )
+
+
 def test_should_apply_icc_transform_skips_known_srgb_hints() -> None:
     assert image_loader._should_apply_icc_transform("srgb_rec709_scene") is False
     assert image_loader._should_apply_icc_transform("Rec709") is False
@@ -218,6 +277,19 @@ def test_maybe_decode_to_scene_linear_for_encoded_8bit() -> None:
     expected_channel = ((128.0 / 255.0 + 0.055) / 1.055) ** 2.4
     assert decoded.shape == (1, 1, 3)
     assert np.allclose(decoded[0, 0, :], expected_channel, atol=1e-6)
+
+
+def test_maybe_decode_to_scene_linear_preserves_raw_pixels() -> None:
+    source = np.array([[[128.0, 64.0, 32.0]]], dtype=np.float32)
+    decoded = image_loader._maybe_decode_to_scene_linear(
+        source,
+        bits_per_sample=8,
+        color_space_hint="sRGB",
+        icc_profile_bytes=None,
+        source_path=Path("capture.ARW"),
+    )
+
+    assert np.array_equal(decoded, source.astype(np.float32))
 
 
 def test_extract_icc_profile_bytes_from_numpy_array() -> None:

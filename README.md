@@ -1,6 +1,6 @@
 # imgvwr
 
-`imgvwr` is a modern, minimal HDRI viewer for very large panorama images.
+`imgvwr` is a modern, minimal image viewer with support for not just normal image formats, but HDRI panoramas and camera raw files too.
 
 ## Controls
 
@@ -21,9 +21,6 @@
 - Double-click: Full screen
 - `Esc`: Exit
 
-In 2D mode, zoom first resizes the window (minimum `170x170`) to keep the image fit behavior consistent,
-then switches to optical zoom once the window reaches screen limits (including fullscreen).
-
 For panorama images, (2:1 aspect, hdr or exr) the last view transform used persists. For all others, Standard is always loaded by default.
 
 ---
@@ -34,6 +31,7 @@ For panorama images, (2:1 aspect, hdr or exr) the last view transform used persi
 - PyQt6 windowing
 - moderngl renderer
 - OpenImageIO loading
+- rawpy camera RAW decode
 - OpenColorIO v2 display transforms
 
 ## Setup

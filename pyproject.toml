@@ -16,6 +16,7 @@ dependencies = [
   "numpy>=1.26",
   "Pillow>=10.0",
   "OpenImageIO>=2.5",
+  "rawpy>=0.24",
   "opencolorio>=2.3",
 ]
 

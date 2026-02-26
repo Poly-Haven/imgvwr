@@ -9,6 +9,30 @@ import numpy as np
 import OpenImageIO as oiio
 
 _READ_PROGRESS_WEIGHT = 0.85
+_RAW_EXTENSIONS = frozenset(
+    {
+        ".3fr",
+        ".arw",
+        ".cr2",
+        ".cr3",
+        ".crw",
+        ".dng",
+        ".fff",
+        ".iiq",
+        ".nef",
+        ".nrw",
+        ".orf",
+        ".pef",
+        ".ptx",
+        ".raf",
+        ".raw",
+        ".rw2",
+        ".rwl",
+        ".sr2",
+        ".srf",
+        ".x3f",
+    }
+)
 
 
 def _emit_progress(percent: int) -> None:
@@ -16,6 +40,10 @@ def _emit_progress(percent: int) -> None:
 
 
 def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
+    if _is_raw_image_path(path):
+        if _run_raw_loader(path, meta_path, pixels_path):
+            return
+
     input_file = oiio.ImageInput.open(str(path))
     if input_file is None:
         raise RuntimeError(f"Failed to open image: {path}. {oiio.geterror()}")
@@ -30,7 +58,11 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
         bits_per_sample = _infer_bits_per_sample(spec)
         color_space_hint = _infer_color_space_hint(spec)
         icc_profile_bytes = _extract_icc_profile_bytes(spec)
-        transfer_kind = _guess_transfer_kind(bits_per_sample=bits_per_sample, color_space_hint=color_space_hint)
+        transfer_kind = _guess_transfer_kind(
+            bits_per_sample=bits_per_sample,
+            color_space_hint=color_space_hint,
+            source_path=path,
+        )
         is_fast_encoded_8bit = transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
         tile_width = int(spec.tile_width)
         tile_height = int(spec.tile_height)
@@ -112,6 +144,52 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
         input_file.close()
 
 
+def _run_raw_loader(path: Path, meta_path: Path, pixels_path: Path) -> bool:
+    """Loads full-resolution RAW image via rawpy and serializes subprocess outputs."""
+
+    try:
+        import rawpy
+    except ImportError:
+        return False
+
+    try:
+        _emit_progress(0)
+        _emit_progress(5)
+
+        with rawpy.imread(str(path)) as raw_file:
+            rgb_u16 = raw_file.postprocess(
+                output_bps=16,
+                gamma=(1.0, 1.0),
+                no_auto_bright=True,
+                use_camera_wb=True,
+                output_color=rawpy.ColorSpace.sRGB,
+            )
+
+        _emit_progress(85)
+        rgb_pixels = np.ascontiguousarray(np.asarray(rgb_u16, dtype=np.float32) / 65535.0, dtype=np.float32)
+        np.save(pixels_path, rgb_pixels)
+        _emit_progress(88)
+
+        with meta_path.open("w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "width": int(rgb_pixels.shape[1]),
+                    "height": int(rgb_pixels.shape[0]),
+                    "channels": 3,
+                    "dtype_name": "float32",
+                    "bits_per_sample": 16,
+                    "color_space_hint": "rawpy:linear_srgb",
+                    "icc_profile_b64": "",
+                },
+                file,
+            )
+
+        _emit_progress(90)
+        return True
+    except Exception:
+        return False
+
+
 def _infer_bits_per_sample(spec: oiio.ImageSpec) -> int | None:
     for attribute_name in ("oiio:BitsPerSample", "BitsPerSample", "Exif:BitsPerSample"):
         value = spec.getattribute(attribute_name)
@@ -182,7 +260,15 @@ def _extract_icc_profile_bytes(spec: oiio.ImageSpec) -> bytes | None:
     return None
 
 
-def _guess_transfer_kind(*, bits_per_sample: int | None, color_space_hint: str | None) -> str:
+def _guess_transfer_kind(
+    *,
+    bits_per_sample: int | None,
+    color_space_hint: str | None,
+    source_path: Path | None = None,
+) -> str:
+    if source_path is not None and source_path.suffix.lower() in _RAW_EXTENSIONS:
+        return "linear"
+
     if color_space_hint is not None:
         hint = color_space_hint.strip().lower()
         if hint:
@@ -195,6 +281,10 @@ def _guess_transfer_kind(*, bits_per_sample: int | None, color_space_hint: str |
         return "encoded"
 
     return "linear"
+
+
+def _is_raw_image_path(path: Path) -> bool:
+    return path.suffix.lower() in _RAW_EXTENSIONS
 
 
 def main() -> int:

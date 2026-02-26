@@ -65,6 +65,7 @@ class HdriViewerWidget(
         self._awaiting_first_present = False
         self._projection_2d_enabled = False
         self._sync_loading_in_progress = False
+        self._metadata_overlay_visible = False
 
         self._overlay_label = QLabel("", self)
         self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -83,6 +84,19 @@ class HdriViewerWidget(
 
         self._loading_progress_bar = _LoadingProgressBar(self._loading_overlay)
         self._loading_overlay.setVisible(False)
+
+        self._metadata_overlay_label = QLabel("", self)
+        self._metadata_overlay_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._metadata_overlay_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._metadata_overlay_label.setWordWrap(True)
+        self._metadata_overlay_label.setStyleSheet(
+            "color: white;"
+            "background-color: rgba(0, 0, 0, 160);"
+            "border: 1px solid rgba(255, 255, 255, 90);"
+            "border-radius: 4px;"
+            "padding: 6px;"
+        )
+        self._metadata_overlay_label.setVisible(False)
 
         self._update_overlay_geometries()
         self._set_overlay_text("Right-click to open a file")

@@ -141,6 +141,9 @@ class InputControlsMixin:
             self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
             self.update()
             return
+        if event.key() == Qt.Key.Key_F2:
+            self._set_metadata_overlay_visible(not self._metadata_overlay_visible)
+            return
         if event.key() == Qt.Key.Key_T:
             self._toggle_standard_view()
             return

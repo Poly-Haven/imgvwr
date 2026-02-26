@@ -13,6 +13,7 @@
 - `P`: Toggle 2D projection and equirectangular
 - `F`: Toggle fisheye and rectilinear lens (rectilinear is default)
 - `T`: Toggle view transform
+- `F2`: Toggle image metadata overlay (top-left)
 - Double-click: Full screen
 - `Esc`: Exit
 

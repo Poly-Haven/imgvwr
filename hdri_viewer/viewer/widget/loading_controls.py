@@ -93,11 +93,14 @@ class LoadingControlsMixin:
         self._renderer.update_ocio_shader(self._ocio_manager.build_gpu_shader())
 
         self._file_info = FileInfo(
+            source_name=image.source_path.name,
             width=image.width,
             height=image.height,
             channels=image.channels,
             dtype_name=image.dtype_name,
+            input_is_encoded_srgb=image.input_is_encoded_srgb,
         )
+        self._refresh_metadata_overlay()
 
         self._loading = False
         self._active_loader_signals = None

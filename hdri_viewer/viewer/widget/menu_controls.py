@@ -38,19 +38,15 @@ class MenuControlsMixin:
                     action.triggered.connect(self._make_display_setter(display))
                     display_menu.addAction(action)
 
-            display_view_menu = view_menu.addMenu("View")
-            if display_view_menu is not None:
-                for view in self._views_for_display(active_display):
-                    action = QAction(view, self)
-                    action.setCheckable(True)
-                    action.setChecked(view == active_view)
-                    action.triggered.connect(self._make_display_view_setter(active_display, view))
-                    display_view_menu.addAction(action)
-
+            # display_view_menu = view_menu.addMenu("View")
+            # if display_view_menu is not None:
             view_menu.addSeparator()
-            active_label = QAction(f"Active: {active_display} / {active_view}", self)
-            active_label.setEnabled(False)
-            view_menu.addAction(active_label)
+            for view in self._views_for_display(active_display):
+                action = QAction(view, self)
+                action.setCheckable(True)
+                action.setChecked(view == active_view)
+                action.triggered.connect(self._make_display_view_setter(active_display, view))
+                view_menu.addAction(action)
 
         menu.addSeparator()
         info_label = (

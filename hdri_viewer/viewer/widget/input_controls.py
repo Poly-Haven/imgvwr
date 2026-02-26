@@ -349,7 +349,7 @@ class InputControlsMixin:
                 if self._camera.state.fov_degrees <= fit_fov + epsilon:
                     self._camera.state.fov_degrees = fit_fov
 
-            if remaining_factor > 1.0 + epsilon:
+            if remaining_factor > 1.0 + epsilon and not self._projection_2d_wrap_enabled:
                 achieved_window = self._resize_window_for_2d_zoom(remaining_factor)
                 remaining_factor /= max(achieved_window, epsilon)
 
@@ -365,7 +365,7 @@ class InputControlsMixin:
                 if self._camera.state.fov_degrees >= fit_fov - epsilon:
                     self._camera.state.fov_degrees = fit_fov
 
-            if remaining_factor < 1.0 - epsilon:
+            if remaining_factor < 1.0 - epsilon and not self._projection_2d_wrap_enabled:
                 achieved_window = self._resize_window_for_2d_zoom(remaining_factor)
                 remaining_factor /= max(achieved_window, epsilon)
 

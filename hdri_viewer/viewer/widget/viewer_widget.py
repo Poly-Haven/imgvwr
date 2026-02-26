@@ -38,6 +38,9 @@ class HdriViewerWidget(
         base_dir = Path(__file__).resolve().parents[2]
         self._renderer = PanoramaRenderer(shaders_dir=base_dir / "viewer" / "shaders")
         self._camera = CameraController()
+        self._fisheye_enabled = False
+        initial_aspect = max(self.width(), 1) / max(self.height(), 1)
+        self._camera.set_max_fov_degrees(self._rectilinear_max_fov_degrees(initial_aspect))
         self._ocio_manager = OcioManager(
             resources_dir=base_dir / "resources",
             custom_config_dir=base_dir / "resources" / "ocio_configs",
@@ -94,6 +97,7 @@ class HdriViewerWidget(
         self._gl_initialized = True
         self._renderer.set_exposure(self._exposure_stops)
         self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
+        self._renderer.set_fisheye_enabled(self._fisheye_enabled)
         self._ocio_manager.reload()
         self._renderer.update_ocio_shader(self._ocio_manager.build_gpu_shader())
         self._schedule_initial_open_if_ready()
@@ -115,6 +119,9 @@ class HdriViewerWidget(
         """Updates renderer viewport."""
 
         self._renderer.set_viewport(width, height)
+        if not self._fisheye_enabled:
+            viewport_aspect = max(width, 1) / max(height, 1)
+            self._camera.set_max_fov_degrees(self._rectilinear_max_fov_degrees(viewport_aspect))
 
     def paintGL(self) -> None:
         """Delegates frame rendering to the OpenGL renderer."""

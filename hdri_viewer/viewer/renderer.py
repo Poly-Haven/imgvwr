@@ -38,6 +38,7 @@ class PanoramaRenderer:
         self._ocio_shader = OcioShader(shader_text="", function_name="")
         self._shader_cache_key: tuple[str, str, str] | None = None
         self._projection_2d_enabled = False
+        self._fisheye_enabled = True
         self._image_aspect = 1.0
         self._ocio_lut_textures: list[tuple[Any, int]] = []
 
@@ -86,6 +87,11 @@ class PanoramaRenderer:
         """Sets whether rendering uses 2D UV pan/zoom instead of equirectangular projection."""
 
         self._projection_2d_enabled = enabled
+
+    def set_fisheye_enabled(self, enabled: bool) -> None:
+        """Sets lens mode for perspective view: fisheye or rectilinear."""
+
+        self._fisheye_enabled = enabled
 
     def set_viewport(self, width: int, height: int) -> None:
         """Updates viewport dimensions for rendering and aspect ratio calculations."""
@@ -137,14 +143,17 @@ class PanoramaRenderer:
             pass
 
         aspect = self._state.viewport_width / self._state.viewport_height
-        tan_half_fov = math.tan(math.radians(camera.fov_degrees) * 0.5)
+        half_fov_radians = math.radians(camera.fov_degrees) * 0.5
+        tan_half_fov = math.tan(half_fov_radians)
 
         self._set_uniform_if_changed("u_aspect", float(aspect))
+        self._set_uniform_if_changed("u_half_fov_radians", float(half_fov_radians))
         self._set_uniform_if_changed("u_tan_half_fov", float(tan_half_fov))
         self._set_uniform_if_changed("u_yaw", float(camera.yaw_radians))
         self._set_uniform_if_changed("u_pitch", float(camera.pitch_radians))
         self._set_uniform_if_changed("u_exposure", float(self._state.exposure_stops))
         self._set_uniform_if_changed("u_projection_mode", float(1.0 if self._projection_2d_enabled else 0.0))
+        self._set_uniform_if_changed("u_fisheye_enabled", float(1.0 if self._fisheye_enabled else 0.0))
         self._set_uniform_if_changed("u_image_aspect", float(self._image_aspect))
 
         for texture, binding_index in self._ocio_lut_textures:

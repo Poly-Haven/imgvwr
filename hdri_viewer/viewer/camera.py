@@ -19,10 +19,11 @@ class CameraController:
     _MIN_PITCH_RAD = math.radians(-90.0)
     _MAX_PITCH_RAD = math.radians(90.0)
     _MIN_FOV_DEG = 5.0
-    _MAX_FOV_DEG = 140.0
+    _DEFAULT_MAX_FOV_DEG = 140.0
 
     def __init__(self, state: CameraState | None = None) -> None:
         self._state = state if state is not None else CameraState()
+        self._max_fov_degrees = self._DEFAULT_MAX_FOV_DEG
 
     @property
     def state(self) -> CameraState:
@@ -46,4 +47,10 @@ class CameraController:
         """Adjusts field-of-view with clamping for a stable interactive range."""
 
         next_fov = self._state.fov_degrees + delta_degrees
-        self._state.fov_degrees = max(self._MIN_FOV_DEG, min(self._MAX_FOV_DEG, next_fov))
+        self._state.fov_degrees = max(self._MIN_FOV_DEG, min(self._max_fov_degrees, next_fov))
+
+    def set_max_fov_degrees(self, max_fov_degrees: float) -> None:
+        """Updates and applies the maximum allowed FOV for the active lens mode."""
+
+        self._max_fov_degrees = max(self._MIN_FOV_DEG, float(max_fov_degrees))
+        self._state.fov_degrees = max(self._MIN_FOV_DEG, min(self._max_fov_degrees, self._state.fov_degrees))

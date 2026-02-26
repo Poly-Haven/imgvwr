@@ -12,6 +12,16 @@ from hdri_viewer.io.image_loader import is_supported_image_path
 class InputControlsMixin:
     """Mouse, keyboard, drag/drop, and camera interaction helpers."""
 
+    _FISHEYE_MAX_FOV_DEGREES = 270.0
+
+    def _rectilinear_max_fov_degrees(self, viewport_aspect: float) -> float:
+        """Returns rectilinear max FOV matching fisheye max visual coverage for a viewport."""
+
+        max_lens_radius = math.sqrt((viewport_aspect * viewport_aspect) + 1.0)
+        fisheye_half_fov = math.radians(self._FISHEYE_MAX_FOV_DEGREES) * 0.5
+        rectilinear_half_fov = math.atan(fisheye_half_fov / max_lens_radius)
+        return math.degrees(rectilinear_half_fov * 2.0)
+
     def mousePressEvent(self, event: QMouseEvent | None) -> None:
         """Stores start position for drag-based camera rotation."""
 
@@ -44,13 +54,22 @@ class InputControlsMixin:
             yaw_delta = pan_u_delta * (2.0 * math.pi)
             pitch_delta = pan_v_delta * math.pi
         else:
-            tan_half_fov = math.tan(math.radians(self._camera.state.fov_degrees) * 0.5)
+            half_fov_radians = math.radians(self._camera.state.fov_degrees) * 0.5
             aspect = viewport_width / viewport_height
-            latitude_radians = abs(self._camera.state.pitch_radians)
-            horizontal_pan_multiplier = min(2.5, 1.0 / math.cos(latitude_radians))
 
-            yaw_radians_per_pixel = (2.0 * aspect * tan_half_fov) / viewport_width
-            pitch_radians_per_pixel = (2.0 * tan_half_fov) / viewport_height
+            if self._fisheye_enabled:
+                yaw_radians_per_pixel = (2.0 * aspect * half_fov_radians) / viewport_width
+                pitch_radians_per_pixel = (2.0 * half_fov_radians) / viewport_height
+            else:
+                tan_half_fov = math.tan(half_fov_radians)
+                yaw_radians_per_pixel = (2.0 * aspect * tan_half_fov) / viewport_width
+                pitch_radians_per_pixel = (2.0 * tan_half_fov) / viewport_height
+
+            cursor_pitch = self._camera.state.pitch_radians + (
+                (float(pos.y()) - (viewport_height * 0.5)) * pitch_radians_per_pixel
+            )
+            latitude_radians = abs(cursor_pitch)
+            horizontal_pan_multiplier = min(2.5, 1.0 / max(math.cos(latitude_radians), 0.25))
 
             yaw_delta = float(delta.x()) * yaw_radians_per_pixel * horizontal_pan_multiplier
             pitch_delta = float(delta.y()) * pitch_radians_per_pixel
@@ -124,6 +143,27 @@ class InputControlsMixin:
             return
         if event.key() == Qt.Key.Key_T:
             self._toggle_standard_view()
+            return
+        if event.key() == Qt.Key.Key_F:
+            next_fisheye_enabled = not self._fisheye_enabled
+            viewport_aspect = max(self.width(), 1) / max(self.height(), 1)
+            max_lens_radius = math.sqrt((viewport_aspect * viewport_aspect) + 1.0)
+            current_half_fov = math.radians(self._camera.state.fov_degrees) * 0.5
+
+            if next_fisheye_enabled:
+                converted_half_fov = math.tan(current_half_fov) * max_lens_radius
+                next_max_fov_degrees = self._FISHEYE_MAX_FOV_DEGREES
+            else:
+                converted_half_fov = math.atan(current_half_fov / max_lens_radius)
+                next_max_fov_degrees = self._rectilinear_max_fov_degrees(viewport_aspect)
+
+            converted_fov_degrees = math.degrees(converted_half_fov * 2.0)
+
+            self._fisheye_enabled = next_fisheye_enabled
+            self._renderer.set_fisheye_enabled(self._fisheye_enabled)
+            self._camera.state.fov_degrees = converted_fov_degrees
+            self._camera.set_max_fov_degrees(next_max_fov_degrees)
+            self.update()
             return
 
         super().keyPressEvent(event)

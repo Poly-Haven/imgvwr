@@ -6,10 +6,12 @@ out vec4 frag_color;
 uniform sampler2D u_image;
 uniform float u_yaw;
 uniform float u_pitch;
+uniform float u_half_fov_radians;
 uniform float u_tan_half_fov;
 uniform float u_aspect;
 uniform float u_exposure;
 uniform float u_projection_mode;
+uniform float u_fisheye_enabled;
 uniform float u_image_aspect;
 
 __OCIO_DECLARATIONS__
@@ -58,7 +60,24 @@ void main() {
         uv.y = clamp(0.5 + pan_v - centered.y * scale_y, 0.0, 1.0);
     } else {
         vec2 ndc = v_uv * 2.0 - 1.0;
-        vec3 ray = normalize(vec3(ndc.x * u_aspect * u_tan_half_fov, ndc.y * u_tan_half_fov, 1.0));
+        vec3 ray;
+        if (u_fisheye_enabled >= 0.5) {
+            vec2 lens_xy = vec2(ndc.x * u_aspect, ndc.y);
+            float lens_radius = length(lens_xy);
+            float max_lens_radius = max(length(vec2(u_aspect, 1.0)), 0.0001);
+            float half_fov = clamp(u_half_fov_radians, 0.0, 3.12413936107);
+            float theta = (lens_radius / max_lens_radius) * half_fov;
+
+            if (lens_radius > 0.000001) {
+                vec2 lens_dir = lens_xy / lens_radius;
+                float sin_theta = sin(theta);
+                ray = normalize(vec3(lens_dir.x * sin_theta, lens_dir.y * sin_theta, cos(theta)));
+            } else {
+                ray = vec3(0.0, 0.0, 1.0);
+            }
+        } else {
+            ray = normalize(vec3(ndc.x * u_aspect * u_tan_half_fov, ndc.y * u_tan_half_fov, 1.0));
+        }
 
         vec3 world_dir = normalize(rotate_yaw_pitch(ray, u_yaw, u_pitch));
         uv = direction_to_equirect_uv(world_dir);

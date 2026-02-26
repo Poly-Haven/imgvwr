@@ -11,6 +11,7 @@
 - `.`: exposure +1 stop
 - Right-click: context menu (open/reload/view transform/file info)
 - `P`: Toggle 2D projection and equirectangular
+- `F`: Toggle fisheye and rectilinear lens (rectilinear is default)
 - `T`: Toggle view transform
 - Double-click: Full screen
 - `Esc`: Exit

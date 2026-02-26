@@ -146,13 +146,13 @@ class MenuControlsMixin:
         self._apply_display_view(display, standard_view, remember_non_standard=False)
 
     def _open_file_dialog(self) -> None:
-        """Opens file picker for supported image types."""
+        """Opens file picker and attempts to load the selected file."""
 
         selected_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open image",
             "",
-            "Images (*.exr *.hdr *.jpg *.jpeg)",
+            "All files (*)",
         )
         if selected_path:
             self.open_path(Path(selected_path))

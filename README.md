@@ -5,7 +5,6 @@
 ## Controls
 
 - Left or middle mouse drag: pan/rotate view
-- Continuous grab: while dragging, cursor wraps across viewport edges for infinite panning on both axes
 - Mouse wheel: zoom
 - Ctrl + mouse wheel: smooth exposure change
 - `,`: exposure -1 stop
@@ -25,10 +24,7 @@
 In 2D mode, zoom first resizes the window (minimum `170x170`) to keep the image fit behavior consistent,
 then switches to optical zoom once the window reaches screen limits (including fullscreen).
 
-When 2D wrap mode is enabled, zoom uses optical scaling only and does not resize the window.
-
-Non-panorama images (2D projection) always use the `Standard` view transform and do not persist preferred
-view-transform choices.
+For panorama images, (2:1 aspect, hdr or exr) the last view transform used persists. For all others, Standard is always loaded by default.
 
 ---
 

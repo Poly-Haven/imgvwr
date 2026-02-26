@@ -13,7 +13,6 @@ from typing import Any, Callable, Final
 
 import numpy as np
 
-_SUPPORTED_EXTENSIONS: Final[set[str]] = {".exr", ".hdr", ".jpg", ".jpeg"}
 _READ_PROGRESS_WEIGHT: Final[float] = 0.90
 
 ProgressCallback = Callable[[float], None]
@@ -33,9 +32,10 @@ class ImageData:
 
 
 def is_supported_image_path(path: Path) -> bool:
-    """Checks if the file extension is supported by the viewer."""
+    """Returns True because the loader now attempts to open any requested file path."""
 
-    return path.suffix.lower() in _SUPPORTED_EXTENSIONS
+    _ = path
+    return True
 
 
 def normalize_rgb_channels(pixels: np.ndarray) -> np.ndarray:
@@ -93,9 +93,6 @@ def load_image(path: Path, progress_callback: ProgressCallback | None = None) ->
 
 def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData:
     """Loads an image directly in-process via OpenImageIO."""
-
-    if not is_supported_image_path(path):
-        raise ValueError(f"Unsupported image format: {path.suffix}")
 
     import OpenImageIO as oiio
 
@@ -180,9 +177,6 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
 
 def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData:
     """Loads image in a subprocess to isolate native-library crashes on Windows."""
-
-    if not is_supported_image_path(path):
-        raise ValueError(f"Unsupported image format: {path.suffix}")
 
     with tempfile.TemporaryDirectory(prefix="imgvwr_loader_") as directory:
         work_dir = Path(directory)
@@ -272,9 +266,6 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
 
 def _load_encoded_image_fast(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData | None:
     """Fast in-process loader for 8-bit encoded images using Pillow."""
-
-    if not is_supported_image_path(path):
-        raise ValueError(f"Unsupported image format: {path.suffix}")
 
     try:
         from PIL import Image

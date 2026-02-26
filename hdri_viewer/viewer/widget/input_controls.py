@@ -6,8 +6,6 @@ from pathlib import Path
 from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QCursor, QDragEnterEvent, QDropEvent, QKeyEvent, QMouseEvent, QWheelEvent
 
-from hdri_viewer.io.image_loader import is_supported_image_path
-
 
 class InputControlsMixin:
     """Mouse, keyboard, drag/drop, and camera interaction helpers."""
@@ -417,7 +415,7 @@ class InputControlsMixin:
         return achieved_scale / current_scale
 
     def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
-        """Accepts drag operations for supported image files."""
+        """Accepts drag operations for local files."""
 
         if event is None:
             return
@@ -425,11 +423,9 @@ class InputControlsMixin:
         mime_data = event.mimeData()
         if mime_data is not None and mime_data.hasUrls():
             urls = mime_data.urls()
-            if urls:
-                path = Path(urls[0].toLocalFile())
-                if is_supported_image_path(path):
-                    event.acceptProposedAction()
-                    return
+            if urls and urls[0].isLocalFile() and urls[0].toLocalFile():
+                event.acceptProposedAction()
+                return
         event.ignore()
 
     def dropEvent(self, event: QDropEvent | None) -> None:

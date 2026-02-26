@@ -14,7 +14,7 @@ from hdri_viewer.io.image_loader import is_supported_image_path, normalize_rgb_c
 def test_supported_extension_check() -> None:
     assert is_supported_image_path(Path("a.exr"))
     assert is_supported_image_path(Path("b.HDR"))
-    assert not is_supported_image_path(Path("c.png"))
+    assert is_supported_image_path(Path("c.png"))
 
 
 def test_channel_normalization_from_one_channel() -> None:

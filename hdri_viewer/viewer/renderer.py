@@ -38,6 +38,7 @@ class PanoramaRenderer:
         self._ocio_shader = OcioShader(shader_text="", function_name="")
         self._shader_cache_key: tuple[str, str, str] | None = None
         self._projection_2d_enabled = False
+        self._projection_2d_wrap_enabled = True
         self._fisheye_enabled = True
         self._image_aspect = 1.0
         self._input_is_encoded_srgb = False
@@ -88,6 +89,11 @@ class PanoramaRenderer:
         """Sets whether rendering uses 2D UV pan/zoom instead of equirectangular projection."""
 
         self._projection_2d_enabled = enabled
+
+    def set_projection_2d_wrap_enabled(self, enabled: bool) -> None:
+        """Sets 2D wrapping mode: tiled repeat on both axes when enabled."""
+
+        self._projection_2d_wrap_enabled = enabled
 
     def set_fisheye_enabled(self, enabled: bool) -> None:
         """Sets lens mode for perspective view: fisheye or rectilinear."""
@@ -158,6 +164,10 @@ class PanoramaRenderer:
         self._set_uniform_if_changed("u_pitch", float(camera.pitch_radians))
         self._set_uniform_if_changed("u_exposure", float(self._state.exposure_stops))
         self._set_uniform_if_changed("u_projection_mode", float(1.0 if self._projection_2d_enabled else 0.0))
+        self._set_uniform_if_changed(
+            "u_projection_2d_wrap_enabled",
+            float(1.0 if self._projection_2d_wrap_enabled else 0.0),
+        )
         self._set_uniform_if_changed("u_fisheye_enabled", float(1.0 if self._fisheye_enabled else 0.0))
         self._set_uniform_if_changed("u_image_aspect", float(self._image_aspect))
         self._set_uniform_if_changed("u_input_is_encoded_srgb", float(1.0 if self._input_is_encoded_srgb else 0.0))

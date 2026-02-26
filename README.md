@@ -11,11 +11,16 @@
 - `.`: exposure +1 stop
 - Right-click: context menu (open/reload/view transform/file info)
 - `P`: Toggle 2D projection and equirectangular
+- `Home`: Reset zoom and pan to the image's original opened view
+- `W`: In 2D mode, toggle tiled wrapping on/off (both axes, default: off)
 - `F`: Toggle fisheye and rectilinear lens (rectilinear is default)
 - `T`: Toggle view transform
 - `F2`: Toggle image metadata overlay (top-left)
 - Double-click: Full screen
 - `Esc`: Exit
+
+In 2D mode, zoom first resizes the window (minimum `170x170`) to keep the image fit behavior consistent,
+then switches to optical zoom once the window reaches screen limits (including fullscreen).
 
 ---
 

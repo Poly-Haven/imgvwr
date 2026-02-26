@@ -97,12 +97,18 @@ class LoadingControlsMixin:
         self._renderer.set_image(image)
         self.doneCurrent()
 
-        self._projection_2d_enabled = self._should_default_to_2d_projection(
+        is_first_image_open = self._image_path is None
+        projection_2d_enabled = self._should_default_to_2d_projection(
             image.source_path,
             image.width,
             image.height,
         )
-        self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
+        self._set_projection_2d_mode(projection_2d_enabled)
+
+        if is_first_image_open:
+            self._fit_window_to_image_on_first_open(image.width, image.height)
+
+        self._capture_view_reset_state()
 
         self._image_path = image.source_path
         self._restore_preferred_view_transform(image.source_path)

@@ -11,6 +11,7 @@ uniform float u_tan_half_fov;
 uniform float u_aspect;
 uniform float u_exposure;
 uniform float u_projection_mode;
+uniform float u_projection_2d_wrap_enabled;
 uniform float u_fisheye_enabled;
 uniform float u_image_aspect;
 uniform float u_input_is_encoded_srgb;
@@ -69,8 +70,20 @@ void main() {
         float scale_x = inv_zoom * (u_aspect / max(u_image_aspect, 0.0001));
         float scale_y = inv_zoom;
 
-        uv.x = fract(0.5 + pan_u + centered.x * scale_x);
-        uv.y = clamp(0.5 + pan_v - centered.y * scale_y, 0.0, 1.0);
+        vec2 raw_uv = vec2(
+            0.5 + pan_u + centered.x * scale_x,
+            0.5 + pan_v - centered.y * scale_y
+        );
+
+        if (u_projection_2d_wrap_enabled >= 0.5) {
+            uv = fract(raw_uv);
+        } else {
+            if (raw_uv.x < 0.0 || raw_uv.x > 1.0 || raw_uv.y < 0.0 || raw_uv.y > 1.0) {
+                frag_color = vec4(0.0, 0.0, 0.0, 1.0);
+                return;
+            }
+            uv = raw_uv;
+        }
     } else {
         vec2 ndc = v_uv * 2.0 - 1.0;
         vec3 ray;

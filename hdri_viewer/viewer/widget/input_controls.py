@@ -105,8 +105,11 @@ class InputControlsMixin:
             self._exposure_stops += steps * 0.1
             self._renderer.set_exposure(self._exposure_stops)
         else:
-            fov_scale = max(0.25, self._camera.state.fov_degrees / 90.0)
-            self._camera.adjust_fov(-steps * 2.0 * fov_scale)
+            if self._projection_2d_enabled:
+                self._handle_2d_zoom_wheel(steps)
+            else:
+                fov_scale = max(0.25, self._camera.state.fov_degrees / 90.0)
+                self._camera.adjust_fov(-steps * 2.0 * fov_scale)
         self.update()
 
     def keyPressEvent(self, event: QKeyEvent | None) -> None:
@@ -136,9 +139,15 @@ class InputControlsMixin:
             center_u, center_v = self._camera_center_uv(self._projection_2d_enabled)
             next_projection_2d_enabled = not self._projection_2d_enabled
             self._set_camera_from_center_uv(center_u, center_v, next_projection_2d_enabled)
-
-            self._projection_2d_enabled = next_projection_2d_enabled
-            self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
+            self._set_projection_2d_mode(next_projection_2d_enabled)
+            self.update()
+            return
+        if event.key() == Qt.Key.Key_Home:
+            self._reset_view_to_original_state()
+            self.update()
+            return
+        if event.key() == Qt.Key.Key_W:
+            self._set_projection_2d_wrap_enabled(not self._projection_2d_wrap_enabled)
             self.update()
             return
         if event.key() == Qt.Key.Key_F2:
@@ -165,7 +174,11 @@ class InputControlsMixin:
             self._fisheye_enabled = next_fisheye_enabled
             self._renderer.set_fisheye_enabled(self._fisheye_enabled)
             self._camera.state.fov_degrees = converted_fov_degrees
-            self._camera.set_max_fov_degrees(next_max_fov_degrees)
+            if self._projection_2d_enabled:
+                self._camera.set_max_fov_degrees(self._MAX_FOV_DEGREES_2D)
+                self._camera.state.fov_degrees = min(self._camera.state.fov_degrees, self._FIT_FOV_DEGREES_2D)
+            else:
+                self._camera.set_max_fov_degrees(next_max_fov_degrees)
             self.update()
             return
 
@@ -204,6 +217,85 @@ class InputControlsMixin:
         pitch_limit = math.radians(89.0)
         self._camera.state.yaw_radians = base_yaw
         self._camera.state.pitch_radians = max(-pitch_limit, min(pitch_limit, target_pitch))
+
+    def _handle_2d_zoom_wheel(self, steps: float) -> None:
+        """Applies continuous 2D zoom using one factor across resize and optical ranges."""
+
+        if abs(steps) < 1e-8:
+            return
+
+        fit_fov = self._FIT_FOV_DEGREES_2D
+        epsilon = 1e-6
+
+        # Keep one logical "notch" unit independent of input hardware granularity.
+        wheel_notches = steps / 6.0
+        zoom_per_notch = 1.12
+        remaining_factor = zoom_per_notch**wheel_notches
+
+        if remaining_factor > 1.0 + epsilon:
+            if self._camera.state.fov_degrees > fit_fov + epsilon:
+                current_scale = self._current_2d_optical_zoom_scale()
+                fit_scale = 1.0
+                factor_to_fit = fit_scale / max(current_scale, epsilon)
+                optical_factor = min(remaining_factor, factor_to_fit)
+                achieved = self._apply_2d_optical_zoom_factor(optical_factor)
+                remaining_factor /= max(achieved, epsilon)
+
+                if self._camera.state.fov_degrees <= fit_fov + epsilon:
+                    self._camera.state.fov_degrees = fit_fov
+
+            if remaining_factor > 1.0 + epsilon:
+                achieved_window = self._resize_window_for_2d_zoom(remaining_factor)
+                remaining_factor /= max(achieved_window, epsilon)
+
+            if remaining_factor > 1.0 + epsilon:
+                self._apply_2d_optical_zoom_factor(remaining_factor)
+            return
+
+        if remaining_factor < 1.0 - epsilon:
+            if self._camera.state.fov_degrees < fit_fov - epsilon:
+                achieved = self._apply_2d_optical_zoom_factor(remaining_factor)
+                remaining_factor /= max(achieved, epsilon)
+
+                if self._camera.state.fov_degrees >= fit_fov - epsilon:
+                    self._camera.state.fov_degrees = fit_fov
+
+            if remaining_factor < 1.0 - epsilon:
+                achieved_window = self._resize_window_for_2d_zoom(remaining_factor)
+                remaining_factor /= max(achieved_window, epsilon)
+
+            if remaining_factor < 1.0 - epsilon:
+                self._apply_2d_optical_zoom_factor(remaining_factor)
+
+    def _current_2d_optical_zoom_scale(self) -> float:
+        """Returns current 2D optical zoom scale relative to fit-FOV state."""
+
+        fit_half_fov = math.radians(self._FIT_FOV_DEGREES_2D) * 0.5
+        fit_inv_zoom = max(math.tan(fit_half_fov), 1e-6)
+
+        current_half_fov = math.radians(self._camera.state.fov_degrees) * 0.5
+        current_inv_zoom = max(math.tan(current_half_fov), 1e-6)
+        return fit_inv_zoom / current_inv_zoom
+
+    def _apply_2d_optical_zoom_factor(self, factor: float) -> float:
+        """Applies multiplicative optical zoom factor and returns achieved factor."""
+
+        safe_factor = max(float(factor), 1e-6)
+        current_scale = max(self._current_2d_optical_zoom_scale(), 1e-6)
+        target_scale = max(current_scale * safe_factor, 1e-6)
+
+        fit_half_fov = math.radians(self._FIT_FOV_DEGREES_2D) * 0.5
+        fit_inv_zoom = max(math.tan(fit_half_fov), 1e-6)
+
+        target_inv_zoom = fit_inv_zoom / target_scale
+        target_half_fov = math.atan(max(target_inv_zoom, 1e-6))
+        target_fov = math.degrees(target_half_fov * 2.0)
+
+        current_fov = self._camera.state.fov_degrees
+        self._camera.adjust_fov(target_fov - current_fov)
+
+        achieved_scale = max(self._current_2d_optical_zoom_scale(), 1e-6)
+        return achieved_scale / current_scale
 
     def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
         """Accepts drag operations for supported image files."""

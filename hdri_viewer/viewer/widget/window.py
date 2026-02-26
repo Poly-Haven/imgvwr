@@ -13,6 +13,7 @@ class ViewerWindow(QMainWindow):
     def __init__(self, initial_path: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle("imgvwr")
+        self.setMinimumSize(170, 170)
         self.resize(1280, 720)
 
         self._widget = HdriViewerWidget(self)

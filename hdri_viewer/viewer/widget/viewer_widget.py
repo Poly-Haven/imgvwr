@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 
@@ -30,6 +31,10 @@ class HdriViewerWidget(
     QOpenGLWidget,
 ):
     """OpenGL widget that manages user interaction, rendering, and async loading."""
+
+    _MIN_WINDOW_EDGE_PX = 170
+    _FIT_FOV_DEGREES_2D = 90.0
+    _MAX_FOV_DEGREES_2D = 170.0
 
     def __init__(self, parent: QMainWindow | None = None) -> None:
         super().__init__(parent)
@@ -64,8 +69,14 @@ class HdriViewerWidget(
         self._load_progress_value = 0.0
         self._awaiting_first_present = False
         self._projection_2d_enabled = False
+        self._projection_2d_wrap_enabled = False
         self._sync_loading_in_progress = False
         self._metadata_overlay_visible = False
+        self._reset_state_yaw_radians = 0.0
+        self._reset_state_pitch_radians = 0.0
+        self._reset_state_fov_degrees = self._camera.state.fov_degrees
+        self._reset_state_projection_2d_enabled = False
+        self._reset_state_window_size: tuple[int, int] | None = None
 
         self._overlay_label = QLabel("", self)
         self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -114,6 +125,7 @@ class HdriViewerWidget(
         self._gl_initialized = True
         self._renderer.set_exposure(self._exposure_stops)
         self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
+        self._renderer.set_projection_2d_wrap_enabled(self._projection_2d_wrap_enabled)
         self._renderer.set_fisheye_enabled(self._fisheye_enabled)
         self._ocio_manager.reload()
         self._restore_preferred_view_transform(self._pending_initial_path)
@@ -137,9 +149,326 @@ class HdriViewerWidget(
         """Updates renderer viewport."""
 
         self._renderer.set_viewport(width, height)
+        if self._projection_2d_enabled:
+            self._camera.set_max_fov_degrees(self._MAX_FOV_DEGREES_2D)
+            self._clamp_2d_pan_to_image_bounds()
+            return
+
         if not self._fisheye_enabled:
             viewport_aspect = max(width, 1) / max(height, 1)
             self._camera.set_max_fov_degrees(self._rectilinear_max_fov_degrees(viewport_aspect))
+
+    def _set_projection_2d_mode(self, enabled: bool) -> None:
+        """Updates 2D projection state and its camera constraints."""
+
+        self._projection_2d_enabled = enabled
+        self._renderer.set_projection_2d_enabled(enabled)
+
+        if enabled:
+            self._camera.set_max_fov_degrees(self._MAX_FOV_DEGREES_2D)
+            self._camera.state.fov_degrees = min(self._camera.state.fov_degrees, self._FIT_FOV_DEGREES_2D)
+            return
+
+        if self._fisheye_enabled:
+            self._camera.set_max_fov_degrees(self._FISHEYE_MAX_FOV_DEGREES)
+            return
+
+        viewport_aspect = max(self.width(), 1) / max(self.height(), 1)
+        self._camera.set_max_fov_degrees(self._rectilinear_max_fov_degrees(viewport_aspect))
+
+    def _set_projection_2d_wrap_enabled(self, enabled: bool) -> None:
+        """Sets 2D wrap mode: tiled repeat on both axes or no wrapping."""
+
+        self._projection_2d_wrap_enabled = enabled
+        self._renderer.set_projection_2d_wrap_enabled(enabled)
+        if not enabled:
+            self._clamp_2d_pan_to_image_bounds()
+
+    @staticmethod
+    def _fit_aspect_within_bounds(max_width: int, max_height: int, aspect_ratio: float) -> tuple[int, int]:
+        """Fits a size preserving aspect ratio into bounds."""
+
+        bounded_width = max(1, int(max_width))
+        bounded_height = max(1, int(max_height))
+        aspect = max(float(aspect_ratio), 1e-6)
+
+        width = min(float(bounded_width), float(bounded_height) * aspect)
+        height = width / aspect
+        if height > float(bounded_height):
+            height = float(bounded_height)
+            width = height * aspect
+
+        return max(1, int(round(width))), max(1, int(round(height)))
+
+    @classmethod
+    def _minimum_2d_window_size_for_aspect(cls, aspect_ratio: float) -> tuple[int, int]:
+        """Computes minimum 2D window size preserving image aspect and minimum edge."""
+
+        aspect = max(float(aspect_ratio), 1e-6)
+        min_edge = cls._MIN_WINDOW_EDGE_PX
+
+        width = float(min_edge)
+        height = width / aspect
+        if height < float(min_edge):
+            height = float(min_edge)
+            width = height * aspect
+
+        return int(round(width)), int(round(height))
+
+    def _resize_window_for_2d_zoom(self, zoom_multiplier: float) -> float:
+        """Resizes top-level window for 2D zoom and returns achieved zoom factor."""
+
+        if zoom_multiplier <= 0.0:
+            return 1.0
+
+        window = self.window()
+        if window is None or not isinstance(window, QMainWindow):
+            return 1.0
+        if window.isFullScreen() or window.isMaximized():
+            return 1.0
+
+        screen = window.screen()
+        if screen is None:
+            handle = window.windowHandle()
+            if handle is not None:
+                screen = handle.screen()
+        if screen is None:
+            return 1.0
+
+        before_width = max(window.width(), 1)
+
+        available = screen.availableGeometry()
+        frame_left, frame_top, frame_right, frame_bottom = self._window_frame_margins(window)
+        max_window_width = max(1, int(available.width()) - frame_left - frame_right)
+        max_window_height = max(1, int(available.height()) - frame_top - frame_bottom)
+
+        image_aspect = max(self._renderer.image_aspect, 1e-6)
+        min_width, min_height = self._minimum_2d_window_size_for_aspect(image_aspect)
+        max_width, max_height = self._fit_aspect_within_bounds(max_window_width, max_window_height, image_aspect)
+
+        current_width = max(window.width(), 1)
+        current_height = max(window.height(), 1)
+        current_aspect = current_width / current_height
+        if abs(current_aspect - image_aspect) > 1e-3:
+            current_width, current_height = self._fit_aspect_within_bounds(current_width, current_height, image_aspect)
+
+        target_width = int(round(current_width * zoom_multiplier))
+        target_height = int(round(current_height * zoom_multiplier))
+        target_width, target_height = self._fit_aspect_within_bounds(target_width, target_height, image_aspect)
+
+        clamped_width = min(max(target_width, min_width), max_width)
+        clamped_height = min(max(target_height, min_height), max_height)
+        clamped_width, clamped_height = self._fit_aspect_within_bounds(clamped_width, clamped_height, image_aspect)
+
+        resized = self._resize_window_centered(clamped_width, clamped_height)
+        if not resized:
+            return 1.0
+
+        after_width = max(window.width(), 1)
+        achieved_factor = after_width / before_width
+        if zoom_multiplier >= 1.0:
+            return min(max(achieved_factor, 1.0), zoom_multiplier)
+        return max(min(achieved_factor, 1.0), zoom_multiplier)
+
+    def _clamp_2d_pan_to_image_bounds(self) -> None:
+        """Keeps 2D view inside image bounds (no black background) when wrapping is disabled."""
+
+        if not self._projection_2d_enabled or self._projection_2d_wrap_enabled:
+            return
+        if not self._renderer.has_texture:
+            return
+
+        viewport_width = max(self.width(), 1)
+        viewport_height = max(self.height(), 1)
+        viewport_aspect = viewport_width / viewport_height
+        image_aspect = max(self._renderer.image_aspect, 1e-6)
+
+        inv_zoom = max(math.tan(math.radians(self._camera.state.fov_degrees) * 0.5), 0.02)
+        scale_x = inv_zoom * (viewport_aspect / image_aspect)
+        scale_y = inv_zoom
+
+        half_span_u = 0.5 * scale_x
+        half_span_v = 0.5 * scale_y
+
+        pan_u = self._camera.state.yaw_radians / (2.0 * math.pi)
+        pan_v = -self._camera.state.pitch_radians / math.pi
+
+        if half_span_u < 0.5:
+            min_pan_u = -0.5 + half_span_u
+            max_pan_u = 0.5 - half_span_u
+            pan_u = min(max(pan_u, min_pan_u), max_pan_u)
+        else:
+            pan_u = 0.0
+
+        if half_span_v < 0.5:
+            min_pan_v = -0.5 + half_span_v
+            max_pan_v = 0.5 - half_span_v
+            pan_v = min(max(pan_v, min_pan_v), max_pan_v)
+        else:
+            pan_v = 0.0
+
+        self._camera.state.yaw_radians = pan_u * (2.0 * math.pi)
+        self._camera.state.pitch_radians = -pan_v * math.pi
+
+    @staticmethod
+    def _window_frame_margins(window: QMainWindow) -> tuple[int, int, int, int]:
+        """Returns current frame margins as left, top, right, bottom pixel values."""
+
+        geometry = window.geometry()
+        frame = window.frameGeometry()
+
+        frame_left = max(0, geometry.x() - frame.x())
+        frame_top = max(0, geometry.y() - frame.y())
+        frame_right = max(0, frame.right() - geometry.right())
+        frame_bottom = max(0, frame.bottom() - geometry.bottom())
+        return frame_left, frame_top, frame_right, frame_bottom
+
+    def _resize_window_centered(self, target_width: int, target_height: int) -> bool:
+        """Resizes the top-level window while keeping its center position stable."""
+
+        window = self.window()
+        if window is None or not isinstance(window, QMainWindow):
+            return False
+        if window.isFullScreen() or window.isMaximized():
+            return False
+
+        screen = window.screen()
+        if screen is None:
+            handle = window.windowHandle()
+            if handle is not None:
+                screen = handle.screen()
+
+        width = max(1, int(target_width))
+        height = max(1, int(target_height))
+
+        frame_left, frame_top, frame_right, frame_bottom = self._window_frame_margins(window)
+        if screen is not None:
+            available = screen.availableGeometry()
+            max_client_width = max(1, int(available.width()) - frame_left - frame_right)
+            max_client_height = max(1, int(available.height()) - frame_top - frame_bottom)
+            width = min(width, max_client_width)
+            height = min(height, max_client_height)
+
+        if width == window.width() and height == window.height():
+            return False
+
+        old_frame = window.frameGeometry()
+        center = old_frame.center()
+
+        target_frame_width = width + frame_left + frame_right
+        target_frame_height = height + frame_top + frame_bottom
+        target_frame_x = center.x() - (target_frame_width // 2)
+        target_frame_y = center.y() - (target_frame_height // 2)
+
+        if screen is not None:
+            available = screen.availableGeometry()
+            min_frame_x = available.left()
+            min_frame_y = available.top()
+            max_frame_x = available.right() - target_frame_width + 1
+            max_frame_y = available.bottom() - target_frame_height + 1
+            if max_frame_x < min_frame_x:
+                max_frame_x = min_frame_x
+            if max_frame_y < min_frame_y:
+                max_frame_y = min_frame_y
+            target_frame_x = min(max(target_frame_x, min_frame_x), max_frame_x)
+            target_frame_y = min(max(target_frame_y, min_frame_y), max_frame_y)
+
+        # Move first, then resize to reduce visible jitter while growing.
+        window.move(target_frame_x, target_frame_y)
+        window.resize(width, height)
+
+        if screen is not None:
+            final_frame = window.frameGeometry()
+            available = screen.availableGeometry()
+            min_frame_x = available.left()
+            min_frame_y = available.top()
+            max_frame_x = available.right() - final_frame.width() + 1
+            max_frame_y = available.bottom() - final_frame.height() + 1
+            if max_frame_x < min_frame_x:
+                max_frame_x = min_frame_x
+            if max_frame_y < min_frame_y:
+                max_frame_y = min_frame_y
+            corrected_x = min(max(final_frame.x(), min_frame_x), max_frame_x)
+            corrected_y = min(max(final_frame.y(), min_frame_y), max_frame_y)
+            if corrected_x != final_frame.x() or corrected_y != final_frame.y():
+                window.move(corrected_x, corrected_y)
+
+        return True
+
+    def _fit_window_to_image_on_first_open(self, image_width: int, image_height: int) -> None:
+        """Fits window to first opened 2D image, constrained by screen bounds and min size."""
+
+        if not self._projection_2d_enabled:
+            return
+
+        safe_width = max(int(image_width), 1)
+        safe_height = max(int(image_height), 1)
+        image_aspect = safe_width / safe_height
+
+        requested_width = safe_width
+        requested_height = safe_height
+
+        window = self.window()
+        if window is None or not isinstance(window, QMainWindow):
+            return
+
+        screen = window.screen()
+        if screen is None:
+            handle = window.windowHandle()
+            if handle is not None:
+                screen = handle.screen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        frame_left, frame_top, frame_right, frame_bottom = self._window_frame_margins(window)
+        max_width = max(1, int(available.width()) - frame_left - frame_right)
+        max_height = max(1, int(available.height()) - frame_top - frame_bottom)
+        min_width, min_height = self._minimum_2d_window_size_for_aspect(image_aspect)
+        fit_width, fit_height = self._fit_aspect_within_bounds(max_width, max_height, image_aspect)
+
+        target_width = requested_width
+        target_height = requested_height
+        if target_width > max_width or target_height > max_height:
+            target_width = fit_width
+            target_height = fit_height
+        else:
+            target_width, target_height = self._fit_aspect_within_bounds(target_width, target_height, image_aspect)
+
+        target_width = min(max(target_width, min_width), fit_width)
+        target_height = min(max(target_height, min_height), fit_height)
+        target_width, target_height = self._fit_aspect_within_bounds(target_width, target_height, image_aspect)
+
+        self._camera.state.fov_degrees = self._FIT_FOV_DEGREES_2D
+        self._resize_window_centered(target_width, target_height)
+
+    def _capture_view_reset_state(self) -> None:
+        """Captures the current pan/zoom state used by Home reset."""
+
+        self._reset_state_yaw_radians = self._camera.state.yaw_radians
+        self._reset_state_pitch_radians = self._camera.state.pitch_radians
+        self._reset_state_fov_degrees = self._camera.state.fov_degrees
+        self._reset_state_projection_2d_enabled = self._projection_2d_enabled
+
+        window = self.window()
+        if window is not None and isinstance(window, QMainWindow):
+            self._reset_state_window_size = (max(window.width(), 1), max(window.height(), 1))
+        else:
+            self._reset_state_window_size = None
+
+    def _reset_view_to_original_state(self) -> None:
+        """Restores pan/zoom state captured for the currently opened image."""
+
+        self._camera.state.yaw_radians = self._reset_state_yaw_radians
+        self._camera.state.pitch_radians = self._reset_state_pitch_radians
+
+        if self._projection_2d_enabled:
+            self._camera.state.fov_degrees = min(self._reset_state_fov_degrees, self._FIT_FOV_DEGREES_2D)
+            if self._reset_state_projection_2d_enabled and self._reset_state_window_size is not None:
+                target_width, target_height = self._reset_state_window_size
+                self._resize_window_centered(target_width, target_height)
+        else:
+            self._camera.state.fov_degrees = self._reset_state_fov_degrees
 
     def paintGL(self) -> None:
         """Delegates frame rendering to the OpenGL renderer."""

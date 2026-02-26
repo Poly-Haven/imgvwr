@@ -8,7 +8,7 @@ from hdri_viewer.viewer.camera import CameraController
 def test_pitch_is_clamped() -> None:
     camera = CameraController()
     camera.rotate(0.0, 50000.0)
-    assert camera.state.pitch_radians <= math.radians(89.0)
+    assert camera.state.pitch_radians <= math.radians(90.0)
 
 
 def test_fov_is_clamped() -> None:

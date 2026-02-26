@@ -3,8 +3,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QKeyEvent, QMouseEvent, QWheelEvent
+from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtGui import QCursor, QDragEnterEvent, QDropEvent, QKeyEvent, QMouseEvent, QWheelEvent
 
 from hdri_viewer.io.image_loader import is_supported_image_path
 
@@ -27,6 +27,24 @@ class InputControlsMixin:
 
         if event is not None and event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             self._last_mouse_pos = event.position().toPoint()
+            self._pending_continuous_grab_warp_pos: QPoint | None = None
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.grabMouse()
+
+    def mouseReleaseEvent(self, event: QMouseEvent | None) -> None:
+        """Releases explicit mouse grab when drag buttons are no longer held."""
+
+        if event is None:
+            return
+
+        super().mouseReleaseEvent(event)
+
+        if event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
+            return
+
+        if not (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.MiddleButton)):
+            self.releaseMouse()
+            self._pending_continuous_grab_warp_pos = None
 
     def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
         """Rotates/pans camera while dragging with left or middle mouse button."""
@@ -35,7 +53,23 @@ class InputControlsMixin:
             return
 
         pos = event.position().toPoint()
+        pending_warp_pos = getattr(self, "_pending_continuous_grab_warp_pos", None)
+        if pending_warp_pos is not None:
+            if (pos - pending_warp_pos).manhattanLength() <= 4:
+                self._last_mouse_pos = pos
+                self._pending_continuous_grab_warp_pos = None
+                return
+
+            # If we missed the synthetic post-warp event (fast motion/OS timing),
+            # recover immediately instead of staying stuck in a pending state.
+            self._last_mouse_pos = pos
+            self._pending_continuous_grab_warp_pos = None
+            return
+
         delta = pos - self._last_mouse_pos
+        delta = self._normalize_continuous_grab_delta(
+            delta, viewport_width=max(self.width(), 1), viewport_height=max(self.height(), 1)
+        )
         self._last_mouse_pos = pos
 
         viewport_width = max(self.width(), 1)
@@ -60,6 +94,7 @@ class InputControlsMixin:
                 self._clamp_2d_pan_for_drag()
 
             self.update()
+            self._wrap_cursor_for_continuous_grab(pos)
             return
         else:
             half_fov_radians = math.radians(self._camera.state.fov_degrees) * 0.5
@@ -84,6 +119,64 @@ class InputControlsMixin:
 
         self._camera.rotate_radians(yaw_delta, pitch_delta)
         self.update()
+        self._wrap_cursor_for_continuous_grab(pos)
+
+    @staticmethod
+    def _normalize_continuous_grab_delta(delta: QPoint, viewport_width: int, viewport_height: int) -> QPoint:
+        """Converts wrapped-edge deltas to shortest-path motion on each axis."""
+
+        dx = int(delta.x())
+        dy = int(delta.y())
+
+        if viewport_width > 1:
+            half_width = viewport_width // 2
+            if dx > half_width:
+                dx -= viewport_width
+            elif dx < -half_width:
+                dx += viewport_width
+
+        if viewport_height > 1:
+            half_height = viewport_height // 2
+            if dy > half_height:
+                dy -= viewport_height
+            elif dy < -half_height:
+                dy += viewport_height
+
+        return QPoint(dx, dy)
+
+    def _wrap_cursor_for_continuous_grab(self, pos: QPoint) -> None:
+        """Wraps cursor across viewport edges to allow infinite drag panning."""
+
+        viewport_width = max(self.width(), 1)
+        viewport_height = max(self.height(), 1)
+        if viewport_width < 3 or viewport_height < 3:
+            return
+
+        target_x = pos.x()
+        target_y = pos.y()
+        wrapped = False
+
+        if pos.x() <= 0:
+            target_x = viewport_width - 2
+            wrapped = True
+        elif pos.x() >= viewport_width - 1:
+            target_x = 1
+            wrapped = True
+
+        if pos.y() <= 0:
+            target_y = viewport_height - 2
+            wrapped = True
+        elif pos.y() >= viewport_height - 1:
+            target_y = 1
+            wrapped = True
+
+        if not wrapped:
+            return
+
+        wrapped_pos = QPoint(target_x, target_y)
+        self._last_mouse_pos = wrapped_pos
+        self._pending_continuous_grab_warp_pos = wrapped_pos
+        QCursor.setPos(self.mapToGlobal(wrapped_pos))
 
     def mouseDoubleClickEvent(self, event: QMouseEvent | None) -> None:
         """Toggles fullscreen mode on left-button double click."""

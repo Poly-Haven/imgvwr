@@ -273,13 +273,18 @@ class HdriViewerWidget(
     def _clamp_2d_pan_to_image_bounds(self) -> None:
         """Keeps 2D view inside image bounds (no black background) when wrapping is disabled."""
 
+        self._clamp_2d_pan_to_image_bounds_for_viewport(max(self.width(), 1), max(self.height(), 1))
+
+    def _clamp_2d_pan_to_image_bounds_for_viewport(self, viewport_width: int, viewport_height: int) -> None:
+        """Clamps 2D pan for an explicit viewport size to avoid post-resize correction jumps."""
+
         if not self._projection_2d_enabled or self._projection_2d_wrap_enabled:
             return
         if not self._renderer.has_texture:
             return
 
-        viewport_width = max(self.width(), 1)
-        viewport_height = max(self.height(), 1)
+        viewport_width = max(int(viewport_width), 1)
+        viewport_height = max(int(viewport_height), 1)
         viewport_aspect = viewport_width / viewport_height
         image_aspect = max(self._renderer.image_aspect, 1e-6)
 
@@ -373,25 +378,13 @@ class HdriViewerWidget(
             target_frame_x = min(max(target_frame_x, min_frame_x), max_frame_x)
             target_frame_y = min(max(target_frame_y, min_frame_y), max_frame_y)
 
-        # Move first, then resize to reduce visible jitter while growing.
-        window.move(target_frame_x, target_frame_y)
-        window.resize(width, height)
+        # Clamp pan in the same pass as zoom-resize so we avoid a second visual jump.
+        self._clamp_2d_pan_to_image_bounds_for_viewport(width, height)
 
-        if screen is not None:
-            final_frame = window.frameGeometry()
-            available = screen.availableGeometry()
-            min_frame_x = available.left()
-            min_frame_y = available.top()
-            max_frame_x = available.right() - final_frame.width() + 1
-            max_frame_y = available.bottom() - final_frame.height() + 1
-            if max_frame_x < min_frame_x:
-                max_frame_x = min_frame_x
-            if max_frame_y < min_frame_y:
-                max_frame_y = min_frame_y
-            corrected_x = min(max(final_frame.x(), min_frame_x), max_frame_x)
-            corrected_y = min(max(final_frame.y(), min_frame_y), max_frame_y)
-            if corrected_x != final_frame.x() or corrected_y != final_frame.y():
-                window.move(corrected_x, corrected_y)
+        # Single top-level geometry update to minimize OS-level jitter.
+        client_x = target_frame_x + frame_left
+        client_y = target_frame_y + frame_top
+        window.setGeometry(client_x, client_y, width, height)
 
         return True
 

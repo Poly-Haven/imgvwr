@@ -96,6 +96,7 @@ class MenuControlsMixin:
 
         self._ocio_manager.set_active_view(display, view)
         active = self._ocio_manager.active_view
+        self._persist_active_view_transform(active.display, active.view)
         if remember_non_standard and active.view.lower() != "standard":
             self._preferred_view_by_display[active.display] = active.view
         self._renderer.update_ocio_shader(self._ocio_manager.build_gpu_shader())

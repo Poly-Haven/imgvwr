@@ -9,6 +9,7 @@ from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import QLabel, QMainWindow, QWidget
 
 from hdri_viewer.color.ocio_manager import OcioManager
+from hdri_viewer.preferences import AppPreferences, PreferredViewTransform, load_preferences, save_preferences
 from hdri_viewer.viewer.camera import CameraController
 from hdri_viewer.viewer.renderer import PanoramaRenderer
 
@@ -58,6 +59,7 @@ class HdriViewerWidget(
         self._exposure_stops = 0.0
         self._file_info = FileInfo()
         self._preferred_view_by_display: dict[str, str] = {}
+        self._preferences = load_preferences()
         self._active_loader_signals: _ImageLoadSignals | None = None
         self._load_progress_value = 0.0
         self._awaiting_first_present = False
@@ -99,6 +101,7 @@ class HdriViewerWidget(
         self._renderer.set_projection_2d_enabled(self._projection_2d_enabled)
         self._renderer.set_fisheye_enabled(self._fisheye_enabled)
         self._ocio_manager.reload()
+        self._restore_preferred_view_transform()
         self._renderer.update_ocio_shader(self._ocio_manager.build_gpu_shader())
         self._schedule_initial_open_if_ready()
 
@@ -131,3 +134,27 @@ class HdriViewerWidget(
             self._awaiting_first_present = False
             self._set_loading_overlay("", False)
             self._set_overlay_text("")
+
+    def _restore_preferred_view_transform(self) -> None:
+        """Applies persisted display/view preference when available in current config."""
+
+        preferred = self._preferences.preferred_view_transform
+        if preferred is None:
+            return
+
+        self._ocio_manager.set_active_view(preferred.display, preferred.view)
+        active = self._ocio_manager.active_view
+        if active.display != preferred.display or active.view != preferred.view:
+            return
+
+        if active.view.lower() != "standard":
+            self._preferred_view_by_display[active.display] = active.view
+
+    def _persist_active_view_transform(self, display: str, view: str) -> None:
+        """Persists the currently selected display/view preference to disk."""
+
+        self._preferences = AppPreferences(preferred_view_transform=PreferredViewTransform(display=display, view=view))
+        try:
+            save_preferences(self._preferences)
+        except OSError:
+            return

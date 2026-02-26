@@ -16,8 +16,8 @@ class CameraState:
 class CameraController:
     """Handles camera manipulation for equirectangular image inspection."""
 
-    _MIN_PITCH_RAD = math.radians(-89.0)
-    _MAX_PITCH_RAD = math.radians(89.0)
+    _MIN_PITCH_RAD = math.radians(-90.0)
+    _MAX_PITCH_RAD = math.radians(90.0)
     _MIN_FOV_DEG = 5.0
     _MAX_FOV_DEG = 140.0
 

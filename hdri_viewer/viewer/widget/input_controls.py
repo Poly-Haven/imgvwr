@@ -46,11 +46,13 @@ class InputControlsMixin:
         else:
             tan_half_fov = math.tan(math.radians(self._camera.state.fov_degrees) * 0.5)
             aspect = viewport_width / viewport_height
+            latitude_radians = abs(self._camera.state.pitch_radians)
+            horizontal_pan_multiplier = min(2.5, 1.0 / math.cos(latitude_radians))
 
             yaw_radians_per_pixel = (2.0 * aspect * tan_half_fov) / viewport_width
             pitch_radians_per_pixel = (2.0 * tan_half_fov) / viewport_height
 
-            yaw_delta = float(delta.x()) * yaw_radians_per_pixel
+            yaw_delta = float(delta.x()) * yaw_radians_per_pixel * horizontal_pan_multiplier
             pitch_delta = float(delta.y()) * pitch_radians_per_pixel
 
         self._camera.rotate_radians(yaw_delta, pitch_delta)

@@ -259,6 +259,9 @@ class InputControlsMixin:
             self._toggle_standard_view()
             return
         if event.key() == Qt.Key.Key_F:
+            if self._projection_2d_enabled:
+                return
+
             next_fisheye_enabled = not self._fisheye_enabled
             viewport_aspect = max(self.width(), 1) / max(self.height(), 1)
             max_lens_radius = math.sqrt((viewport_aspect * viewport_aspect) + 1.0)

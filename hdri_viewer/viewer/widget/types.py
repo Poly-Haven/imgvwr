@@ -12,4 +12,5 @@ class FileInfo:
     height: int = 0
     channels: int = 0
     dtype_name: str = "-"
+    compression_name: str = "-"
     input_is_encoded_srgb: bool = False

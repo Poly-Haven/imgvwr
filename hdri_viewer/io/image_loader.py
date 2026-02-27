@@ -53,6 +53,7 @@ class ImageData:
     dtype_name: str
     pixels: np.ndarray
     input_is_encoded_srgb: bool = False
+    compression_name: str = "-"
 
 
 def is_supported_image_path(path: Path) -> bool:
@@ -139,6 +140,8 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
         height = int(spec.height)
         channels = int(spec.nchannels)
         bits_per_sample = _infer_bits_per_sample(spec)
+        source_dtype_name = _infer_source_dtype_name(spec, bits_per_sample)
+        compression_name = _infer_compression_name(spec)
         color_space_hint = _infer_color_space_hint(spec)
         icc_profile_bytes = _extract_icc_profile_bytes(spec)
         transfer_kind = _guess_transfer_kind(
@@ -146,7 +149,9 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
             color_space_hint=color_space_hint,
             source_path=path,
         )
-        is_fast_encoded_8bit = transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
+        is_fast_encoded_8bit = (
+            transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
+        )
         _emit_progress(progress_callback, 0.05)
 
         read_format = oiio_module.UINT8 if is_fast_encoded_8bit else oiio_module.FLOAT
@@ -178,9 +183,10 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
                 width=width,
                 height=height,
                 channels=channels,
-                dtype_name="uint8",
+                dtype_name=source_dtype_name,
                 pixels=rgb_pixels,
                 input_is_encoded_srgb=True,
+                compression_name=compression_name,
             )
 
         rgb_pixels = np.ascontiguousarray(
@@ -201,15 +207,18 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
             width=width,
             height=height,
             channels=channels,
-            dtype_name="float32",
+            dtype_name=source_dtype_name,
             pixels=rgb_pixels,
             input_is_encoded_srgb=False,
+            compression_name=compression_name,
         )
     finally:
         input_file.close()
 
 
-def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData:
+def _load_image_subprocess(
+    path: Path, progress_callback: ProgressCallback | None = None
+) -> ImageData:
     """Loads image in a subprocess to isolate native-library crashes on Windows."""
 
     with tempfile.TemporaryDirectory(prefix="imgvwr_loader_") as directory:
@@ -249,7 +258,10 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
 
         if return_code != 0:
             stderr_text = stderr_output.strip()
-            raise RuntimeError("Image loader subprocess failed. " f"Exit code: {return_code}. Stderr: {stderr_text}")
+            raise RuntimeError(
+                "Image loader subprocess failed. "
+                f"Exit code: {return_code}. Stderr: {stderr_text}"
+            )
 
         if not meta_path.exists() or not pixels_path.exists():
             raise RuntimeError("Image loader subprocess did not produce output files.")
@@ -264,7 +276,9 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
             color_space_hint=color_space_hint,
             source_path=path,
         )
-        is_fast_encoded_8bit = transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
+        is_fast_encoded_8bit = (
+            transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
+        )
 
         if is_fast_encoded_8bit:
             rgb_pixels = np.asarray(np.load(pixels_path), dtype=np.uint8)
@@ -275,7 +289,9 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
                 )
                 if icc_converted_u8 is not None:
                     rgb_pixels = icc_converted_u8
-            dtype_name = "uint8"
+            source_dtype_name = _coerce_optional_str(metadata.get("source_dtype_name"))
+            if source_dtype_name is None:
+                source_dtype_name = _coerce_optional_str(metadata.get("dtype_name")) or "uint8"
             input_is_encoded_srgb = True
         else:
             rgb_pixels = np.asarray(np.load(pixels_path), dtype=np.float32)
@@ -286,8 +302,12 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
                 icc_profile_bytes=_decode_optional_base64(metadata.get("icc_profile_b64")),
                 source_path=path,
             )
-            dtype_name = "float32"
+            source_dtype_name = _coerce_optional_str(metadata.get("source_dtype_name"))
+            if source_dtype_name is None:
+                source_dtype_name = _coerce_optional_str(metadata.get("dtype_name")) or "float32"
             input_is_encoded_srgb = False
+
+        compression_name = _coerce_optional_str(metadata.get("compression_name")) or "-"
 
         _emit_progress(progress_callback, 0.995)
         _emit_progress(progress_callback, 1.0)
@@ -297,13 +317,16 @@ def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | Non
             width=int(metadata["width"]),
             height=int(metadata["height"]),
             channels=int(metadata["channels"]),
-            dtype_name=dtype_name,
+            dtype_name=source_dtype_name,
             pixels=rgb_pixels,
             input_is_encoded_srgb=input_is_encoded_srgb,
+            compression_name=compression_name,
         )
 
 
-def _load_encoded_image_fast(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData | None:
+def _load_encoded_image_fast(
+    path: Path, progress_callback: ProgressCallback | None = None
+) -> ImageData | None:
     """Fast in-process loader for 8-bit encoded images using Pillow."""
 
     try:
@@ -342,12 +365,15 @@ def _load_encoded_image_fast(path: Path, progress_callback: ProgressCallback | N
                 dtype_name="uint8",
                 pixels=rgb_pixels,
                 input_is_encoded_srgb=True,
+                compression_name="-",
             )
     except Exception:
         return None
 
 
-def _load_raw_image_with_rawpy(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData | None:
+def _load_raw_image_with_rawpy(
+    path: Path, progress_callback: ProgressCallback | None = None
+) -> ImageData | None:
     """Loads full-resolution RAW files via rawpy as scene-linear float32 RGB."""
 
     if not _is_raw_image_path(path):
@@ -370,7 +396,9 @@ def _load_raw_image_with_rawpy(path: Path, progress_callback: ProgressCallback |
             )
 
         _emit_progress(progress_callback, _READ_PROGRESS_WEIGHT)
-        rgb_pixels = np.ascontiguousarray(np.asarray(rgb_u16, dtype=np.float32) / 65535.0, dtype=np.float32)
+        rgb_pixels = np.ascontiguousarray(
+            np.asarray(rgb_u16, dtype=np.float32) / 65535.0, dtype=np.float32
+        )
         _emit_progress(progress_callback, 1.0)
 
         return ImageData(
@@ -381,6 +409,7 @@ def _load_raw_image_with_rawpy(path: Path, progress_callback: ProgressCallback |
             dtype_name="float32",
             pixels=rgb_pixels,
             input_is_encoded_srgb=False,
+            compression_name="-",
         )
     except Exception:
         return None
@@ -427,7 +456,10 @@ def _guess_transfer_kind(
     if color_space_hint is not None:
         hint = color_space_hint.strip().lower()
         if hint:
-            if any(token in hint for token in ("scene_linear", "linear", "lin_", "raw", "acescg", "non-color")):
+            if any(
+                token in hint
+                for token in ("scene_linear", "linear", "lin_", "raw", "acescg", "non-color")
+            ):
                 return "linear"
             if any(token in hint for token in ("srgb", "gamma", "adobe", "display p3", "p3")):
                 return "encoded"
@@ -471,7 +503,9 @@ def _normalize_encoded_unit_range(pixels: np.ndarray, bits_per_sample: int | Non
     return np.clip(encoded, 0.0, 1.0)
 
 
-def _apply_icc_profile_to_srgb(pixels: np.ndarray, icc_profile_bytes: bytes | None) -> np.ndarray | None:
+def _apply_icc_profile_to_srgb(
+    pixels: np.ndarray, icc_profile_bytes: bytes | None
+) -> np.ndarray | None:
     """Applies embedded ICC profile to encoded RGB pixels, returning sRGB-encoded pixels."""
 
     if not icc_profile_bytes:
@@ -499,7 +533,9 @@ def _apply_icc_profile_to_srgb(pixels: np.ndarray, icc_profile_bytes: bytes | No
         return None
 
 
-def _apply_icc_profile_to_srgb_u8(pixels: np.ndarray, icc_profile_bytes: bytes | None) -> np.ndarray | None:
+def _apply_icc_profile_to_srgb_u8(
+    pixels: np.ndarray, icc_profile_bytes: bytes | None
+) -> np.ndarray | None:
     """Applies embedded ICC profile to uint8 encoded RGB pixels."""
 
     if not icc_profile_bytes:
@@ -568,6 +604,54 @@ def _infer_bits_per_sample(spec: Any) -> int | None:
             pass
 
     return None
+
+
+def _infer_source_dtype_name(spec: Any, bits_per_sample: int | None) -> str:
+    """Returns human-readable source pixel type from metadata."""
+
+    pixel_format = getattr(spec, "format", None)
+    if pixel_format is not None:
+        format_text = str(pixel_format).strip().lower()
+        if format_text:
+            if "half" in format_text:
+                return "half"
+            if "float" in format_text:
+                return "float32"
+            if "double" in format_text:
+                return "float64"
+            if any(token in format_text for token in ("uint8", "uchar", "byte")):
+                return "uint8"
+            if any(token in format_text for token in ("uint16", "ushort")):
+                return "uint16"
+            if "uint" in format_text:
+                return "uint32"
+            if any(token in format_text for token in ("int8", "char")):
+                return "int8"
+            if any(token in format_text for token in ("int16", "short")):
+                return "int16"
+            if "int" in format_text:
+                return "int32"
+
+    if bits_per_sample is not None:
+        if bits_per_sample <= 8:
+            return "uint8"
+        if bits_per_sample <= 16:
+            return "uint16"
+        if bits_per_sample <= 32:
+            return "float32"
+        return f"{bits_per_sample}-bit"
+
+    return "-"
+
+
+def _infer_compression_name(spec: Any) -> str:
+    """Returns human-readable compression type from metadata when present."""
+
+    for attribute_name in ("compression", "Compression"):
+        compression = _coerce_optional_str(spec.getattribute(attribute_name))
+        if compression is not None:
+            return compression
+    return "-"
 
 
 def _infer_color_space_hint(spec: Any) -> str | None:

@@ -64,6 +64,7 @@ class OverlayControlsMixin:
                 f"Resolution: {resolution_text}",
                 f"Channels: {self._file_info.channels}",
                 f"Data type: {self._file_info.dtype_name}",
+                f"Compression: {self._file_info.compression_name}",
                 f"Encoded sRGB input: {encoded_text}",
             ]
         )

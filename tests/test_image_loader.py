@@ -93,7 +93,9 @@ def test_load_image_dispatches_to_subprocess_on_windows(monkeypatch: pytest.Monk
     assert result is expected
 
 
-def test_load_image_dispatches_to_fast_encoded_path_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_image_dispatches_to_fast_encoded_path_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     expected = image_loader.ImageData(
         source_path=Path("a.jpg"),
         width=1,
@@ -110,7 +112,9 @@ def test_load_image_dispatches_to_fast_encoded_path_when_available(monkeypatch: 
     monkeypatch.setattr(
         image_loader,
         "_load_image_subprocess",
-        lambda path, cb: (_ for _ in ()).throw(AssertionError("Subprocess loader should not be used.")),
+        lambda path, cb: (_ for _ in ()).throw(
+            AssertionError("Subprocess loader should not be used.")
+        ),
     )
     monkeypatch.setattr(
         image_loader,
@@ -122,7 +126,9 @@ def test_load_image_dispatches_to_fast_encoded_path_when_available(monkeypatch: 
     assert result is expected
 
 
-def test_load_image_dispatches_to_direct_when_subprocess_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_image_dispatches_to_direct_when_subprocess_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     expected = image_loader.ImageData(
         source_path=Path("a.exr"),
         width=2,
@@ -137,7 +143,9 @@ def test_load_image_dispatches_to_direct_when_subprocess_disabled(monkeypatch: p
     monkeypatch.setattr(
         image_loader,
         "_load_image_subprocess",
-        lambda path, cb: (_ for _ in ()).throw(AssertionError("Subprocess loader should not be used.")),
+        lambda path, cb: (_ for _ in ()).throw(
+            AssertionError("Subprocess loader should not be used.")
+        ),
     )
     monkeypatch.setattr(image_loader, "_load_image_direct", lambda path, cb: expected)
 
@@ -162,7 +170,9 @@ def test_load_image_direct_prefers_rawpy_for_raw_extension(monkeypatch: pytest.M
     assert result is expected
 
 
-def test_subprocess_loader_invokes_module_and_parses_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_subprocess_loader_invokes_module_and_parses_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source_pixels = np.array(
         [
             [[1.0, 2.0, 3.0], [5.0, 6.0, 7.0]],
@@ -171,7 +181,9 @@ def test_subprocess_loader_invokes_module_and_parses_progress(tmp_path: Path, mo
         dtype=np.float32,
     )
     np.save(tmp_path / "pixels.npy", source_pixels)
-    (tmp_path / "meta.json").write_text('{"width": 2, "height": 2, "channels": 3}', encoding="utf-8")
+    (tmp_path / "meta.json").write_text(
+        '{"width": 2, "height": 2, "channels": 3}', encoding="utf-8"
+    )
 
     class _FakeTemporaryDirectory:
         def __enter__(self) -> str:
@@ -194,11 +206,15 @@ def test_subprocess_loader_invokes_module_and_parses_progress(tmp_path: Path, mo
         popen_calls.append(args)
         return _FakeProcess()
 
-    monkeypatch.setattr(image_loader.tempfile, "TemporaryDirectory", lambda prefix: _FakeTemporaryDirectory())
+    monkeypatch.setattr(
+        image_loader.tempfile, "TemporaryDirectory", lambda prefix: _FakeTemporaryDirectory()
+    )
     monkeypatch.setattr(image_loader.subprocess, "Popen", _fake_popen)
 
     progress_updates: list[float] = []
-    loaded = image_loader._load_image_subprocess(Path("a.exr"), progress_callback=progress_updates.append)
+    loaded = image_loader._load_image_subprocess(
+        Path("a.exr"), progress_callback=progress_updates.append
+    )
 
     assert popen_calls
     assert popen_calls[0][1:3] == ["-m", "hdri_viewer.io.subprocess_loader"]
@@ -237,9 +253,17 @@ def test_srgb_to_linear_matches_reference_points() -> None:
 
 
 def test_guess_transfer_kind_prefers_hint_over_bit_depth() -> None:
-    assert image_loader._guess_transfer_kind(bits_per_sample=16, color_space_hint="sRGB") == "encoded"
-    assert image_loader._guess_transfer_kind(bits_per_sample=8, color_space_hint="Linear Rec.709") == "linear"
-    assert image_loader._guess_transfer_kind(bits_per_sample=8, color_space_hint="srgb_rec709_scene") == "encoded"
+    assert (
+        image_loader._guess_transfer_kind(bits_per_sample=16, color_space_hint="sRGB") == "encoded"
+    )
+    assert (
+        image_loader._guess_transfer_kind(bits_per_sample=8, color_space_hint="Linear Rec.709")
+        == "linear"
+    )
+    assert (
+        image_loader._guess_transfer_kind(bits_per_sample=8, color_space_hint="srgb_rec709_scene")
+        == "encoded"
+    )
 
 
 def test_guess_transfer_kind_uses_bit_depth_when_hint_missing() -> None:
@@ -309,7 +333,62 @@ def test_decode_optional_base64_round_trip() -> None:
     assert image_loader._decode_optional_base64(encoded) == source
 
 
-def test_subprocess_loader_raises_on_nonzero_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_infer_source_dtype_name_prefers_half_format() -> None:
+    class _Spec:
+        format = "half"
+
+    assert image_loader._infer_source_dtype_name(_Spec(), bits_per_sample=16) == "half"
+
+
+def test_infer_compression_name_from_metadata() -> None:
+    class _Spec:
+        def getattribute(self, name: str) -> object:
+            if name == "compression":
+                return "dwaa"
+            return None
+
+    assert image_loader._infer_compression_name(_Spec()) == "dwaa"
+
+
+def test_subprocess_loader_uses_source_dtype_and_compression_from_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_pixels = np.zeros((1, 1, 3), dtype=np.float32)
+    np.save(tmp_path / "pixels.npy", source_pixels)
+    (tmp_path / "meta.json").write_text(
+        '{"width": 1, "height": 1, "channels": 3, "source_dtype_name": "half", "compression_name": "dwaa"}',
+        encoding="utf-8",
+    )
+
+    class _FakeTemporaryDirectory:
+        def __enter__(self) -> str:
+            return str(tmp_path)
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            return False
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = ["PROGRESS:25\n"]
+            self.stderr = io.StringIO("")
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        image_loader.tempfile, "TemporaryDirectory", lambda prefix: _FakeTemporaryDirectory()
+    )
+    monkeypatch.setattr(image_loader.subprocess, "Popen", lambda *args, **kwargs: _FakeProcess())
+
+    loaded = image_loader._load_image_subprocess(Path("a.exr"))
+
+    assert loaded.dtype_name == "half"
+    assert loaded.compression_name == "dwaa"
+
+
+def test_subprocess_loader_raises_on_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     class _FakeTemporaryDirectory:
         def __enter__(self) -> str:
             return str(tmp_path)
@@ -325,14 +404,18 @@ def test_subprocess_loader_raises_on_nonzero_exit(tmp_path: Path, monkeypatch: p
         def wait(self) -> int:
             return 3
 
-    monkeypatch.setattr(image_loader.tempfile, "TemporaryDirectory", lambda prefix: _FakeTemporaryDirectory())
+    monkeypatch.setattr(
+        image_loader.tempfile, "TemporaryDirectory", lambda prefix: _FakeTemporaryDirectory()
+    )
     monkeypatch.setattr(image_loader.subprocess, "Popen", lambda *args, **kwargs: _FakeProcess())
 
     with pytest.raises(RuntimeError, match="Image loader subprocess failed"):
         image_loader._load_image_subprocess(Path("a.exr"))
 
 
-def test_subprocess_loader_raises_when_outputs_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_subprocess_loader_raises_when_outputs_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     class _FakeTemporaryDirectory:
         def __enter__(self) -> str:
             return str(tmp_path)
@@ -348,7 +431,9 @@ def test_subprocess_loader_raises_when_outputs_missing(tmp_path: Path, monkeypat
         def wait(self) -> int:
             return 0
 
-    monkeypatch.setattr(image_loader.tempfile, "TemporaryDirectory", lambda prefix: _FakeTemporaryDirectory())
+    monkeypatch.setattr(
+        image_loader.tempfile, "TemporaryDirectory", lambda prefix: _FakeTemporaryDirectory()
+    )
     monkeypatch.setattr(image_loader.subprocess, "Popen", lambda *args, **kwargs: _FakeProcess())
 
     with pytest.raises(RuntimeError, match="did not produce output files"):

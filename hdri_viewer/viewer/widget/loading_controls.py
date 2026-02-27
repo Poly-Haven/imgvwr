@@ -120,6 +120,7 @@ class LoadingControlsMixin:
             height=image.height,
             channels=image.channels,
             dtype_name=image.dtype_name,
+            compression_name=image.compression_name,
             input_is_encoded_srgb=image.input_is_encoded_srgb,
         )
         self._refresh_metadata_overlay()

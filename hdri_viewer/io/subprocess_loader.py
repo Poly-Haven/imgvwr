@@ -65,9 +65,7 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
             color_space_hint=color_space_hint,
             source_path=path,
         )
-        is_fast_encoded_8bit = (
-            transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
-        )
+        is_fast_encoded_8bit = transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
         tile_width = int(spec.tile_width)
         tile_height = int(spec.tile_height)
 
@@ -85,9 +83,7 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
             y_step = max(tile_height, 1)
             for y_begin in range(0, height, y_step):
                 y_end = min(y_begin + y_step, height)
-                pixels_raw = input_file.read_tiles(
-                    0, width, y_begin, y_end, 0, 1, 0, channels, read_format
-                )
+                pixels_raw = input_file.read_tiles(0, width, y_begin, y_end, 0, 1, 0, channels, read_format)
                 if pixels_raw is None:
                     raise RuntimeError(input_file.geterror())
 
@@ -144,9 +140,7 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
                     "bits_per_sample": bits_per_sample,
                     "color_space_hint": color_space_hint,
                     "icc_profile_b64": (
-                        base64.b64encode(icc_profile_bytes).decode("ascii")
-                        if icc_profile_bytes
-                        else ""
+                        base64.b64encode(icc_profile_bytes).decode("ascii") if icc_profile_bytes else ""
                     ),
                 },
                 file,
@@ -178,9 +172,7 @@ def _run_raw_loader(path: Path, meta_path: Path, pixels_path: Path) -> bool:
             )
 
         _emit_progress(85)
-        rgb_pixels = np.ascontiguousarray(
-            np.asarray(rgb_u16, dtype=np.float32) / 65535.0, dtype=np.float32
-        )
+        rgb_pixels = np.ascontiguousarray(np.asarray(rgb_u16, dtype=np.float32) / 65535.0, dtype=np.float32)
         np.save(pixels_path, rgb_pixels)
         _emit_progress(88)
 
@@ -332,13 +324,9 @@ def _guess_transfer_kind(
     if color_space_hint is not None:
         hint = color_space_hint.strip().lower()
         if hint:
-            if any(
-                token in hint for token in ("srgb", "rec709", "gamma", "adobe", "display p3", "p3")
-            ):
+            if any(token in hint for token in ("srgb", "rec709", "gamma", "adobe", "display p3", "p3")):
                 return "encoded"
-            if any(
-                token in hint for token in ("scene_linear", "linear", "raw", "acescg", "non-color")
-            ):
+            if any(token in hint for token in ("scene_linear", "linear", "raw", "acescg", "non-color")):
                 return "linear"
 
     if bits_per_sample is not None and bits_per_sample <= 8:

@@ -84,10 +84,6 @@ class OverlayControlsMixin:
 
         if self._metadata_overlay_label.isVisible():
             margin = 10
-            label_width = min(
-                self._metadata_overlay_label.sizeHint().width(), max(self.width() - (margin * 2), 0)
-            )
+            label_width = min(self._metadata_overlay_label.sizeHint().width(), max(self.width() - (margin * 2), 0))
             label_height = self._metadata_overlay_label.sizeHint().height()
-            self._metadata_overlay_label.setGeometry(
-                margin, margin, max(label_width, 0), max(label_height, 0)
-            )
+            self._metadata_overlay_label.setGeometry(margin, margin, max(label_width, 0), max(label_height, 0))

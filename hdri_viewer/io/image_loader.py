@@ -149,9 +149,7 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
             color_space_hint=color_space_hint,
             source_path=path,
         )
-        is_fast_encoded_8bit = (
-            transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
-        )
+        is_fast_encoded_8bit = transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
         _emit_progress(progress_callback, 0.05)
 
         read_format = oiio_module.UINT8 if is_fast_encoded_8bit else oiio_module.FLOAT
@@ -216,9 +214,7 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
         input_file.close()
 
 
-def _load_image_subprocess(
-    path: Path, progress_callback: ProgressCallback | None = None
-) -> ImageData:
+def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData:
     """Loads image in a subprocess to isolate native-library crashes on Windows."""
 
     with tempfile.TemporaryDirectory(prefix="imgvwr_loader_") as directory:
@@ -258,10 +254,7 @@ def _load_image_subprocess(
 
         if return_code != 0:
             stderr_text = stderr_output.strip()
-            raise RuntimeError(
-                "Image loader subprocess failed. "
-                f"Exit code: {return_code}. Stderr: {stderr_text}"
-            )
+            raise RuntimeError("Image loader subprocess failed. " f"Exit code: {return_code}. Stderr: {stderr_text}")
 
         if not meta_path.exists() or not pixels_path.exists():
             raise RuntimeError("Image loader subprocess did not produce output files.")
@@ -276,9 +269,7 @@ def _load_image_subprocess(
             color_space_hint=color_space_hint,
             source_path=path,
         )
-        is_fast_encoded_8bit = (
-            transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
-        )
+        is_fast_encoded_8bit = transfer_kind == "encoded" and bits_per_sample is not None and bits_per_sample <= 8
 
         if is_fast_encoded_8bit:
             rgb_pixels = np.asarray(np.load(pixels_path), dtype=np.uint8)
@@ -324,9 +315,7 @@ def _load_image_subprocess(
         )
 
 
-def _load_encoded_image_fast(
-    path: Path, progress_callback: ProgressCallback | None = None
-) -> ImageData | None:
+def _load_encoded_image_fast(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData | None:
     """Fast in-process loader for 8-bit encoded images using Pillow."""
 
     try:
@@ -372,9 +361,7 @@ def _load_encoded_image_fast(
         return None
 
 
-def _load_raw_image_with_rawpy(
-    path: Path, progress_callback: ProgressCallback | None = None
-) -> ImageData | None:
+def _load_raw_image_with_rawpy(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData | None:
     """Loads full-resolution RAW files via rawpy as scene-linear float32 RGB."""
 
     if not _is_raw_image_path(path):
@@ -397,9 +384,7 @@ def _load_raw_image_with_rawpy(
             )
 
         _emit_progress(progress_callback, _READ_PROGRESS_WEIGHT)
-        rgb_pixels = np.ascontiguousarray(
-            np.asarray(rgb_u16, dtype=np.float32) / 65535.0, dtype=np.float32
-        )
+        rgb_pixels = np.ascontiguousarray(np.asarray(rgb_u16, dtype=np.float32) / 65535.0, dtype=np.float32)
         _emit_progress(progress_callback, 1.0)
 
         return ImageData(
@@ -457,10 +442,7 @@ def _guess_transfer_kind(
     if color_space_hint is not None:
         hint = color_space_hint.strip().lower()
         if hint:
-            if any(
-                token in hint
-                for token in ("scene_linear", "linear", "lin_", "raw", "acescg", "non-color")
-            ):
+            if any(token in hint for token in ("scene_linear", "linear", "lin_", "raw", "acescg", "non-color")):
                 return "linear"
             if any(token in hint for token in ("srgb", "gamma", "adobe", "display p3", "p3")):
                 return "encoded"
@@ -504,9 +486,7 @@ def _normalize_encoded_unit_range(pixels: np.ndarray, bits_per_sample: int | Non
     return np.clip(encoded, 0.0, 1.0)
 
 
-def _apply_icc_profile_to_srgb(
-    pixels: np.ndarray, icc_profile_bytes: bytes | None
-) -> np.ndarray | None:
+def _apply_icc_profile_to_srgb(pixels: np.ndarray, icc_profile_bytes: bytes | None) -> np.ndarray | None:
     """Applies embedded ICC profile to encoded RGB pixels, returning sRGB-encoded pixels."""
 
     if not icc_profile_bytes:
@@ -534,9 +514,7 @@ def _apply_icc_profile_to_srgb(
         return None
 
 
-def _apply_icc_profile_to_srgb_u8(
-    pixels: np.ndarray, icc_profile_bytes: bytes | None
-) -> np.ndarray | None:
+def _apply_icc_profile_to_srgb_u8(pixels: np.ndarray, icc_profile_bytes: bytes | None) -> np.ndarray | None:
     """Applies embedded ICC profile to uint8 encoded RGB pixels."""
 
     if not icc_profile_bytes:

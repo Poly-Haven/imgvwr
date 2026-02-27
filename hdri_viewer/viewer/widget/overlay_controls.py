@@ -42,6 +42,11 @@ class OverlayControlsMixin:
             self._metadata_overlay_label.setVisible(False)
             return
 
+        toolbar_visible = getattr(self, "_is_toolbar_overlay_visible", None)
+        if callable(toolbar_visible) and toolbar_visible():
+            self._metadata_overlay_label.setVisible(False)
+            return
+
         metadata_text = self._format_metadata_overlay_text()
         self._metadata_overlay_label.setText(metadata_text)
         self._metadata_overlay_label.adjustSize()
@@ -87,3 +92,7 @@ class OverlayControlsMixin:
             label_width = min(self._metadata_overlay_label.sizeHint().width(), max(self.width() - (margin * 2), 0))
             label_height = self._metadata_overlay_label.sizeHint().height()
             self._metadata_overlay_label.setGeometry(margin, margin, max(label_width, 0), max(label_height, 0))
+
+        update_toolbar_geometries = getattr(self, "_update_toolbar_geometries", None)
+        if callable(update_toolbar_geometries):
+            update_toolbar_geometries()

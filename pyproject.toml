@@ -12,6 +12,7 @@ license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "imgvwr contributors" }]
 dependencies = [
   "PyQt6>=6.7",
+  "qtawesome>=1.3",
   "moderngl>=5.10",
   "numpy>=1.26",
   "Pillow>=10.0",

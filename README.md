@@ -11,7 +11,7 @@
 - `.`: exposure +1 stop
 - `Ctrl + ,`: gamma -0.1
 - `Ctrl + .`: gamma +0.1
-- Right-click: context menu (open/reload/view transform/file info)
+- Move cursor to the left edge: open toolbar overlay (open/reload/view transform/file info)
 - `P`: Toggle 2D projection and equirectangular
 - `Home`: Reset zoom and pan to the image's original opened view
 - `W`: In 2D mode, toggle tiled wrapping on/off (both axes, default: off)
@@ -75,4 +75,4 @@ black .
 - Default config: `hdri_viewer/resources/config.ocio`
 - Custom config folder: `hdri_viewer/resources/ocio_configs`
 
-Drop a `.ocio` file in the custom folder and choose **Reload** from the context menu.
+Drop a `.ocio` file in the custom folder and choose **Reload** from the left-edge toolbar.

@@ -35,6 +35,9 @@ class LoadingControlsMixin:
         self._set_overlay_text("")
         self._set_loading_overlay("Opening file…", True)
         self._loading_progress_bar.set_progress(0.0)
+        update_toolbar_overlay = getattr(self, "_update_toolbar_overlay", None)
+        if callable(update_toolbar_overlay):
+            update_toolbar_overlay()
         self.update()
 
         if path.suffix.lower() in {".jpg", ".jpeg"}:
@@ -124,6 +127,9 @@ class LoadingControlsMixin:
             input_is_encoded_srgb=image.input_is_encoded_srgb,
         )
         self._refresh_metadata_overlay()
+        update_toolbar_overlay = getattr(self, "_update_toolbar_overlay", None)
+        if callable(update_toolbar_overlay):
+            update_toolbar_overlay()
 
         self._loading = False
         self._active_loader_signals = None
@@ -144,6 +150,9 @@ class LoadingControlsMixin:
         self._load_progress_value = 0.0
         self._set_loading_overlay("", False)
         self._set_overlay_text(f"Load failed: {message}")
+        update_toolbar_overlay = getattr(self, "_update_toolbar_overlay", None)
+        if callable(update_toolbar_overlay):
+            update_toolbar_overlay()
         self.update()
 
     def _on_image_load_progress(self, progress_value: float) -> None:

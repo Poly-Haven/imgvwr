@@ -47,7 +47,14 @@ class InputControlsMixin:
     def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
         """Rotates/pans camera while dragging with left or middle mouse button."""
 
-        if event is None or not (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.MiddleButton)):
+        if event is None:
+            return
+
+        update_toolbar_visibility = getattr(self, "_update_toolbar_visibility_from_local_pos", None)
+        if callable(update_toolbar_visibility):
+            update_toolbar_visibility(event.position().toPoint())
+
+        if not (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.MiddleButton)):
             return
 
         pos = event.position().toPoint()
@@ -198,6 +205,11 @@ class InputControlsMixin:
         """Adjusts FOV or exposure based on Ctrl modifier."""
 
         if event is None:
+            return
+
+        should_block_wheel = getattr(self, "_should_block_viewer_wheel_input", None)
+        if callable(should_block_wheel) and should_block_wheel():
+            event.ignore()
             return
 
         steps = event.angleDelta().y() / 20.0

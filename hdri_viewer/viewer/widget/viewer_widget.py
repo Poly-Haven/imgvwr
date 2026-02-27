@@ -20,10 +20,12 @@ from .loading_controls import LoadingControlsMixin
 from .menu_controls import MenuControlsMixin
 from .overlay_controls import OverlayControlsMixin
 from .progress_bar import _LoadingProgressBar
+from .toolbar_controls import ToolbarControlsMixin
 from .types import FileInfo
 
 
 class HdriViewerWidget(
+    ToolbarControlsMixin,
     MenuControlsMixin,
     InputControlsMixin,
     LoadingControlsMixin,
@@ -40,6 +42,7 @@ class HdriViewerWidget(
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAcceptDrops(True)
+        self.setMouseTracking(True)
 
         base_dir = Path(__file__).resolve().parents[2]
         self._renderer = PanoramaRenderer(shaders_dir=base_dir / "viewer" / "shaders")
@@ -110,8 +113,10 @@ class HdriViewerWidget(
         )
         self._metadata_overlay_label.setVisible(False)
 
+        self._init_toolbar_overlay()
+
         self._update_overlay_geometries()
-        self._set_overlay_text("Right-click to open a file")
+        self._set_overlay_text("Move cursor to left edge to open toolbar")
 
     @property
     def current_path(self) -> Path | None:

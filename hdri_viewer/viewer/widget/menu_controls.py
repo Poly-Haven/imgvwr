@@ -38,8 +38,6 @@ class MenuControlsMixin:
                     action.triggered.connect(self._make_display_setter(display))
                     display_menu.addAction(action)
 
-            # display_view_menu = view_menu.addMenu("View")
-            # if display_view_menu is not None:
             view_menu.addSeparator()
             for view in self._views_for_display(active_display):
                 action = QAction(view, self)
@@ -53,10 +51,7 @@ class MenuControlsMixin:
             f"{self._file_info.width}x{self._file_info.height}, "
             f"channels: {self._file_info.channels}, dtype: {self._file_info.dtype_name}"
         )
-        info_action = QAction(
-            info_label,
-            self,
-        )
+        info_action = QAction(info_label, self)
         info_action.setEnabled(False)
         menu.addAction(info_action)
 
@@ -91,7 +86,9 @@ class MenuControlsMixin:
                 return item
         return None
 
-    def _apply_display_view(self, display: str, view: str, *, remember_non_standard: bool = True) -> None:
+    def _apply_display_view(
+        self, display: str, view: str, *, remember_non_standard: bool = True
+    ) -> None:
         """Applies display/view transform and refreshes rendering state."""
 
         self._ocio_manager.set_active_view(display, view)
@@ -135,10 +132,14 @@ class MenuControlsMixin:
 
         if active.view.lower() == "standard":
             preferred_view = self._preferred_view_by_display.get(display)
-            if preferred_view not in views or (preferred_view is not None and preferred_view.lower() == "standard"):
+            if preferred_view not in views or (
+                preferred_view is not None and preferred_view.lower() == "standard"
+            ):
                 preferred_view = self._find_case_insensitive(views, "Filmic")
             if preferred_view is None:
-                preferred_view = next((item for item in views if item.lower() != "standard"), standard_view)
+                preferred_view = next(
+                    (item for item in views if item.lower() != "standard"), standard_view
+                )
             self._apply_display_view(display, preferred_view)
             return
 

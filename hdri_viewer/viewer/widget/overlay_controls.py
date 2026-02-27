@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from PyQt6.QtGui import QResizeEvent
 
 
@@ -54,12 +52,7 @@ class OverlayControlsMixin:
         """Formats currently available image metadata for on-screen display."""
 
         path = self.current_path
-        display_path = "-"
-        if path is not None:
-            if isinstance(path, Path):
-                display_path = str(path)
-            else:
-                display_path = str(path)
+        display_path = "-" if path is None else str(path)
 
         resolution_text = f"{self._file_info.width} x {self._file_info.height}"
         encoded_text = "yes" if self._file_info.input_is_encoded_srgb else "no"
@@ -90,6 +83,10 @@ class OverlayControlsMixin:
 
         if self._metadata_overlay_label.isVisible():
             margin = 10
-            label_width = min(self._metadata_overlay_label.sizeHint().width(), max(self.width() - (margin * 2), 0))
+            label_width = min(
+                self._metadata_overlay_label.sizeHint().width(), max(self.width() - (margin * 2), 0)
+            )
             label_height = self._metadata_overlay_label.sizeHint().height()
-            self._metadata_overlay_label.setGeometry(margin, margin, max(label_width, 0), max(label_height, 0))
+            self._metadata_overlay_label.setGeometry(
+                margin, margin, max(label_width, 0), max(label_height, 0)
+            )

@@ -65,7 +65,9 @@ class PanoramaRenderer:
         self._ctx = moderngl.create_context()
         self._ctx.enable(moderngl.BLEND)
 
-        self._fragment_template = (self._shaders_dir / "fragment_template.glsl").read_text(encoding="utf-8")
+        self._fragment_template = (self._shaders_dir / "fragment_template.glsl").read_text(
+            encoding="utf-8"
+        )
         self._vertex_source = (self._shaders_dir / "vertex.glsl").read_text(encoding="utf-8")
 
         vertices = np.array(
@@ -170,14 +172,20 @@ class PanoramaRenderer:
         self._set_uniform_if_changed("u_pitch", float(camera.pitch_radians))
         self._set_uniform_if_changed("u_exposure", float(self._state.exposure_stops))
         self._set_uniform_if_changed("u_gamma", float(self._state.gamma))
-        self._set_uniform_if_changed("u_projection_mode", float(1.0 if self._projection_2d_enabled else 0.0))
+        self._set_uniform_if_changed(
+            "u_projection_mode", float(1.0 if self._projection_2d_enabled else 0.0)
+        )
         self._set_uniform_if_changed(
             "u_projection_2d_wrap_enabled",
             float(1.0 if self._projection_2d_wrap_enabled else 0.0),
         )
-        self._set_uniform_if_changed("u_fisheye_enabled", float(1.0 if self._fisheye_enabled else 0.0))
+        self._set_uniform_if_changed(
+            "u_fisheye_enabled", float(1.0 if self._fisheye_enabled else 0.0)
+        )
         self._set_uniform_if_changed("u_image_aspect", float(self._image_aspect))
-        self._set_uniform_if_changed("u_input_is_encoded_srgb", float(1.0 if self._input_is_encoded_srgb else 0.0))
+        self._set_uniform_if_changed(
+            "u_input_is_encoded_srgb", float(1.0 if self._input_is_encoded_srgb else 0.0)
+        )
 
         for texture, binding_index in self._ocio_lut_textures:
             texture.use(location=binding_index)
@@ -209,15 +217,19 @@ class PanoramaRenderer:
         if self._ctx is None:
             return
 
-        key = (self._ocio_shader.shader_text, self._ocio_shader.function_name)
-        key = (self._ocio_shader.shader_text, self._ocio_shader.function_name, self._ocio_shader.signature)
+        key = (
+            self._ocio_shader.shader_text,
+            self._ocio_shader.function_name,
+            self._ocio_shader.signature,
+        )
         if not force and self._shader_cache_key == key:
             return
 
         declarations = self._ocio_shader.shader_text
         if self._ocio_shader.function_name:
             ocio_apply = (
-                f"vec4 ocio_rgba = {self._ocio_shader.function_name}(vec4(color, 1.0));\n" "    color = ocio_rgba.rgb;"
+                f"vec4 ocio_rgba = {self._ocio_shader.function_name}(vec4(color, 1.0));\n"
+                "    color = ocio_rgba.rgb;"
             )
         else:
             ocio_apply = "color = pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));"

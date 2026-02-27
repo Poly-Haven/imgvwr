@@ -28,6 +28,8 @@ htmlcov/
 # Logs and temp files
 *.log
 run-output.log
+text_files.txt
+tests/test_files.txt
 
 # IDE / editor
 .vscode/

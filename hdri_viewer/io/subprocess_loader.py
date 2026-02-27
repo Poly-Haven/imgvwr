@@ -137,7 +137,7 @@ def run_loader(path: Path, meta_path: Path, pixels_path: Path) -> None:
                 {
                     "width": width,
                     "height": height,
-                    "channels": 3,
+                    "channels": channels,
                     "dtype_name": "uint8" if is_fast_encoded_8bit else "float32",
                     "source_dtype_name": source_dtype_name,
                     "compression_name": compression_name,

@@ -340,6 +340,7 @@ def _load_encoded_image_fast(
             mode = str(image.mode).upper()
             if mode not in {"1", "L", "LA", "P", "RGB", "RGBA", "CMYK", "YCBCR"}:
                 return None
+            source_channels = len(image.getbands())
 
             rgb_image = image.convert("RGB")
             _emit_progress(progress_callback, 0.75)
@@ -361,7 +362,7 @@ def _load_encoded_image_fast(
                 source_path=path,
                 width=int(rgb_pixels.shape[1]),
                 height=int(rgb_pixels.shape[0]),
-                channels=3,
+                channels=source_channels,
                 dtype_name="uint8",
                 pixels=rgb_pixels,
                 input_is_encoded_srgb=True,

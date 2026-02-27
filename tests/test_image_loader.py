@@ -386,6 +386,58 @@ def test_subprocess_loader_uses_source_dtype_and_compression_from_metadata(
     assert loaded.compression_name == "dwaa"
 
 
+def test_subprocess_loader_uses_source_channels_from_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_pixels = np.zeros((1, 1, 3), dtype=np.float32)
+    np.save(tmp_path / "pixels.npy", source_pixels)
+    (tmp_path / "meta.json").write_text(
+        '{"width": 1, "height": 1, "channels": 1}',
+        encoding="utf-8",
+    )
+
+    class _FakeTemporaryDirectory:
+        def __enter__(self) -> str:
+            return str(tmp_path)
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            return False
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = ["PROGRESS:25\n"]
+            self.stderr = io.StringIO("")
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        image_loader.tempfile,
+        "TemporaryDirectory",
+        lambda prefix: _FakeTemporaryDirectory(),
+    )
+    monkeypatch.setattr(
+        image_loader.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _FakeProcess(),
+    )
+
+    loaded = image_loader._load_image_subprocess(Path("a.exr"))
+    assert loaded.channels == 1
+
+
+def test_load_encoded_image_fast_preserves_source_channel_count(tmp_path: Path) -> None:
+    pil_image = pytest.importorskip("PIL.Image")
+    image_path = tmp_path / "gray.png"
+    grayscale = pil_image.new("L", (2, 2), color=128)
+    grayscale.save(image_path)
+
+    loaded = image_loader._load_encoded_image_fast(image_path)
+
+    assert loaded is not None
+    assert loaded.channels == 1
+
+
 def test_subprocess_loader_raises_on_nonzero_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

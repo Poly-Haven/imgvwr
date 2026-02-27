@@ -242,6 +242,14 @@ class InputControlsMixin:
             self._renderer.set_exposure(self._exposure_stops)
             self.update()
             return
+        if event.key() == Qt.Key.Key_F11:
+            window = self.window()
+            if window is not None:
+                if window.isFullScreen():
+                    window.showNormal()
+                else:
+                    window.showFullScreen()
+            return
         if event.key() == Qt.Key.Key_Escape or event.key() == Qt.Key.Key_Q:
             window = self.window()
             if window is not None and window.isFullScreen():

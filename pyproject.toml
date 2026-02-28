@@ -37,6 +37,8 @@ include = ["hdri_viewer*"]
 [tool.setuptools.package-data]
 hdri_viewer = [
   "resources/*.ocio",
+  "resources/icons/*.png",
+  "resources/icons/*.ico",
   "resources/ocio_configs/*.ocio",
   "viewer/shaders/*.glsl",
 ]

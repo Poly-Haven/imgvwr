@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QMainWindow
 
+from hdri_viewer.app_icon import application_icon
 from .viewer_widget import HdriViewerWidget
 
 
@@ -13,6 +14,9 @@ class ViewerWindow(QMainWindow):
     def __init__(self, initial_path: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle("imgvwr")
+        icon = application_icon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
         self.setMinimumSize(170, 170)
         self.resize(1280, 720)
 

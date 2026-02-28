@@ -7,6 +7,7 @@ import sys
 
 from PyQt6.QtWidgets import QApplication
 
+from hdri_viewer.app_icon import application_icon
 from hdri_viewer.viewer.widget import ViewerWindow
 
 
@@ -56,6 +57,10 @@ def main() -> int:
     _preload_native_modules()
 
     app = QApplication(sys.argv)
+    icon = application_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
+
     window = ViewerWindow(initial_path=initial_path)
     window.show()
     return app.exec()

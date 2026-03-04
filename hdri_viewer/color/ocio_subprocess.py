@@ -83,7 +83,7 @@ def _build_shader(config_path: str | None, display: str, view: str) -> dict[str,
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="OCIO subprocess helper for imgvwr")
+    parser = argparse.ArgumentParser(description="OCIO subprocess helper for panoviewer")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     enum_parser = subparsers.add_parser("enumerate")

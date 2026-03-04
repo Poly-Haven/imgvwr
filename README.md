@@ -1,6 +1,6 @@
-# imgvwr
+# panoviewer
 
-`imgvwr` is a modern, minimal image viewer with support for not just normal image formats, but HDRI panoramas and camera raw files too.
+`panoviewer` is a minimal image viewer made for HDRI panoramas, but supports most image files and camera raw files too.
 
 ## Controls
 
@@ -47,9 +47,9 @@ pip install -e .[dev]
 ## Run
 
 ```bash
-imgvwr
+panoviewer
 # or open directly
-imgvwr path/to/file.exr
+panoviewer path/to/file.exr
 ```
 
 ## Tests

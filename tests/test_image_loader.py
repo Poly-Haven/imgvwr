@@ -81,7 +81,7 @@ def test_load_image_dispatches_to_subprocess_on_windows(monkeypatch: pytest.Monk
     )
 
     monkeypatch.setattr(image_loader.os, "name", "nt")
-    monkeypatch.setenv("IMGVWR_USE_SUBPROCESS_LOADER", "1")
+    monkeypatch.setenv("PANOVIEWER_USE_SUBPROCESS_LOADER", "1")
     monkeypatch.setattr(image_loader, "_load_image_subprocess", lambda path, cb: expected)
     monkeypatch.setattr(
         image_loader,
@@ -106,7 +106,7 @@ def test_load_image_dispatches_to_fast_encoded_path_when_available(
     )
 
     monkeypatch.setattr(image_loader.os, "name", "nt")
-    monkeypatch.setenv("IMGVWR_USE_SUBPROCESS_LOADER", "1")
+    monkeypatch.setenv("PANOVIEWER_USE_SUBPROCESS_LOADER", "1")
     monkeypatch.setattr(image_loader, "_should_use_encoded_fast_path", lambda path: True)
     monkeypatch.setattr(image_loader, "_load_encoded_image_fast", lambda path, cb: expected)
     monkeypatch.setattr(
@@ -137,7 +137,7 @@ def test_load_image_dispatches_to_direct_when_subprocess_disabled(
     )
 
     monkeypatch.setattr(image_loader.os, "name", "nt")
-    monkeypatch.setenv("IMGVWR_USE_SUBPROCESS_LOADER", "0")
+    monkeypatch.setenv("PANOVIEWER_USE_SUBPROCESS_LOADER", "0")
     monkeypatch.setattr(
         image_loader,
         "_load_image_subprocess",

@@ -17,7 +17,7 @@ class PreferredViewTransform:
 
 @dataclass(frozen=True, slots=True)
 class AppPreferences:
-    """Persisted user preferences for imgvwr."""
+    """Persisted user preferences for panoviewer."""
 
     preferred_view_transform_by_filetype: dict[str, PreferredViewTransform] | None = None
 
@@ -28,13 +28,13 @@ def preferences_path() -> Path:
     if os.name == "nt":
         appdata = os.environ.get("APPDATA")
         if appdata:
-            return Path(appdata) / "imgvwr" / "preferences.json"
+            return Path(appdata) / "panoviewer" / "preferences.json"
 
     xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
     if xdg_config_home:
-        return Path(xdg_config_home) / "imgvwr" / "preferences.json"
+        return Path(xdg_config_home) / "panoviewer" / "preferences.json"
 
-    return Path.home() / ".config" / "imgvwr" / "preferences.json"
+    return Path.home() / ".config" / "panoviewer" / "preferences.json"
 
 
 def load_preferences(path: Path | None = None) -> AppPreferences:

@@ -57,7 +57,8 @@ class HdriViewerWidget(
 
         self._thread_pool = QThreadPool.globalInstance()
         default_threaded_loading = "1"
-        self._threaded_loading_enabled = os.environ.get("IMGVWR_THREADED_LOAD", default_threaded_loading) == "1"
+        threaded_loading_value = os.environ.get("PANOVIEWER_THREADED_LOAD", default_threaded_loading)
+        self._threaded_loading_enabled = threaded_loading_value == "1"
         self._gl_initialized = False
         self._initial_open_scheduled = False
         self._loading = False

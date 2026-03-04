@@ -50,7 +50,7 @@ def measure_time_to_first_frame(path: Path, timeout_seconds: float) -> float:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Measure imgvwr time-to-first-frame for a single image file.")
+    parser = argparse.ArgumentParser(description="Measure panoviewer time-to-first-frame for a single image file.")
     parser.add_argument("image", type=Path)
     parser.add_argument("--timeout", type=float, default=120.0)
     args = parser.parse_args()

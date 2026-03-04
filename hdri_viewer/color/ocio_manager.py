@@ -302,7 +302,8 @@ class OcioManager:
         """Returns whether OCIO operations should run in a subprocess helper."""
 
         default_value = "1" if os.name == "nt" else "0"
-        return os.environ.get("IMGVWR_USE_SUBPROCESS_OCIO", default_value) == "1"
+        raw_value = os.environ.get("PANOVIEWER_USE_SUBPROCESS_OCIO", default_value)
+        return raw_value == "1"
 
     def _enumerate_display_views(self) -> list[DisplayView]:
         """Lists display/view pairs from current config."""
@@ -341,7 +342,8 @@ class OcioManager:
     def _import_ocio() -> Any | None:
         """Imports PyOpenColorIO lazily to keep startup and tests resilient."""
 
-        if os.environ.get("IMGVWR_DISABLE_OCIO", "0") == "1":
+        disable_ocio_value = os.environ.get("PANOVIEWER_DISABLE_OCIO", "0")
+        if disable_ocio_value == "1":
             return None
 
         try:

@@ -13,7 +13,7 @@ class ViewerWindow(QMainWindow):
 
     def __init__(self, initial_path: Path | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("imgvwr")
+        self.setWindowTitle("panoviewer")
         icon = application_icon()
         if not icon.isNull():
             self.setWindowIcon(icon)

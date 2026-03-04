@@ -1,4 +1,4 @@
-"""imgvwr package."""
+"""panoviewer package."""
 
 __all__ = ["__version__"]
 

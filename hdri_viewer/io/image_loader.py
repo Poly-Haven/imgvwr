@@ -109,7 +109,8 @@ def load_image(path: Path, progress_callback: ProgressCallback | None = None) ->
         if fast_encoded is not None:
             return fast_encoded
 
-    use_subprocess_loader = os.environ.get("IMGVWR_USE_SUBPROCESS_LOADER", "1") == "1"
+    subprocess_loader_value = os.environ.get("PANOVIEWER_USE_SUBPROCESS_LOADER", "1")
+    use_subprocess_loader = subprocess_loader_value == "1"
     if os.name == "nt" and use_subprocess_loader:
         return _load_image_subprocess(path, progress_callback)
 
@@ -217,7 +218,7 @@ def _load_image_direct(path: Path, progress_callback: ProgressCallback | None = 
 def _load_image_subprocess(path: Path, progress_callback: ProgressCallback | None = None) -> ImageData:
     """Loads image in a subprocess to isolate native-library crashes on Windows."""
 
-    with tempfile.TemporaryDirectory(prefix="imgvwr_loader_") as directory:
+    with tempfile.TemporaryDirectory(prefix="panoviewer_loader_") as directory:
         work_dir = Path(directory)
         meta_path = work_dir / "meta.json"
         pixels_path = work_dir / "pixels.npy"

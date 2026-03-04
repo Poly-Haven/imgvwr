@@ -3,13 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "imgvwr"
+name = "panoviewer"
 version = "0.1.0"
 description = "Minimal GPU-accelerated HDRI viewer built with PyQt6, ModernGL, OpenImageIO, and OpenColorIO."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-or-later" }
-authors = [{ name = "imgvwr contributors" }]
+authors = [{ name = "panoviewer contributors" }]
 dependencies = [
   "PyQt6>=6.7",
   "qtawesome>=1.3",
@@ -25,7 +25,7 @@ dependencies = [
 dev = ["black>=25.0", "mypy>=1.11", "pytest>=8.0"]
 
 [project.scripts]
-imgvwr = "hdri_viewer.main:main"
+panoviewer = "hdri_viewer.main:main"
 
 [tool.setuptools]
 include-package-data = true

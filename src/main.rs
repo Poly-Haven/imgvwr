@@ -7,6 +7,8 @@
 
 mod app;
 mod camera;
+#[cfg(feature = "ocio")]
+mod exr_native;
 mod image_loader;
 mod logging;
 mod ocio;

@@ -92,6 +92,25 @@ pub fn load_raw(path: &Path) -> Result<ImageData> {
 /// first up-to-three channels for arbitrary AOV/data layers. Never fails solely
 /// because the layer is not named RGBA.
 pub fn load_exr(path: &Path) -> Result<ImageData> {
+    match load_exr_rust(path) {
+        Ok(data) => Ok(data),
+        Err(e) => {
+            // The pure-Rust exr crate cannot decode DWAA/DWAB (and a few other)
+            // compressions; fall back to the OpenEXR C++ shim when available.
+            #[cfg(feature = "ocio")]
+            {
+                log::warn!("exr crate could not decode {} ({e}); trying OpenEXR fallback", path.display());
+                crate::exr_native::load_exr_native(path)
+            }
+            #[cfg(not(feature = "ocio"))]
+            {
+                Err(e)
+            }
+        }
+    }
+}
+
+fn load_exr_rust(path: &Path) -> Result<ImageData> {
     use exr::prelude::*;
 
     let image = read()

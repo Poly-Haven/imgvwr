@@ -29,6 +29,14 @@ as DLLs. Each carries its own permissive license:
 - **bzip2 (`bz2`)** — BSD-style License (Julian R. Seward)
 - **xz / liblzma** — Public Domain / 0-BSD (Lasse Collin and contributors)
 
+### OpenEXR — BSD 3-Clause License
+Copyright Contributors to the OpenEXR Project.
+<https://github.com/AcademySoftwareFoundation/OpenEXR>
+
+Used as a fallback EXR decoder for compressions (DWAA/DWAB) the pure-Rust `exr`
+crate cannot read. Ships `OpenEXR-*.dll`, `OpenEXRCore-*.dll`, `Iex-*.dll`, and
+`IlmThread-*.dll` (plus Imath, above).
+
 ### Little CMS 2 (lcms2) — MIT License
 Copyright (c) 1998-2024 Marti Maria Saguer.
 <https://github.com/mm2/Little-CMS>

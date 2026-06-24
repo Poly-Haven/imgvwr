@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=src/ocio/shim.cpp");
     println!("cargo:rerun-if-changed=src/ocio/shim.h");
+    println!("cargo:rerun-if-changed=src/exr_native/shim.cpp");
+    println!("cargo:rerun-if-changed=src/exr_native/shim.h");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
@@ -58,13 +60,57 @@ fn main() {
         .write_to_file(out_dir.join("ocio_shim_bindings.rs"))
         .expect("failed to write OCIO shim bindings");
 
-    // 3. Link OpenColorIO (import lib OpenColorIO.lib -> OpenColorIO_2_5.dll).
+    // 3. Compile the OpenEXR fallback shim (decodes DWAA/DWAB EXRs the pure-Rust
+    //    `exr` crate cannot read) and bind it.
+    cc::Build::new()
+        .cpp(true)
+        .file("src/exr_native/shim.cpp")
+        .include(&include_dir)
+        // OpenEXR's headers include Imath headers flat (e.g. "ImathBox.h"), so
+        // the Imath (and OpenEXR) subdirs must be on the include path.
+        .include(include_dir.join("Imath"))
+        .include(include_dir.join("OpenEXR"))
+        .std("c++17")
+        .flag_if_supported("/EHsc")
+        .compile("exr_shim");
+    let exr_bindings = bindgen::Builder::default()
+        .header("src/exr_native/shim.h")
+        .allowlist_function("exr_native_.*")
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .generate()
+        .expect("failed to generate OpenEXR shim bindings");
+    exr_bindings
+        .write_to_file(out_dir.join("exr_shim_bindings.rs"))
+        .expect("failed to write OpenEXR shim bindings");
+
+    // 4. Link OpenColorIO and OpenEXR (versioned import lib names are discovered
+    //    from the vcpkg lib dir, e.g. OpenEXR-3_4.lib).
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=OpenColorIO");
+    for stem in ["OpenEXR", "OpenEXRCore", "Imath", "Iex", "IlmThread"] {
+        match find_versioned_lib(&lib_dir, stem) {
+            Some(name) => println!("cargo:rustc-link-lib={name}"),
+            None => println!("cargo:warning=could not find {stem}-*.lib under {}", lib_dir.display()),
+        }
+    }
 
-    // 4. Stage the runtime DLL closure next to the executable so dev runs work
+    // 5. Stage the runtime DLL closure next to the executable so dev runs work
     //    without VCPKG bin on PATH. (CI packaging does its own bundling, §20.)
     stage_runtime_dlls(&bin_dir, &out_dir);
+}
+
+/// Find a versioned import lib like `OpenEXR-3_4.lib` and return its link name
+/// (`OpenEXR-3_4`). Matches `{stem}-...` so "OpenEXR" doesn't match "OpenEXRCore".
+fn find_versioned_lib(lib_dir: &Path, stem: &str) -> Option<String> {
+    let prefix = format!("{stem}-");
+    let entries = std::fs::read_dir(lib_dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&prefix) && name.ends_with(".lib") {
+            return Some(name.trim_end_matches(".lib").to_string());
+        }
+    }
+    None
 }
 
 /// bindgen needs libclang. If `LIBCLANG_PATH` is not set, fall back to a known

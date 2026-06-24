@@ -40,6 +40,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::camera::CameraController;
 use crate::image_loader::{load_image, ImageData};
 use crate::renderer::{RenderParams, Renderer};
 use crate::UserEvent;
@@ -99,6 +100,11 @@ pub struct App {
     load_rx: Receiver<LoadResult>,
     load_gen: u64,
     load_state: LoadState,
+
+    // View state.
+    camera: CameraController,
+    exposure: f32,
+    gamma: f32,
 }
 
 impl App {
@@ -128,6 +134,9 @@ impl App {
             load_rx,
             load_gen: 0,
             load_state: LoadState::Idle,
+            camera: CameraController::for_image(false),
+            exposure: 0.0,
+            gamma: 1.0,
         }
     }
 
@@ -261,17 +270,22 @@ impl App {
             }
             match msg.result {
                 Ok(data) => {
+                    let equirect = data.is_equirectangular();
                     log::info!(
-                        "loaded {}x{} ({} ch, {}) from {}",
+                        "loaded {}x{} ({} ch, {}) {} from {}",
                         data.width,
                         data.height,
                         data.channels,
                         data.dtype_name,
+                        if equirect { "[panorama]" } else { "[2-D]" },
                         data.path.display()
                     );
                     if let Some(gfx) = &mut self.gfx {
                         gfx.renderer.set_image(&data);
                     }
+                    self.camera = CameraController::for_image(equirect);
+                    self.exposure = 0.0;
+                    self.gamma = 1.0;
                     self.load_state = LoadState::Loaded;
                     adopted = true;
                 }
@@ -320,10 +334,16 @@ impl App {
             }
             let (w, h) = (size.width as i32, size.height as i32);
 
-            // Fixed 2-D view until the camera lands in Commit 5.
+            let cam = &self.camera.camera;
             let params = RenderParams {
                 viewport: (w, h),
-                ..RenderParams::default()
+                exposure: self.exposure,
+                gamma: self.gamma,
+                projection_mode: cam.projection_mode(),
+                yaw: cam.yaw(),
+                pitch: cam.pitch(),
+                half_fov_radians: cam.half_fov_radians(),
+                tan_half_fov: cam.tan_half_fov(),
             };
             gfx.renderer.render(&params);
 

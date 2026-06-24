@@ -52,7 +52,32 @@ use crate::camera::{Camera, CameraController};
 use crate::image_loader::{load_image, ImageData};
 use crate::ocio::OcioManager;
 use crate::renderer::{RenderParams, Renderer};
+use crate::ui::{self, UiAction, UiInputs, UiState};
 use crate::UserEvent;
+
+/// Metadata for the currently-loaded image (toolbar + overlay).
+#[derive(Clone, Default)]
+struct FileInfo {
+    name: String,
+    width: u32,
+    height: u32,
+    channels: u8,
+    dtype: String,
+    compression: String,
+    panorama: bool,
+}
+
+impl FileInfo {
+    fn summary(&self) -> String {
+        if self.width == 0 {
+            return String::new();
+        }
+        format!(
+            "{}×{} ch:{} {}",
+            self.width, self.height, self.channels, self.dtype
+        )
+    }
+}
 
 /// Hard-coded fixture used to verify the pipeline end-to-end before drag-drop /
 /// CLI loading exists. Removed in Commit 10.
@@ -85,6 +110,7 @@ struct Gfx {
     gl_context: PossiblyCurrentContext,
     window: Window,
     renderer: Renderer,
+    egui: egui_glow::EguiGlow,
 }
 
 /// Headless framebuffer-capture request (see module docs).
@@ -124,6 +150,15 @@ pub struct App {
     ocio: OcioManager,
     /// Last non-Standard view, for the T toggle.
     last_view: Option<String>,
+
+    // UI.
+    ui_state: UiState,
+    toolbar_visible: bool,
+    toolbar_hide_deadline: Option<Instant>,
+    file_info: FileInfo,
+    loaded_path: Option<PathBuf>,
+    /// Headless-test override: force the toolbar visible (IMGVWR_DEBUG_TOOLBAR).
+    force_toolbar: bool,
 
     // Input state.
     modifiers: ModifiersState,
@@ -168,9 +203,17 @@ impl App {
             show_metadata: false,
             ocio,
             last_view: None,
+            ui_state: UiState::default(),
+            toolbar_visible: false,
+            toolbar_hide_deadline: None,
+            file_info: FileInfo::default(),
+            loaded_path: None,
+            force_toolbar: std::env::var_os("IMGVWR_DEBUG_TOOLBAR").is_some(),
             modifiers: ModifiersState::empty(),
             dragging: false,
-            cursor_pos: PhysicalPosition::new(0.0, 0.0),
+            // Start far from the left edge so the toolbar stays hidden until the
+            // cursor actually moves there (and so headless captures are clean).
+            cursor_pos: PhysicalPosition::new(1.0e6, 1.0e6),
             last_left_press: None,
             fullscreen: false,
         }
@@ -293,6 +336,7 @@ impl App {
 
         let gl = Arc::new(gl);
         let renderer = Renderer::new(gl.clone()).context("failed to create renderer")?;
+        let egui = egui_glow::EguiGlow::new(event_loop, gl.clone(), None, None, false);
 
         Ok(Gfx {
             gl,
@@ -300,6 +344,7 @@ impl App {
             gl_context,
             window,
             renderer,
+            egui,
         })
     }
 
@@ -358,11 +403,26 @@ impl App {
                     if let Some(gfx) = &mut self.gfx {
                         gfx.renderer.set_image(&data);
                     }
+                    self.file_info = FileInfo {
+                        name: data
+                            .path
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        width: data.width,
+                        height: data.height,
+                        channels: data.channels,
+                        dtype: data.dtype_name.clone(),
+                        compression: data.compression.clone(),
+                        panorama: equirect,
+                    };
+                    self.loaded_path = Some(data.path.clone());
                     self.camera = CameraController::for_image(equirect);
                     self.exposure = 0.0;
                     self.gamma = 1.0;
                     self.wrap_2d = false;
                     self.load_state = LoadState::Loaded;
+                    self.update_window_title();
                     self.apply_debug_overrides();
                     adopted = true;
                 }
@@ -653,6 +713,111 @@ impl App {
         }
     }
 
+    // ---- UI --------------------------------------------------------------
+
+    fn update_window_title(&self) {
+        if let Some(gfx) = &self.gfx {
+            let title = if self.file_info.name.is_empty() {
+                "imgvwr".to_string()
+            } else {
+                format!("{} — imgvwr", self.file_info.name)
+            };
+            gfx.window.set_title(&title);
+        }
+    }
+
+    fn ui_inputs(&self) -> UiInputs {
+        let display_views = self
+            .ocio
+            .display_views()
+            .iter()
+            .map(|dv| (dv.display.clone(), dv.view.clone()))
+            .collect();
+        let active = self
+            .ocio
+            .active()
+            .map(|dv| (dv.display.clone(), dv.view.clone()));
+        UiInputs {
+            toolbar_visible: self.toolbar_visible,
+            has_image: self
+                .gfx
+                .as_ref()
+                .map(|g| g.renderer.has_image())
+                .unwrap_or(false),
+            file_info: self.file_info.summary(),
+            display_views,
+            active,
+            ocio_available: !self.ocio.display_views().is_empty(),
+        }
+    }
+
+    /// Update toolbar show/hide from the cursor position and panel hover (§12.1).
+    fn tick_toolbar(&mut self) {
+        if self.force_toolbar {
+            self.toolbar_visible = true;
+            self.ui_state.show_view_submenu = true;
+            self.ui_state.show_display_submenu = true;
+            return;
+        }
+        let scale = self
+            .gfx
+            .as_ref()
+            .map(|g| g.window.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let near_left = self.cursor_pos.x <= (28.0 * scale) as f64;
+        if near_left || self.ui_state.pointer_over_panel {
+            self.toolbar_visible = true;
+            self.toolbar_hide_deadline = None;
+        } else if self.toolbar_visible {
+            match self.toolbar_hide_deadline {
+                None => {
+                    self.toolbar_hide_deadline =
+                        Some(Instant::now() + Duration::from_millis(100));
+                }
+                Some(t) if Instant::now() >= t => {
+                    self.toolbar_visible = false;
+                    self.toolbar_hide_deadline = None;
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    fn handle_ui_action(&mut self, action: UiAction) {
+        match action {
+            UiAction::OpenFile => self.open_file_dialog(),
+            UiAction::Reload => {
+                if let Some(path) = self.loaded_path.clone() {
+                    self.ocio.reload();
+                    self.rebuild_ocio();
+                    self.load_path(path);
+                }
+            }
+            UiAction::SetView { display, view } => {
+                if self.ocio.set_active(&display, &view) {
+                    log::info!("view transform -> {display}/{view}");
+                    self.rebuild_ocio();
+                }
+            }
+        }
+    }
+
+    fn open_file_dialog(&mut self) {
+        let file = rfd::FileDialog::new()
+            .add_filter(
+                "Images",
+                &[
+                    "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "ico", "tga",
+                    "pnm", "hdr", "pic", "exr", "nef", "cr2", "cr3", "arw", "dng", "raf", "orf",
+                    "rw2",
+                ],
+            )
+            .pick_file();
+        if let Some(path) = file {
+            self.load_path(path);
+        }
+    }
+
     // ---- render ----------------------------------------------------------
 
     fn is_loading(&self) -> bool {
@@ -673,9 +838,30 @@ impl App {
     }
 
     fn render(&mut self) -> RenderOutcome {
+        self.tick_toolbar();
+
+        // Gather everything the frame needs before the mutable gfx/ui borrows.
+        let inputs = self.ui_inputs();
+        let cam = self.camera.camera;
+        let base = RenderParams {
+            viewport: (1, 1),
+            exposure: self.exposure,
+            gamma: self.gamma,
+            projection_mode: cam.projection_mode(),
+            yaw: cam.yaw(),
+            pitch: cam.pitch(),
+            half_fov_radians: cam.half_fov_radians(),
+            tan_half_fov: cam.tan_half_fov(),
+            wrap_2d: self.wrap_2d,
+        };
+        let capture_ready = self.capture_ready();
+
+        let mut actions: Vec<UiAction> = Vec::new();
         let mut grabbed: Option<(i32, i32, Vec<u8>)> = None;
+
         {
-            let Some(gfx) = &self.gfx else {
+            let ui_state = &mut self.ui_state;
+            let Some(gfx) = self.gfx.as_mut() else {
                 return RenderOutcome::Idle;
             };
             let size = gfx.window.inner_size();
@@ -684,21 +870,19 @@ impl App {
             }
             let (w, h) = (size.width as i32, size.height as i32);
 
-            let cam = &self.camera.camera;
             let params = RenderParams {
                 viewport: (w, h),
-                exposure: self.exposure,
-                gamma: self.gamma,
-                projection_mode: cam.projection_mode(),
-                yaw: cam.yaw(),
-                pitch: cam.pitch(),
-                half_fov_radians: cam.half_fov_radians(),
-                tan_half_fov: cam.tan_half_fov(),
-                wrap_2d: self.wrap_2d,
+                ..base
             };
             gfx.renderer.render(&params);
 
-            if self.capture_ready() {
+            // egui overlay on top of the scene.
+            gfx.egui.run(&gfx.window, |ctx| {
+                ui::build_toolbar(ctx, &inputs, ui_state, &mut actions);
+            });
+            gfx.egui.paint(&gfx.window);
+
+            if capture_ready {
                 let mut buf = vec![0u8; (w * h * 4) as usize];
                 unsafe {
                     gfx.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
@@ -718,6 +902,10 @@ impl App {
             if let Err(e) = gfx.gl_surface.swap_buffers(&gfx.gl_context) {
                 log::error!("swap_buffers failed: {e}");
             }
+        }
+
+        for action in actions {
+            self.handle_ui_action(action);
         }
 
         if let Some((w, h, buf)) = grabbed {
@@ -777,6 +965,16 @@ impl ApplicationHandler<UserEvent> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Let egui see the event first; it tells us whether it consumed it.
+        let mut egui_consumed = false;
+        if let Some(gfx) = &mut self.gfx {
+            let resp = gfx.egui.on_window_event(&gfx.window, &event);
+            if resp.repaint {
+                gfx.window.request_redraw();
+            }
+            egui_consumed = resp.consumed;
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -795,14 +993,25 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
-            WindowEvent::CursorMoved { position, .. } => self.cursor_pos = position,
-            WindowEvent::MouseInput { state, button, .. } => {
-                self.on_mouse_button(state, button)
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = position;
+                self.tick_toolbar();
+                self.request_redraw();
             }
-            WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
+            WindowEvent::MouseInput { state, button, .. } => {
+                if !egui_consumed {
+                    self.on_mouse_button(state, button);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Block wheel input when the toolbar is hovered (§11.3).
+                if !egui_consumed {
+                    self.on_wheel(delta);
+                }
+            }
             WindowEvent::DroppedFile(path) => self.load_path(path),
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
+                if !egui_consumed && event.state == ElementState::Pressed {
                     let text = match &event.logical_key {
                         Key::Character(s) => Some(s.as_str().to_string()),
                         _ => None,
@@ -829,10 +1038,19 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.capture_active() {
+            // Drive continuous frames while a capture is pending.
             event_loop.set_control_flow(ControlFlow::Poll);
             if let Some(gfx) = &self.gfx {
                 gfx.window.request_redraw();
             }
+        } else if let Some(deadline) = self.toolbar_hide_deadline {
+            // Wake at the deadline to evaluate hiding the toolbar.
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            if Instant::now() >= deadline {
+                self.request_redraw();
+            }
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 

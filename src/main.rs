@@ -13,6 +13,7 @@ mod image_loader;
 mod logging;
 mod ocio;
 mod renderer;
+mod ui;
 
 use std::path::PathBuf;
 

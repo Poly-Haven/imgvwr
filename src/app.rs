@@ -38,7 +38,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::image_loader::load_image;
+use crate::renderer::{RenderParams, Renderer};
 use crate::UserEvent;
+
+/// Hard-coded fixture used to verify the pipeline end-to-end before drag-drop /
+/// CLI loading exists. Removed in Commit 10.
+const TEST_IMAGE: &str = r"C:\tmp\imgvwr_test_files\american_walnut_veneer_rough_1k.png";
 
 /// Live graphics state, created once the event loop is `Resumed`.
 struct Gfx {
@@ -46,6 +52,7 @@ struct Gfx {
     gl_surface: Surface<WindowSurface>,
     gl_context: PossiblyCurrentContext,
     window: Window,
+    renderer: Renderer,
 }
 
 /// Headless framebuffer-capture request (see module docs).
@@ -168,12 +175,40 @@ impl App {
         #[cfg(debug_assertions)]
         install_debug_callback(&mut gl);
 
+        let gl = Arc::new(gl);
+        let renderer = Renderer::new(gl.clone()).context("failed to create renderer")?;
+
         Ok(Gfx {
-            gl: Arc::new(gl),
+            gl,
             gl_surface,
             gl_context,
             window,
+            renderer,
         })
+    }
+
+    /// Commit 3: synchronously load the CLI path (if any) or the hard-coded test
+    /// fixture so the texture pipeline can be verified. Background threading and
+    /// full-format support arrive in Commit 4; this is removed in Commit 10.
+    fn load_initial_image(&mut self) {
+        let path = self.initial_path.clone().or_else(|| {
+            let p = PathBuf::from(TEST_IMAGE);
+            p.exists().then_some(p)
+        });
+        let Some(path) = path else {
+            log::info!("no initial image to load");
+            return;
+        };
+        match load_image(&path) {
+            Ok(data) => {
+                if let Some(gfx) = &mut self.gfx {
+                    gfx.renderer.set_image(&data);
+                    gfx.window.request_redraw();
+                }
+                log::info!("loaded {}", path.display());
+            }
+            Err(e) => log::error!("failed to load {}: {e:#}", path.display()),
+        }
     }
 
     /// Whether a capture is configured and not yet taken.
@@ -200,11 +235,14 @@ impl App {
                 return RenderOutcome::Idle;
             }
             let (w, h) = (size.width as i32, size.height as i32);
-            unsafe {
-                gfx.gl.viewport(0, 0, w, h);
-                gfx.gl.clear_color(0.02, 0.02, 0.02, 1.0);
-                gfx.gl.clear(glow::COLOR_BUFFER_BIT);
-            }
+
+            // Commit 3: fixed 2-D view (90° FOV, no pan). Camera control and
+            // exposure/gamma state are wired in at Commits 5 and 6.
+            let params = RenderParams {
+                viewport: (w, h),
+                ..RenderParams::default()
+            };
+            gfx.renderer.render(&params);
 
             // Read the back buffer *before* swapping.
             if self.capture_ready() {
@@ -271,6 +309,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(c) = &mut self.capture {
                     c.start = Instant::now();
                 }
+                self.load_initial_image();
             }
             Err(e) => {
                 log::error!("failed to initialise graphics: {e:?}");

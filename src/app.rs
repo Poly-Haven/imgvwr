@@ -360,10 +360,13 @@ impl App {
     }
 
     fn create_gfx(&mut self, event_loop: &ActiveEventLoop) -> Result<Gfx> {
-        let window_attributes = Window::default_attributes()
+        let mut window_attributes = Window::default_attributes()
             .with_title("imgvwr")
             .with_inner_size(LogicalSize::new(1280.0, 720.0))
             .with_min_inner_size(LogicalSize::new(170.0, 170.0));
+        if let Some(icon) = load_window_icon() {
+            window_attributes = window_attributes.with_window_icon(Some(icon));
+        }
 
         let template = ConfigTemplateBuilder::new()
             .with_alpha_size(8)
@@ -1263,6 +1266,14 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::LoadFinished(_gen) => self.poll_loads(),
         }
     }
+}
+
+/// Load the bundled app icon as a winit window icon (title-bar / taskbar).
+fn load_window_icon() -> Option<winit::window::Icon> {
+    let path = resolve_resources_dir().join("icons").join("app_icon.png");
+    let img = image::open(&path).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
 /// Locate the bundled `resources/` directory: next to the exe (packaged), the

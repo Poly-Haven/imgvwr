@@ -134,6 +134,8 @@ pub struct App {
     load_rx: Receiver<LoadResult>,
     load_gen: u64,
     load_state: LoadState,
+    /// When the current load began, for the load-to-ready timing log (§17.1).
+    load_start: Instant,
 
     // View state.
     camera: CameraController,
@@ -201,6 +203,7 @@ impl App {
             load_rx,
             load_gen: 0,
             load_state: LoadState::Idle,
+            load_start: Instant::now(),
             camera: CameraController::for_image(false),
             exposure: 0.0,
             gamma: 1.0,
@@ -394,6 +397,7 @@ impl App {
         self.load_gen += 1;
         let gen = self.load_gen;
         self.load_state = LoadState::Loading;
+        self.load_start = Instant::now();
         self.pending_name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned());
@@ -437,6 +441,11 @@ impl App {
                     if let Some(gfx) = &mut self.gfx {
                         gfx.renderer.set_image(&data);
                     }
+                    log::info!(
+                        "load-to-ready: {:.2}s for {}",
+                        self.load_start.elapsed().as_secs_f32(),
+                        data.path.display()
+                    );
                     self.file_info = FileInfo {
                         name: data
                             .path

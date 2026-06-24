@@ -14,7 +14,16 @@ use super::{ImageData, PixelBuffer};
 /// Decode an 8/16/32-bit image via the `image` crate (PNG, JPEG, BMP, TIFF,
 /// WebP, GIF, ICO, TGA, PNM, **and Radiance HDR**, plus the generic fallback).
 pub fn load_via_image(path: &Path) -> Result<ImageData> {
-    let img = image::open(path).with_context(|| format!("failed to decode {}", path.display()))?;
+    // Disable the decoder's default allocation limits: the primary workload is
+    // very large (24k+) images and we assume sufficient memory (§1, §8.1).
+    let mut reader = image::ImageReader::open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?
+        .with_guessed_format()
+        .with_context(|| format!("failed to detect format of {}", path.display()))?;
+    reader.no_limits();
+    let img = reader
+        .decode()
+        .with_context(|| format!("failed to decode {}", path.display()))?;
     let channels = img.color().channel_count();
     Ok(dynamic_to_imagedata(path, img, channels, None))
 }

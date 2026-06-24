@@ -38,6 +38,7 @@ anyhow = "1"
 # Logging
 log = "0.4"
 simplelog = "0.12"
+time = { version = "0.3", features = ["local-offset"] }
 # Serialisation (preferences)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

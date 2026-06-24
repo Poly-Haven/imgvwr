@@ -42,7 +42,7 @@ use glutin_winit::{DisplayBuilder, GlWindow};
 use glam::Vec2;
 use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -78,10 +78,6 @@ impl FileInfo {
         )
     }
 }
-
-/// Hard-coded fixture used to verify the pipeline end-to-end before drag-drop /
-/// CLI loading exists. Removed in Commit 10.
-const TEST_IMAGE: &str = r"C:\tmp\imgvwr_test_files\american_walnut_veneer_rough_1k.png";
 
 /// Hard cap on how long a capture run waits for a load before grabbing anyway.
 const CAPTURE_LOAD_CAP: Duration = Duration::from_secs(120);
@@ -170,6 +166,11 @@ pub struct App {
     cursor_pos: PhysicalPosition<f64>,
     last_left_press: Option<Instant>,
     fullscreen: bool,
+    /// True once the user resizes the window (suppresses auto-resize).
+    user_resized: bool,
+    auto_resized_done: bool,
+    /// Set when we request a programmatic resize, to ignore the resulting event.
+    auto_resize_pending: bool,
 }
 
 impl App {
@@ -222,6 +223,9 @@ impl App {
             cursor_pos: PhysicalPosition::new(1.0e6, 1.0e6),
             last_left_press: None,
             fullscreen: false,
+            user_resized: false,
+            auto_resized_done: false,
+            auto_resize_pending: false,
         }
     }
 
@@ -354,15 +358,36 @@ impl App {
         })
     }
 
+    /// Load the path given on the command line, if any. With no argument the
+    /// window opens showing the hint; images arrive via drag-drop or the toolbar.
     fn load_initial_image(&mut self) {
-        let path = self.initial_path.clone().or_else(|| {
-            let p = PathBuf::from(TEST_IMAGE);
-            p.exists().then_some(p)
-        });
-        match path {
+        match self.initial_path.clone() {
             Some(p) => self.load_path(p),
-            None => log::info!("no initial image to load"),
+            None => log::info!("no initial image; showing hint"),
         }
+    }
+
+    /// On the first successful 2-D load, size the window to the image (clamped to
+    /// the monitor) unless the user has already resized it (§16 Commit 10).
+    fn maybe_autosize(&mut self, width: u32, height: u32) {
+        if self.user_resized || self.auto_resized_done {
+            return;
+        }
+        let Some(gfx) = &self.gfx else { return };
+        let (max_w, max_h) = gfx
+            .window
+            .current_monitor()
+            .map(|m| {
+                let s = m.size();
+                ((s.width as f32 * 0.92) as u32, (s.height as f32 * 0.92) as u32)
+            })
+            .unwrap_or((width, height));
+        let w = width.min(max_w).max(170);
+        let h = height.min(max_h).max(170);
+        self.auto_resized_done = true;
+        self.auto_resize_pending = true;
+        let _ = gfx.window.request_inner_size(PhysicalSize::new(w, h));
+        log::debug!("auto-resized window to {w}x{h} for image {width}x{height}");
     }
 
     fn load_path(&mut self, path: PathBuf) {
@@ -432,6 +457,11 @@ impl App {
                     self.wrap_2d = false;
                     self.load_state = LoadState::Loaded;
                     self.update_window_title();
+                    // Size the window to the first 2-D image (panoramas keep the
+                    // current window).
+                    if !equirect {
+                        self.maybe_autosize(data.width, data.height);
+                    }
                     self.apply_debug_overrides();
                     adopted = true;
                 }
@@ -1042,6 +1072,13 @@ impl ApplicationHandler<UserEvent> for App {
                         gfx.gl_surface.resize(&gfx.gl_context, w, h);
                     }
                     gfx.window.request_redraw();
+                }
+                // Distinguish a user resize from our own auto-resize so the
+                // latter doesn't suppress future auto-sizing semantics.
+                if self.auto_resize_pending {
+                    self.auto_resize_pending = false;
+                } else if self.loaded_path.is_some() {
+                    self.user_resized = true;
                 }
             }
             WindowEvent::RedrawRequested => {

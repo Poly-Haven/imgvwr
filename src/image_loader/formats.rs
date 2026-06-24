@@ -15,18 +15,83 @@ use super::{ImageData, PixelBuffer};
 /// WebP, GIF, ICO, TGA, PNM, **and Radiance HDR**, plus the generic fallback).
 pub fn load_via_image(path: &Path) -> Result<ImageData> {
     // Disable the decoder's default allocation limits: the primary workload is
-    // very large (24k+) images and we assume sufficient memory (§1, §8.1).
+    // very large (24k+) images and we assume sufficient memory (§1, §8.1). Go
+    // through the decoder (not image::open) so the embedded ICC profile can be
+    // read before the pixels are decoded.
     let mut reader = image::ImageReader::open(path)
         .with_context(|| format!("failed to open {}", path.display()))?
         .with_guessed_format()
         .with_context(|| format!("failed to detect format of {}", path.display()))?;
     reader.no_limits();
-    let img = reader
-        .decode()
+    let mut decoder = reader
+        .into_decoder()
+        .with_context(|| format!("failed to decode {}", path.display()))?;
+    let icc = extract_icc(&mut decoder);
+    let img = image::DynamicImage::from_decoder(decoder)
         .with_context(|| format!("failed to decode {}", path.display()))?;
     let channels = img.color().channel_count();
-    Ok(dynamic_to_imagedata(path, img, channels, None))
+    let mut data = dynamic_to_imagedata(path, img, channels, None);
+    apply_icc(icc, &mut data);
+    Ok(data)
 }
+
+#[cfg(feature = "icc")]
+fn extract_icc(decoder: &mut impl image::ImageDecoder) -> Option<Vec<u8>> {
+    decoder.icc_profile().ok().flatten()
+}
+
+#[cfg(not(feature = "icc"))]
+fn extract_icc(_decoder: &mut impl image::ImageDecoder) -> Option<Vec<u8>> {
+    None
+}
+
+/// Convert pixels from a non-sRGB embedded ICC profile to sRGB in place (§8.2).
+/// Applies only to the 8-bit (display-encoded) path; profiles whose description
+/// already names sRGB are skipped to avoid a no-op transform.
+#[cfg(feature = "icc")]
+fn apply_icc(icc: Option<Vec<u8>>, data: &mut ImageData) {
+    use lcms2::{InfoType, Intent, Locale, PixelFormat, Profile, Transform};
+
+    let Some(icc) = icc else { return };
+    let PixelBuffer::U8(rgba) = &mut data.pixels else {
+        return;
+    };
+    let src = match Profile::new_icc(&icc) {
+        Ok(p) => p,
+        Err(_) => {
+            log::warn!(
+                "ignoring unparseable ICC profile in {}",
+                data.path.display()
+            );
+            return;
+        }
+    };
+    if let Some(desc) = src.info(InfoType::Description, Locale::none()) {
+        if desc.to_lowercase().contains("srgb") {
+            return; // already sRGB
+        }
+        log::info!("converting ICC profile '{desc}' to sRGB");
+    }
+    let srgb = Profile::new_srgb();
+    let transform = match Transform::new(
+        &src,
+        PixelFormat::RGBA_8,
+        &srgb,
+        PixelFormat::RGBA_8,
+        Intent::Perceptual,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("ICC transform setup failed ({e}); leaving pixels unconverted");
+            return;
+        }
+    };
+    let pixels: &mut [[u8; 4]] = bytemuck::cast_slice_mut(rgba.as_mut_slice());
+    transform.transform_in_place(pixels);
+}
+
+#[cfg(not(feature = "icc"))]
+fn apply_icc(_icc: Option<Vec<u8>>, _data: &mut ImageData) {}
 
 /// Best-effort camera RAW via `rawler`: decode, run the default develop pipeline
 /// (demosaic + white balance + sRGB), and read the developed f32 samples
@@ -280,5 +345,96 @@ pub fn dynamic_to_imagedata(
         compression: "-".to_string(),
         pixels,
         is_encoded_srgb: is_srgb,
+    }
+}
+
+#[cfg(all(test, feature = "icc"))]
+mod icc_tests {
+    use super::*;
+    use lcms2::{CIExyY, CIExyYTRIPLE, Profile, ToneCurve};
+
+    fn solid_gray(value: u8) -> ImageData {
+        ImageData {
+            path: std::path::PathBuf::from("test.png"),
+            width: 1,
+            height: 1,
+            channels: 3,
+            dtype_name: "uint8".to_string(),
+            compression: "-".to_string(),
+            pixels: PixelBuffer::U8(vec![value, value, value, 255]),
+            is_encoded_srgb: true,
+        }
+    }
+
+    /// A linear-gamma (sRGB-primaries) profile must be re-encoded to sRGB:
+    /// linear mid-gray 128 brightens to ~188 after the sRGB transfer function.
+    #[test]
+    fn linear_profile_converts_to_srgb() {
+        let d65 = CIExyY {
+            x: 0.3127,
+            y: 0.3290,
+            Y: 1.0,
+        };
+        let primaries = CIExyYTRIPLE {
+            Red: CIExyY {
+                x: 0.64,
+                y: 0.33,
+                Y: 1.0,
+            },
+            Green: CIExyY {
+                x: 0.30,
+                y: 0.60,
+                Y: 1.0,
+            },
+            Blue: CIExyY {
+                x: 0.15,
+                y: 0.06,
+                Y: 1.0,
+            },
+        };
+        let linear = ToneCurve::new(1.0);
+        let profile = Profile::new_rgb(&d65, &primaries, &[&linear, &linear, &linear]).unwrap();
+        let icc = profile.icc().unwrap();
+
+        let mut data = solid_gray(128);
+        apply_icc(Some(icc), &mut data);
+        let PixelBuffer::U8(v) = &data.pixels else {
+            panic!("expected U8")
+        };
+        assert!(
+            v[0] > 170 && v[0] < 200,
+            "linear 128 should encode to ~188, got {}",
+            v[0]
+        );
+        assert_eq!(v[0], v[1]);
+        assert_eq!(v[0], v[2]);
+        assert_eq!(v[3], 255, "alpha preserved");
+    }
+
+    /// An sRGB-named profile is skipped (or is an identity transform): no change.
+    #[test]
+    fn srgb_profile_is_noop() {
+        let icc = Profile::new_srgb().icc().unwrap();
+        let mut data = solid_gray(100);
+        apply_icc(Some(icc), &mut data);
+        let PixelBuffer::U8(v) = &data.pixels else {
+            panic!("expected U8")
+        };
+        assert!(
+            (v[0] as i32 - 100).abs() <= 2,
+            "sRGB profile should be ~no-op, got {}",
+            v[0]
+        );
+    }
+
+    /// No ICC profile present -> pixels untouched.
+    #[test]
+    fn no_profile_leaves_pixels_untouched() {
+        let mut data = solid_gray(77);
+        apply_icc(None, &mut data);
+        let PixelBuffer::U8(v) = &data.pixels else {
+            panic!("expected U8")
+        };
+        assert_eq!(v[0], 77);
     }
 }

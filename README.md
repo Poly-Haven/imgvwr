@@ -58,8 +58,9 @@ Target platform is **Windows only** (x64).
 - **MSVC C++ build tools** (Visual Studio 2019/2022 or the standalone Build
   Tools) — used by the `cc` crate to compile the OCIO shim.
 - **LLVM/Clang on `PATH`** (provides `libclang`) — required by `bindgen`.
-- **vcpkg** with `VCPKG_ROOT` set, with OpenColorIO and lcms installed:
+- **vcpkg** providing OpenColorIO, lcms, and OpenEXR. Either workflow works:
 
+  *Classic mode* (set `VCPKG_ROOT`):
   ```bat
   git clone https://github.com/microsoft/vcpkg %USERPROFILE%\vcpkg
   %USERPROFILE%\vcpkg\bootstrap-vcpkg.bat
@@ -67,7 +68,15 @@ Target platform is **Windows only** (x64).
   %VCPKG_ROOT%\vcpkg install opencolorio lcms openexr --triplet x64-windows
   ```
 
-  (`openexr` provides the fallback decoder for DWAA/DWAB-compressed EXRs.)
+  *Manifest mode* (uses `vcpkg.json`; no `VCPKG_ROOT` needed):
+  ```bat
+  %VCPKG_ROOT%\vcpkg install --triplet x64-windows   :: run from the project root
+  ```
+
+  `build.rs` looks for the libraries in `./vcpkg_installed` (manifest) first, then
+  `%VCPKG_ROOT%\installed` (classic). `openexr` provides the fallback decoder for
+  DWAA/DWAB-compressed EXRs; `lcms` powers ICC-profile conversion (JPEGs/PNGs with
+  a non-sRGB embedded profile are converted to sRGB on load).
 
 ### Packaging
 

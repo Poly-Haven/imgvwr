@@ -223,8 +223,15 @@ impl App {
             file_info: FileInfo::default(),
             loaded_path: None,
             pending_name: None,
-            force_toolbar: std::env::var_os("IMGVWR_DEBUG_TOOLBAR").is_some(),
-            force_overlay: std::env::var("IMGVWR_DEBUG_OVERLAY").ok(),
+            // The IMGVWR_DEBUG_* overrides force internal state for headless
+            // testing; they are dev-only and ignored in release builds.
+            force_toolbar: cfg!(debug_assertions)
+                && std::env::var_os("IMGVWR_DEBUG_TOOLBAR").is_some(),
+            force_overlay: if cfg!(debug_assertions) {
+                std::env::var("IMGVWR_DEBUG_OVERLAY").ok()
+            } else {
+                None
+            },
             modifiers: ModifiersState::empty(),
             dragging: false,
             // Start far from the left edge so the toolbar stays hidden until the
@@ -812,6 +819,11 @@ impl App {
 
     /// Apply `IMGVWR_DEBUG_*` overrides after load (headless verification only).
     fn apply_debug_overrides(&mut self) {
+        // Dev-only: the IMGVWR_DEBUG_* overrides exist purely for headless
+        // testing and must not affect release builds.
+        if !cfg!(debug_assertions) {
+            return;
+        }
         let f = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<f32>().ok());
         if let Some(v) = f("IMGVWR_DEBUG_EXPOSURE") {
             self.exposure = v;

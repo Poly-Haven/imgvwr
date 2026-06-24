@@ -2,11 +2,12 @@
 //! `GL_MAX_TEXTURE_SIZE`, or a tiled `GL_TEXTURE_2D_ARRAY` for very large images
 //! (the 24k+ primary workload — see plans/rewrite.md §9.7).
 //!
-//! Tiles are padded to a uniform layer size and carry a 1-texel border
-//! replicated from neighbours, so bilinear filtering and mipmaps stay seamless
-//! across tile boundaries. A single `sampler2DArray` (one texture unit) holds
-//! every tile, sidestepping the bound-sampler-count limit regardless of tile
-//! count.
+//! Tiles are padded to a uniform layer size and carry a multi-texel border
+//! (`BORDER`) replicated from neighbours, so bilinear filtering and the capped
+//! mip chain stay seamless across tile boundaries (the shader also derives the
+//! LOD from the continuous pixel coordinate via `textureGrad`). A single
+//! `sampler2DArray` (one texture unit) holds every tile, sidestepping the
+//! bound-sampler-count limit regardless of tile count.
 
 use glow::HasContext as _;
 

@@ -13,6 +13,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/exr_native/shim.cpp");
     println!("cargo:rerun-if-changed=src/exr_native/shim.h");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=vcpkg.json");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
 
@@ -22,13 +23,7 @@ fn main() {
         return;
     }
 
-    let vcpkg_root = std::env::var("VCPKG_ROOT").expect(
-        "VCPKG_ROOT must be set to build with OCIO \
-         (disable the `ocio` feature for a gamma-only dev build)",
-    );
-    let installed = PathBuf::from(&vcpkg_root)
-        .join("installed")
-        .join("x64-windows");
+    let installed = locate_vcpkg_installed();
     let include_dir = installed.join("include");
     let lib_dir = installed.join("lib");
     let bin_dir = installed.join("bin");
@@ -118,28 +113,40 @@ fn find_versioned_lib(lib_dir: &Path, stem: &str) -> Option<String> {
     None
 }
 
-/// bindgen needs libclang. If `LIBCLANG_PATH` is not set, fall back to a known
-/// local copy so a plain `cargo build` works on this machine. CI installs LLVM.
+/// Resolve the vcpkg install tree containing OpenColorIO/OpenEXR/lcms, honouring
+/// both vcpkg workflows: manifest mode (`vcpkg install` in the project root,
+/// producing `./vcpkg_installed/`) and classic mode (`$VCPKG_ROOT/installed`).
+fn locate_vcpkg_installed() -> PathBuf {
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("vcpkg_installed")
+        .join("x64-windows");
+    if manifest.join("include").join("OpenColorIO").exists() {
+        return manifest;
+    }
+    let vcpkg_root = std::env::var("VCPKG_ROOT").expect(
+        "Provide OpenColorIO/OpenEXR/lcms via vcpkg: either run \
+         `vcpkg install` in the project root (manifest mode) or set VCPKG_ROOT \
+         after `vcpkg install opencolorio lcms openexr --triplet x64-windows` \
+         (classic mode). Or disable the `ocio` feature for a gamma-only build.",
+    );
+    PathBuf::from(vcpkg_root)
+        .join("installed")
+        .join("x64-windows")
+}
+
+/// bindgen needs libclang. If `LIBCLANG_PATH` is not set, probe the standard
+/// LLVM install location; otherwise leave it to bindgen's own PATH search and
+/// let it emit a clear error. (Install LLVM and/or set `LIBCLANG_PATH`.)
 fn ensure_libclang() {
     if std::env::var_os("LIBCLANG_PATH").is_some() {
         return;
     }
-    const FALLBACKS: &[&str] = &[
-        r"C:\Program Files\LLVM\bin",
-        r"C:\Program Files\Side Effects Software\Houdini 20.5.584\python311\lib\site-packages-forced\shiboken2_generator",
-    ];
-    for candidate in FALLBACKS {
-        let dir = Path::new(candidate);
-        if dir.join("libclang.dll").exists() {
-            println!("cargo:warning=using libclang from {candidate}");
+    for candidate in [r"C:\Program Files\LLVM\bin", r"C:\Program Files\LLVM\lib"] {
+        if Path::new(candidate).join("libclang.dll").exists() {
             std::env::set_var("LIBCLANG_PATH", candidate);
             return;
         }
     }
-    println!(
-        "cargo:warning=LIBCLANG_PATH not set and no fallback libclang found; \
-         bindgen may fail. Install LLVM and set LIBCLANG_PATH."
-    );
 }
 
 /// Copy every DLL from the vcpkg bin dir into the cargo target profile dir

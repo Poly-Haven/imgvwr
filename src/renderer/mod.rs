@@ -39,6 +39,8 @@ pub struct RenderParams {
     pub pitch: f32,
     pub half_fov_radians: f32,
     pub tan_half_fov: f32,
+    /// 2-D mode: repeat the image (GL_REPEAT both axes) instead of clamping.
+    pub wrap_2d: bool,
 }
 
 impl Default for RenderParams {
@@ -53,6 +55,7 @@ impl Default for RenderParams {
             pitch: 0.0,
             half_fov_radians: half_fov,
             tan_half_fov: half_fov.tan(),
+            wrap_2d: false,
         }
     }
 }
@@ -68,6 +71,7 @@ struct Uniforms {
     projection_mode: Option<glow::UniformLocation>,
     image_aspect: Option<glow::UniformLocation>,
     input_is_encoded_srgb: Option<glow::UniformLocation>,
+    wrap_2d: Option<glow::UniformLocation>,
     image: Option<glow::UniformLocation>,
 }
 
@@ -85,6 +89,7 @@ impl Uniforms {
             projection_mode: u("u_projection_mode"),
             image_aspect: u("u_image_aspect"),
             input_is_encoded_srgb: u("u_input_is_encoded_srgb"),
+            wrap_2d: u("u_wrap_2d"),
             image: u("u_image"),
         }
     }
@@ -224,6 +229,11 @@ impl Renderer {
         self.image.is_some()
     }
 
+    /// Aspect ratio (w/h) of the current image, if any.
+    pub fn image_aspect(&self) -> Option<f32> {
+        self.image.as_ref().map(|i| i.aspect)
+    }
+
     /// Clear and draw the current frame to the (already-current) framebuffer.
     pub fn render(&self, params: &RenderParams) {
         let gl = &self.gl;
@@ -256,9 +266,18 @@ impl Renderer {
                 u.input_is_encoded_srgb.as_ref(),
                 image.is_encoded_srgb as i32,
             );
+            gl.uniform_1_i32(u.wrap_2d.as_ref(), params.wrap_2d as i32);
 
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(image.texture));
+            // Vertical wrap follows the 2-D wrap toggle; horizontal stays REPEAT
+            // (panorama needs seamless horizontal wrap regardless).
+            let wrap_t = if params.wrap_2d {
+                glow::REPEAT
+            } else {
+                glow::CLAMP_TO_EDGE
+            };
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, wrap_t as i32);
             gl.uniform_1_i32(u.image.as_ref(), 0);
 
             gl.bind_vertex_array(Some(self.vao));

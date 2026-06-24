@@ -13,6 +13,7 @@ uniform float u_gamma;               // output tweak; applied ONCE after the dis
 uniform int   u_projection_mode;     // 0 = equirectangular panorama, 1 = 2-D pan/zoom
 uniform float u_image_aspect;
 uniform bool  u_input_is_encoded_srgb;  // true when source pixels are sRGB-encoded (JPEG / LDR PNG)
+uniform bool  u_wrap_2d;             // 2-D mode: repeat the image instead of clamping
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -59,11 +60,13 @@ void main() {
         float sy = inv_zoom;
         vec2 raw_uv = vec2(0.5 + pan_u + centered.x * sx,
                            0.5 + pan_v - centered.y * sy);
-        if (raw_uv.x < 0.0 || raw_uv.x > 1.0 ||
-            raw_uv.y < 0.0 || raw_uv.y > 1.0) {
+        if (!u_wrap_2d &&
+            (raw_uv.x < 0.0 || raw_uv.x > 1.0 ||
+             raw_uv.y < 0.0 || raw_uv.y > 1.0)) {
             frag_color = vec4(0.02, 0.02, 0.02, 1.0);
             return;
         }
+        // When wrapping, GL_REPEAT on both axes tiles the image seamlessly.
         uv = raw_uv;
     } else {
         // -- Rectilinear equirectangular projection ----------------------

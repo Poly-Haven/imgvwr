@@ -1,19 +1,26 @@
 //! Application struct and winit event loop.
 //!
 //! Brings up the window, the glutin OpenGL 4.3 core context, and a glow
-//! context; loads images on a background thread; and renders each frame.
+//! context; loads images on a background thread; handles mouse/keyboard input;
+//! and renders each frame.
 //!
 //! ## Headless framebuffer capture
 //!
 //! Because `imgvwr.exe` is a dev binary (no Start-menu registration), the
 //! computer-use screenshot tool cannot see its window contents. To verify
-//! rendering headlessly we instead read the GL back buffer with `glReadPixels`
-//! and write a PNG. Driven by env vars:
+//! rendering headlessly we read the GL back buffer with `glReadPixels` and write
+//! a PNG. Driven by env vars:
 //!   * `IMGVWR_CAPTURE`           – output PNG path (enables capture)
-//!   * `IMGVWR_CAPTURE_DELAY_MS`  – minimum wait after the window appears before
-//!                                  capturing. Capture also waits for any
-//!                                  in-flight load to finish (up to a cap), then
-//!                                  captures one frame and exits.
+//!   * `IMGVWR_CAPTURE_DELAY_MS`  – minimum wait before capturing.
+//!
+//! Interactive input cannot be exercised headlessly (the dev window is invisible
+//! to the input tool), so a set of `IMGVWR_DEBUG_*` env overrides apply a camera
+//! / exposure state right after load so the visual outcome can be captured:
+//!   * `IMGVWR_DEBUG_EXPOSURE` / `_GAMMA`
+//!   * `IMGVWR_DEBUG_YAW` / `_PITCH` / `_FOV` (panorama, degrees)
+//!   * `IMGVWR_DEBUG_ZOOM` (2-D)
+//!   * `IMGVWR_DEBUG_PROJECTION` = `pano` | `flat`
+//!   * `IMGVWR_DEBUG_WRAP` = `1`
 
 use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
@@ -32,15 +39,16 @@ use glutin::context::{
 use glutin::display::{GetGlDisplay, GlDisplay};
 use glutin::surface::{GlSurface, Surface, SwapInterval, WindowSurface};
 use glutin_winit::{DisplayBuilder, GlWindow};
+use glam::Vec2;
 use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
-use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
-use crate::camera::CameraController;
+use crate::camera::{Camera, CameraController};
 use crate::image_loader::{load_image, ImageData};
 use crate::renderer::{RenderParams, Renderer};
 use crate::UserEvent;
@@ -51,6 +59,9 @@ const TEST_IMAGE: &str = r"C:\tmp\imgvwr_test_files\american_walnut_veneer_rough
 
 /// Hard cap on how long a capture run waits for a load before grabbing anyway.
 const CAPTURE_LOAD_CAP: Duration = Duration::from_secs(120);
+
+/// Max interval between two left-clicks to count as a double-click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(350);
 
 /// Result of a background decode, tagged with its generation id.
 struct LoadResult {
@@ -105,6 +116,15 @@ pub struct App {
     camera: CameraController,
     exposure: f32,
     gamma: f32,
+    wrap_2d: bool,
+    show_metadata: bool,
+
+    // Input state.
+    modifiers: ModifiersState,
+    dragging: bool,
+    cursor_pos: PhysicalPosition<f64>,
+    last_left_press: Option<Instant>,
+    fullscreen: bool,
 }
 
 impl App {
@@ -137,17 +157,22 @@ impl App {
             camera: CameraController::for_image(false),
             exposure: 0.0,
             gamma: 1.0,
+            wrap_2d: false,
+            show_metadata: false,
+            modifiers: ModifiersState::empty(),
+            dragging: false,
+            cursor_pos: PhysicalPosition::new(0.0, 0.0),
+            last_left_press: None,
+            fullscreen: false,
         }
     }
 
-    /// Build the window, GL context, surface, and glow context.
     fn create_gfx(&mut self, event_loop: &ActiveEventLoop) -> Result<Gfx> {
         let window_attributes = Window::default_attributes()
             .with_title("imgvwr")
             .with_inner_size(LogicalSize::new(1280.0, 720.0))
             .with_min_inner_size(LogicalSize::new(170.0, 170.0));
 
-        // 8-bit colour, no depth/stencil (we only ever draw a full-screen quad).
         let template = ConfigTemplateBuilder::new()
             .with_alpha_size(8)
             .with_depth_size(0)
@@ -221,8 +246,6 @@ impl App {
         })
     }
 
-    /// Load the CLI path (if any) or the hard-coded test fixture. Removed in
-    /// Commit 10 once drag-drop / CLI loading are wired up.
     fn load_initial_image(&mut self) {
         let path = self.initial_path.clone().or_else(|| {
             let p = PathBuf::from(TEST_IMAGE);
@@ -234,8 +257,6 @@ impl App {
         }
     }
 
-    /// Begin a background decode of `path`. Bumps the generation id so stale
-    /// results from earlier loads are discarded (§5.2).
     fn load_path(&mut self, path: PathBuf) {
         self.load_gen += 1;
         let gen = self.load_gen;
@@ -247,20 +268,17 @@ impl App {
         std::thread::Builder::new()
             .name(format!("image-load-{gen}"))
             .spawn(move || {
-                // A panicking decoder becomes a Failed state, not a crash.
                 let result = match std::panic::catch_unwind(AssertUnwindSafe(|| load_image(&path))) {
                     Ok(Ok(data)) => Ok(data),
                     Ok(Err(e)) => Err(format!("{e:#}")),
                     Err(_) => Err("decoder panicked".to_string()),
                 };
                 let _ = tx.send(LoadResult { gen, result });
-                // Wake the reactive event loop so the result is observed.
                 let _ = proxy.send_event(UserEvent::LoadFinished(gen));
             })
             .expect("spawn image-load thread");
     }
 
-    /// Drain finished loads, adopting only the one matching the current gen.
     fn poll_loads(&mut self) {
         let mut adopted = false;
         while let Ok(msg) = self.load_rx.try_recv() {
@@ -286,7 +304,9 @@ impl App {
                     self.camera = CameraController::for_image(equirect);
                     self.exposure = 0.0;
                     self.gamma = 1.0;
+                    self.wrap_2d = false;
                     self.load_state = LoadState::Loaded;
+                    self.apply_debug_overrides();
                     adopted = true;
                 }
                 Err(e) => {
@@ -303,6 +323,275 @@ impl App {
         }
     }
 
+    // ---- input -----------------------------------------------------------
+
+    fn ctrl(&self) -> bool {
+        self.modifiers.control_key()
+    }
+
+    fn viewport(&self) -> (f32, f32) {
+        self.gfx
+            .as_ref()
+            .map(|g| {
+                let s = g.window.inner_size();
+                (s.width.max(1) as f32, s.height.max(1) as f32)
+            })
+            .unwrap_or((1.0, 1.0))
+    }
+
+    fn request_redraw(&self) {
+        if let Some(gfx) = &self.gfx {
+            gfx.window.request_redraw();
+        }
+    }
+
+    fn start_drag(&mut self) {
+        self.dragging = true;
+        if let Some(gfx) = &self.gfx {
+            // Confine (fallback to lock) so look-around/pan is unbounded; hide
+            // the cursor for the duration of the gesture.
+            let grabbed = gfx
+                .window
+                .set_cursor_grab(CursorGrabMode::Confined)
+                .or_else(|_| gfx.window.set_cursor_grab(CursorGrabMode::Locked));
+            if let Err(e) = grabbed {
+                log::debug!("cursor grab failed: {e}");
+            }
+            gfx.window.set_cursor_visible(false);
+        }
+    }
+
+    fn end_drag(&mut self) {
+        if !self.dragging {
+            return;
+        }
+        self.dragging = false;
+        if let Some(gfx) = &self.gfx {
+            let _ = gfx.window.set_cursor_grab(CursorGrabMode::None);
+            gfx.window.set_cursor_visible(true);
+        }
+    }
+
+    /// Apply a relative drag delta (raw device motion, pixels).
+    fn on_drag_motion(&mut self, dx: f32, dy: f32) {
+        let (vw, vh) = self.viewport();
+        match self.camera.camera {
+            Camera::Pano { pitch_rad, .. } => {
+                // Pixels-per-radian from the current vertical FOV.
+                let rad_per_px = (2.0 * self.camera.camera.half_fov_radians()) / vh;
+                // Latitude-based horizontal multiplier (same formula as original).
+                let h_mult = (1.0 / pitch_rad.abs().cos().max(0.25)).min(2.5);
+                let dyaw = -dx * rad_per_px * h_mult;
+                let dpitch = -dy * rad_per_px;
+                self.camera.rotate(dyaw, dpitch);
+            }
+            Camera::Flat { .. } => {
+                let inv_zoom = self.camera.camera.tan_half_fov();
+                let image_aspect = self
+                    .gfx
+                    .as_ref()
+                    .and_then(|g| g.renderer.image_aspect())
+                    .unwrap_or(1.0);
+                let sx = inv_zoom * (vw / vh) / image_aspect.max(1e-4);
+                let sy = inv_zoom;
+                // Grab feel: content follows the cursor.
+                let du = -(dx / vw) * sx;
+                let dv = -(dy / vh) * sy;
+                self.camera.pan(Vec2::new(du, dv));
+                if !self.wrap_2d {
+                    self.clamp_2d_pan();
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Keep the 2-D image within the viewport (no-wrap mode).
+    fn clamp_2d_pan(&mut self) {
+        let (vw, vh) = self.viewport();
+        let image_aspect = self
+            .gfx
+            .as_ref()
+            .and_then(|g| g.renderer.image_aspect())
+            .unwrap_or(1.0);
+        if let Camera::Flat { pan, zoom } = &mut self.camera.camera {
+            let inv_zoom = 1.0 / zoom.max(1e-4);
+            let sx = inv_zoom * (vw / vh) / image_aspect.max(1e-4);
+            let sy = inv_zoom;
+            // Visible half-span; if the image is smaller than the view, centre it.
+            let lim_u = (0.5 - 0.5 * sx).max(0.0);
+            let lim_v = (0.5 - 0.5 * sy).max(0.0);
+            pan.x = pan.x.clamp(-lim_u, lim_u);
+            pan.y = pan.y.clamp(-lim_v, lim_v);
+        }
+    }
+
+    fn on_wheel(&mut self, delta: MouseScrollDelta) {
+        let steps = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as f32,
+        };
+        if steps == 0.0 {
+            return;
+        }
+
+        if self.ctrl() {
+            // Ctrl + wheel: exposure.
+            self.exposure += steps * 0.1;
+            self.request_redraw();
+            return;
+        }
+
+        match self.camera.camera {
+            Camera::Pano { fov_deg, .. } => {
+                // Progressive feel: step scaled by current FOV.
+                let step = (fov_deg / 90.0) * 5.0;
+                self.camera.adjust_fov(-steps * step);
+            }
+            Camera::Flat { .. } => {
+                self.camera.adjust_zoom(1.1_f32.powf(steps));
+                if !self.wrap_2d {
+                    self.clamp_2d_pan();
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    fn on_key(&mut self, event_loop: &ActiveEventLoop, key: &Key, is_char: Option<&str>) {
+        let ctrl = self.ctrl();
+        match (key, is_char) {
+            (_, Some(",")) => {
+                if ctrl {
+                    self.gamma = (self.gamma - 0.1).max(0.1);
+                } else {
+                    self.exposure -= 1.0;
+                }
+            }
+            (_, Some(".")) => {
+                if ctrl {
+                    self.gamma = (self.gamma + 0.1).min(4.0);
+                } else {
+                    self.exposure += 1.0;
+                }
+            }
+            (_, Some("p")) | (_, Some("P")) => {
+                let want = !self.camera.is_panorama();
+                self.camera.set_mode(want);
+                if !self.camera.is_panorama() && !self.wrap_2d {
+                    self.clamp_2d_pan();
+                }
+                log::info!(
+                    "projection -> {}",
+                    if self.camera.is_panorama() { "panorama" } else { "2-D" }
+                );
+            }
+            (_, Some("w")) | (_, Some("W")) => {
+                self.wrap_2d = !self.wrap_2d;
+                if !self.wrap_2d {
+                    self.clamp_2d_pan();
+                }
+                log::info!("2-D wrap -> {}", self.wrap_2d);
+            }
+            (_, Some("t")) | (_, Some("T")) => {
+                // View-transform toggle is wired to OCIO in Commit 7 / 12.
+                log::info!("T (view-transform toggle) — pending OCIO");
+            }
+            (_, Some("q")) | (_, Some("Q")) => self.escape_or_exit(event_loop),
+            (Key::Named(NamedKey::F2), _) => {
+                self.show_metadata = !self.show_metadata;
+                log::info!("metadata overlay -> {}", self.show_metadata);
+            }
+            (Key::Named(NamedKey::Home), _) => self.camera.reset_view(),
+            (Key::Named(NamedKey::F11), _) => self.toggle_fullscreen(),
+            (Key::Named(NamedKey::Escape), _) => self.escape_or_exit(event_loop),
+            _ => return,
+        }
+        self.request_redraw();
+    }
+
+    fn escape_or_exit(&mut self, event_loop: &ActiveEventLoop) {
+        if self.fullscreen {
+            self.set_fullscreen(false);
+        } else {
+            event_loop.exit();
+        }
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        self.set_fullscreen(!self.fullscreen);
+    }
+
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+        if let Some(gfx) = &self.gfx {
+            gfx.window
+                .set_fullscreen(on.then(|| Fullscreen::Borderless(None)));
+        }
+    }
+
+    fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
+        match (state, button) {
+            (ElementState::Pressed, MouseButton::Left) => {
+                let now = Instant::now();
+                let double = self
+                    .last_left_press
+                    .is_some_and(|t| now.duration_since(t) < DOUBLE_CLICK);
+                self.last_left_press = Some(now);
+                if double {
+                    self.toggle_fullscreen();
+                    self.request_redraw();
+                } else {
+                    self.start_drag();
+                }
+            }
+            (ElementState::Pressed, MouseButton::Middle) => self.start_drag(),
+            (ElementState::Released, MouseButton::Left | MouseButton::Middle) => self.end_drag(),
+            _ => {}
+        }
+    }
+
+    /// Apply `IMGVWR_DEBUG_*` overrides after load (headless verification only).
+    fn apply_debug_overrides(&mut self) {
+        let f = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<f32>().ok());
+        if let Some(v) = f("IMGVWR_DEBUG_EXPOSURE") {
+            self.exposure = v;
+        }
+        if let Some(v) = f("IMGVWR_DEBUG_GAMMA") {
+            self.gamma = v;
+        }
+        if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
+            self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
+        }
+        if std::env::var("IMGVWR_DEBUG_WRAP").is_ok() {
+            self.wrap_2d = true;
+        }
+        match &mut self.camera.camera {
+            Camera::Pano {
+                yaw_rad,
+                pitch_rad,
+                fov_deg,
+            } => {
+                if let Some(v) = f("IMGVWR_DEBUG_YAW") {
+                    *yaw_rad = v.to_radians();
+                }
+                if let Some(v) = f("IMGVWR_DEBUG_PITCH") {
+                    *pitch_rad = v.to_radians();
+                }
+                if let Some(v) = f("IMGVWR_DEBUG_FOV") {
+                    *fov_deg = v;
+                }
+            }
+            Camera::Flat { zoom, .. } => {
+                if let Some(v) = f("IMGVWR_DEBUG_ZOOM") {
+                    *zoom = v;
+                }
+            }
+        }
+    }
+
+    // ---- render ----------------------------------------------------------
+
     fn is_loading(&self) -> bool {
         matches!(self.load_state, LoadState::Loading)
     }
@@ -311,8 +600,6 @@ impl App {
         self.capture.as_ref().is_some_and(|c| !c.done)
     }
 
-    /// Whether this frame should be grabbed: capture configured, delay elapsed,
-    /// and (any in-flight load finished, or the hard cap reached).
     fn capture_ready(&self) -> bool {
         self.capture.as_ref().is_some_and(|c| {
             let elapsed = c.start.elapsed();
@@ -344,6 +631,7 @@ impl App {
                 pitch: cam.pitch(),
                 half_fov_radians: cam.half_fov_radians(),
                 tan_half_fov: cam.tan_half_fov(),
+                wrap_2d: self.wrap_2d,
             };
             gfx.renderer.render(&params);
 
@@ -441,20 +729,40 @@ impl ApplicationHandler<UserEvent> for App {
                     event_loop.exit();
                 }
             }
+            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
+            WindowEvent::CursorMoved { position, .. } => self.cursor_pos = position,
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.on_mouse_button(state, button)
+            }
+            WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
             WindowEvent::DroppedFile(path) => self.load_path(path),
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed
-                    && matches!(event.logical_key, Key::Named(NamedKey::Escape))
-                {
-                    event_loop.exit();
+                if event.state == ElementState::Pressed {
+                    let text = match &event.logical_key {
+                        Key::Character(s) => Some(s.as_str().to_string()),
+                        _ => None,
+                    };
+                    self.on_key(event_loop, &event.logical_key, text.as_deref());
                 }
             }
             _ => {}
         }
     }
 
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            if self.dragging {
+                self.on_drag_motion(delta.0 as f32, delta.1 as f32);
+            }
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Drive continuous frames only while a capture is pending.
         if self.capture_active() {
             event_loop.set_control_flow(ControlFlow::Poll);
             if let Some(gfx) = &self.gfx {

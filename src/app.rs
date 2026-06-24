@@ -50,6 +50,7 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::camera::{Camera, CameraController};
 use crate::image_loader::{load_image, ImageData};
+use crate::ocio::OcioManager;
 use crate::renderer::{RenderParams, Renderer};
 use crate::UserEvent;
 
@@ -119,6 +120,11 @@ pub struct App {
     wrap_2d: bool,
     show_metadata: bool,
 
+    // Colour management.
+    ocio: OcioManager,
+    /// Last non-Standard view, for the T toggle.
+    last_view: Option<String>,
+
     // Input state.
     modifiers: ModifiersState,
     dragging: bool,
@@ -144,6 +150,7 @@ impl App {
         });
 
         let (load_tx, load_rx) = std::sync::mpsc::channel();
+        let ocio = OcioManager::new(resolve_resources_dir());
 
         Self {
             proxy,
@@ -159,11 +166,61 @@ impl App {
             gamma: 1.0,
             wrap_2d: false,
             show_metadata: false,
+            ocio,
+            last_view: None,
             modifiers: ModifiersState::empty(),
             dragging: false,
             cursor_pos: PhysicalPosition::new(0.0, 0.0),
             last_left_press: None,
             fullscreen: false,
+        }
+    }
+
+    /// Build the OCIO program for the active display/view and upload it.
+    fn rebuild_ocio(&mut self) {
+        let shader = self.ocio.build_gpu_shader();
+        if let Some(gfx) = &mut self.gfx {
+            gfx.renderer.set_ocio_shader(&shader);
+        }
+        self.request_redraw();
+    }
+
+    /// T: toggle between the active view and the display's Standard/Raw view.
+    fn toggle_view_transform(&mut self) {
+        let Some(active) = self.ocio.active().cloned() else {
+            return;
+        };
+        let views = self.ocio.views_for(&active.display);
+        let standard = views
+            .iter()
+            .find(|v| v.eq_ignore_ascii_case("standard"))
+            .or_else(|| views.iter().find(|v| v.eq_ignore_ascii_case("raw")))
+            .cloned();
+        let Some(standard) = standard else {
+            log::info!("T: no Standard/Raw view available for {}", active.display);
+            return;
+        };
+
+        let target = if active.view.eq_ignore_ascii_case(&standard) {
+            self.last_view
+                .clone()
+                .filter(|v| !v.eq_ignore_ascii_case(&standard))
+                .or_else(|| {
+                    views
+                        .iter()
+                        .find(|v| !v.eq_ignore_ascii_case(&standard))
+                        .cloned()
+                })
+        } else {
+            self.last_view = Some(active.view.clone());
+            Some(standard)
+        };
+
+        if let Some(view) = target {
+            if self.ocio.set_active(&active.display, &view) {
+                log::info!("view transform -> {}/{}", active.display, view);
+                self.rebuild_ocio();
+            }
         }
     }
 
@@ -493,10 +550,7 @@ impl App {
                 }
                 log::info!("2-D wrap -> {}", self.wrap_2d);
             }
-            (_, Some("t")) | (_, Some("T")) => {
-                // View-transform toggle is wired to OCIO in Commit 7 / 12.
-                log::info!("T (view-transform toggle) — pending OCIO");
-            }
+            (_, Some("t")) | (_, Some("T")) => self.toggle_view_transform(),
             (_, Some("q")) | (_, Some("Q")) => self.escape_or_exit(event_loop),
             (Key::Named(NamedKey::F2), _) => {
                 self.show_metadata = !self.show_metadata;
@@ -565,6 +619,15 @@ impl App {
         }
         if std::env::var("IMGVWR_DEBUG_WRAP").is_ok() {
             self.wrap_2d = true;
+        }
+        if let Ok(spec) = std::env::var("IMGVWR_DEBUG_VIEW") {
+            if let Some((display, view)) = spec.split_once('/') {
+                if self.ocio.set_active(display, view) {
+                    self.rebuild_ocio();
+                } else {
+                    log::warn!("IMGVWR_DEBUG_VIEW: no such display/view '{spec}'");
+                }
+            }
         }
         match &mut self.camera.camera {
             Camera::Pano {
@@ -697,6 +760,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(c) = &mut self.capture {
                     c.start = Instant::now();
                 }
+                // Build the OCIO program (or gamma fallback) before first draw.
+                self.rebuild_ocio();
                 self.load_initial_image();
             }
             Err(e) => {
@@ -776,6 +841,24 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::LoadFinished(_gen) => self.poll_loads(),
         }
     }
+}
+
+/// Locate the bundled `resources/` directory: next to the exe (packaged), the
+/// current working dir (dev), or the compile-time manifest dir (fallback).
+fn resolve_resources_dir() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("resources");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    let cwd = PathBuf::from("resources");
+    if cwd.exists() {
+        return cwd;
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources")
 }
 
 #[cfg(debug_assertions)]

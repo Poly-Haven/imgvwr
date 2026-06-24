@@ -9,6 +9,7 @@ mod app;
 mod camera;
 mod image_loader;
 mod logging;
+mod ocio;
 mod renderer;
 
 use std::path::PathBuf;

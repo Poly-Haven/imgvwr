@@ -11,6 +11,7 @@ use anyhow::{anyhow, Result};
 use glow::HasContext as _;
 
 use crate::image_loader::{ImageData, PixelBuffer};
+use crate::ocio::{OcioLut, OcioShader};
 
 const VERTEX_SRC: &str = include_str!("../../resources/shaders/vertex.glsl");
 const FRAGMENT_TEMPLATE: &str = include_str!("../../resources/shaders/fragment_template.glsl");
@@ -22,6 +23,13 @@ vec3 sample_image(vec2 uv) { return texture(u_image, uv).rgb; }";
 
 /// `__OCIO_APPLY__` substitution when OCIO is absent (gamma-2.2 fallback).
 const GAMMA_FALLBACK_APPLY: &str = "color = pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));";
+
+/// `__OCIO_APPLY__` substitution when an OCIO program is present.
+const OCIO_APPLY: &str =
+    "vec4 _ocio_out = ocio_display_transform(vec4(color, 1.0)); color = _ocio_out.rgb;";
+
+/// Image texture occupies unit 0; OCIO LUTs start at unit 1.
+const OCIO_FIRST_UNIT: u32 = 1;
 
 // Anisotropic filtering enums (core in 4.6 / EXT_texture_filter_anisotropic).
 const TEXTURE_MAX_ANISOTROPY: u32 = 0x84FE;
@@ -102,6 +110,28 @@ struct ImageTexture {
     is_encoded_srgb: bool,
 }
 
+/// An uploaded OCIO LUT texture bound to a fixed texture unit.
+struct OcioGlTexture {
+    texture: glow::Texture,
+    target: u32,
+    unit: u32,
+}
+
+/// GPU state for the active OCIO display transform.
+struct OcioGlState {
+    signature: String,
+    textures: Vec<OcioGlTexture>,
+}
+
+impl OcioGlState {
+    fn empty() -> Self {
+        Self {
+            signature: String::new(),
+            textures: Vec::new(),
+        }
+    }
+}
+
 pub struct Renderer {
     gl: Arc<glow::Context>,
     program: glow::Program,
@@ -109,6 +139,7 @@ pub struct Renderer {
     vbo: glow::Buffer,
     uniforms: Uniforms,
     image: Option<ImageTexture>,
+    ocio: OcioGlState,
     max_texture_size: i32,
 }
 
@@ -132,6 +163,7 @@ impl Renderer {
                 vbo,
                 uniforms,
                 image: None,
+                ocio: OcioGlState::empty(),
                 max_texture_size,
             })
         }
@@ -234,6 +266,69 @@ impl Renderer {
         self.image.as_ref().map(|i| i.aspect)
     }
 
+    /// Signature of the currently-active OCIO program (for change detection).
+    pub fn ocio_signature(&self) -> &str {
+        &self.ocio.signature
+    }
+
+    /// Rebuild the fragment program for `shader` (gamma fallback when empty) and
+    /// upload its LUT textures to units >= 1 (§9.3, §9.4).
+    pub fn set_ocio_shader(&mut self, shader: &OcioShader) {
+        let gl = self.gl.clone();
+
+        // Release previous LUT textures.
+        for t in self.ocio.textures.drain(..) {
+            unsafe { gl.delete_texture(t.texture) };
+        }
+
+        let (decls, apply) = if shader.is_fallback() {
+            (String::new(), GAMMA_FALLBACK_APPLY.to_string())
+        } else {
+            (shader.glsl_text.clone(), OCIO_APPLY.to_string())
+        };
+
+        let program =
+            match unsafe { build_program(&gl, SINGLE_TEXTURE_SAMPLER, &decls, &apply) } {
+                Ok(p) => p,
+                Err(e) => {
+                    log::error!("OCIO shader rebuild failed: {e}\n-- keeping previous program --");
+                    return;
+                }
+            };
+
+        unsafe { gl.delete_program(self.program) };
+        self.program = program;
+        self.uniforms = Uniforms::fetch(&gl, program);
+
+        let mut textures = Vec::new();
+        unsafe {
+            gl.use_program(Some(program));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            let mut unit = OCIO_FIRST_UNIT;
+            for lut in &shader.luts {
+                if let Some((texture, target)) = upload_lut(&gl, lut) {
+                    set_sampler_uniform(&gl, program, &lut.sampler, unit);
+                    textures.push(OcioGlTexture {
+                        texture,
+                        target,
+                        unit,
+                    });
+                    unit += 1;
+                }
+            }
+        }
+
+        self.ocio = OcioGlState {
+            signature: shader.signature.clone(),
+            textures,
+        };
+        log::info!(
+            "OCIO program active: {} ({} LUTs)",
+            self.ocio.signature,
+            shader.luts.len()
+        );
+    }
+
     /// Clear and draw the current frame to the (already-current) framebuffer.
     pub fn render(&self, params: &RenderParams) {
         let gl = &self.gl;
@@ -280,9 +375,16 @@ impl Renderer {
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, wrap_t as i32);
             gl.uniform_1_i32(u.image.as_ref(), 0);
 
+            // Bind OCIO LUTs to their units (sampler uniforms set at link time).
+            for lut in &self.ocio.textures {
+                gl.active_texture(glow::TEXTURE0 + lut.unit);
+                gl.bind_texture(lut.target, Some(lut.texture));
+            }
+
             gl.bind_vertex_array(Some(self.vao));
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             gl.bind_vertex_array(None);
+            gl.active_texture(glow::TEXTURE0);
         }
     }
 }
@@ -294,10 +396,90 @@ impl Drop for Renderer {
             if let Some(image) = self.image.take() {
                 gl.delete_texture(image.texture);
             }
+            for t in self.ocio.textures.drain(..) {
+                gl.delete_texture(t.texture);
+            }
             gl.delete_vertex_array(self.vao);
             gl.delete_buffer(self.vbo);
             gl.delete_program(self.program);
         }
+    }
+}
+
+/// Upload an OCIO LUT as a 1D/2D/3D float texture. Returns the texture and its
+/// GL target, or None on allocation failure.
+unsafe fn upload_lut(gl: &glow::Context, lut: &OcioLut) -> Option<(glow::Texture, u32)> {
+    let texture = gl.create_texture().ok()?;
+    let (internal, format) = if lut.channels == 1 {
+        (glow::R32F as i32, glow::RED)
+    } else {
+        (glow::RGB32F as i32, glow::RGB)
+    };
+    let filter = if lut.linear { glow::LINEAR } else { glow::NEAREST } as i32;
+    let bytes: &[u8] = bytemuck::cast_slice(&lut.data);
+
+    let target = match lut.dim {
+        1 => glow::TEXTURE_1D,
+        3 => glow::TEXTURE_3D,
+        _ => glow::TEXTURE_2D,
+    };
+    gl.bind_texture(target, Some(texture));
+
+    match lut.dim {
+        1 => gl.tex_image_1d(
+            target,
+            0,
+            internal,
+            lut.width,
+            0,
+            format,
+            glow::FLOAT,
+            glow::PixelUnpackData::Slice(Some(bytes)),
+        ),
+        3 => gl.tex_image_3d(
+            target,
+            0,
+            internal,
+            lut.width,
+            lut.height,
+            lut.depth,
+            0,
+            format,
+            glow::FLOAT,
+            glow::PixelUnpackData::Slice(Some(bytes)),
+        ),
+        _ => gl.tex_image_2d(
+            target,
+            0,
+            internal,
+            lut.width,
+            lut.height,
+            0,
+            format,
+            glow::FLOAT,
+            glow::PixelUnpackData::Slice(Some(bytes)),
+        ),
+    }
+
+    gl.tex_parameter_i32(target, glow::TEXTURE_MIN_FILTER, filter);
+    gl.tex_parameter_i32(target, glow::TEXTURE_MAG_FILTER, filter);
+    gl.tex_parameter_i32(target, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+    if lut.dim >= 2 {
+        gl.tex_parameter_i32(target, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+    }
+    if lut.dim == 3 {
+        gl.tex_parameter_i32(target, glow::TEXTURE_WRAP_R, glow::CLAMP_TO_EDGE as i32);
+    }
+    gl.bind_texture(target, None);
+    Some((texture, target))
+}
+
+/// Point a sampler uniform at a texture unit (called once after link).
+unsafe fn set_sampler_uniform(gl: &glow::Context, program: glow::Program, name: &str, unit: u32) {
+    if let Some(loc) = gl.get_uniform_location(program, name) {
+        gl.uniform_1_i32(Some(&loc), unit as i32);
+    } else {
+        log::debug!("OCIO sampler uniform '{name}' not found in program");
     }
 }
 

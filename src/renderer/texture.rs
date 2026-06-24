@@ -115,6 +115,18 @@ pub fn effective_threshold(gl_max: i32) -> i32 {
     }
 }
 
+/// The tiling grid for an image, or `None` if it fits in a single texture.
+/// Returns `(cols, rows, tile_size, layer_size)`.
+pub fn tile_grid(width: i32, height: i32, threshold: i32) -> Option<(i32, i32, i32, i32)> {
+    if width <= threshold && height <= threshold {
+        return None;
+    }
+    let tile_size = threshold.min(TILE_CAP);
+    let cols = (width + tile_size - 1) / tile_size;
+    let rows = (height + tile_size - 1) / tile_size;
+    Some((cols, rows, tile_size, tile_size + 2 * BORDER))
+}
+
 /// Build a single or tiled texture for `data` based on `threshold`.
 ///
 /// # Safety: the GL context must be current.
@@ -125,7 +137,7 @@ pub unsafe fn build_image_texture(
 ) -> Option<ImageTexture> {
     let w = data.width as i32;
     let h = data.height as i32;
-    let kind = if w <= threshold && h <= threshold {
+    let kind = if tile_grid(w, h, threshold).is_none() {
         ImageTextureKind::Single(upload_single(gl, data)?)
     } else {
         ImageTextureKind::Tiled(upload_tiled(gl, data, threshold)?)
@@ -140,7 +152,13 @@ pub unsafe fn build_image_texture(
 fn pixel_format(data: &ImageData) -> (u32, u32, u32, usize, &[u8]) {
     // (internal, format, type, bytes-per-pixel, raw bytes)
     match &data.pixels {
-        PixelBuffer::U8(v) => (glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE, 4, v.as_slice()),
+        PixelBuffer::U8(v) => (
+            glow::RGBA8,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            4,
+            v.as_slice(),
+        ),
         PixelBuffer::F32(v) => (
             glow::RGBA32F,
             glow::RGBA,
@@ -185,7 +203,11 @@ unsafe fn upload_single(gl: &glow::Context, data: &ImageData) -> Option<glow::Te
         glow::TEXTURE_MIN_FILTER,
         glow::LINEAR_MIPMAP_LINEAR as i32,
     );
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MAG_FILTER,
+        glow::LINEAR as i32,
+    );
     set_anisotropy(gl, glow::TEXTURE_2D);
     gl.generate_mipmap(glow::TEXTURE_2D);
     gl.bind_texture(glow::TEXTURE_2D, None);
@@ -201,11 +223,9 @@ unsafe fn upload_tiled(
     let h = data.height as i32;
     let (internal, format, ty, bpp, src) = pixel_format(data);
 
-    let tile_size = threshold.min(TILE_CAP);
-    let cols = (w + tile_size - 1) / tile_size;
-    let rows = (h + tile_size - 1) / tile_size;
+    let (cols, rows, tile_size, layer_size) =
+        tile_grid(w, h, threshold).expect("upload_tiled called for a non-tiled image");
     let layers = cols * rows;
-    let layer_size = tile_size + 2 * BORDER;
     // Cap the mip chain at log2(BORDER) levels so every generated mip stays
     // within the border's seamless range.
     let levels = MIP_LEVELS.min((layer_size as f32).log2().floor() as i32 + 1);
@@ -297,4 +317,35 @@ unsafe fn upload_tiled(
         image_w: w,
         image_h: h,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn images_within_threshold_are_not_tiled() {
+        assert_eq!(tile_grid(1024, 1024, 16384), None);
+        assert_eq!(tile_grid(16384, 16384, 16384), None);
+    }
+
+    #[test]
+    fn large_images_tile_into_the_expected_grid() {
+        // 24576x12288 with a 16384 threshold -> tile_size capped at 8192.
+        assert_eq!(
+            tile_grid(24576, 12288, 16384),
+            Some((3, 2, 8192, 8192 + 2 * BORDER))
+        );
+        // Exceeding in one dimension only still tiles.
+        assert_eq!(
+            tile_grid(40000, 1000, 16384),
+            Some((5, 1, 8192, 8192 + 2 * BORDER))
+        );
+    }
+
+    #[test]
+    fn layer_size_includes_both_borders() {
+        let (_, _, tile, layer) = tile_grid(20000, 20000, 8192).unwrap();
+        assert_eq!(layer, tile + 2 * BORDER);
+    }
 }

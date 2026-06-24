@@ -47,7 +47,12 @@ pub fn init() -> io::Result<()> {
     // Terminal logger is best-effort (no terminal under some launchers); fall
     // back to file-only if it cannot be constructed.
     let loggers: Vec<Box<dyn simplelog::SharedLogger>> = vec![
-        TermLogger::new(level, Config::default(), TerminalMode::Mixed, ColorChoice::Auto),
+        TermLogger::new(
+            level,
+            Config::default(),
+            TerminalMode::Mixed,
+            ColorChoice::Auto,
+        ),
         WriteLogger::new(level, Config::default(), file),
     ];
     let _ = CombinedLogger::init(loggers);

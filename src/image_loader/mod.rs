@@ -77,3 +77,19 @@ pub fn load_image(path: &Path) -> Result<ImageData> {
         formats::load_via_image(path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equirectangular_detection() {
+        assert!(is_equirectangular(4096, 2048));
+        assert!(is_equirectangular(24576, 12288));
+        assert!(is_equirectangular(2, 1));
+        assert!(!is_equirectangular(1024, 1024));
+        assert!(!is_equirectangular(2048, 4096));
+        assert!(!is_equirectangular(100, 0));
+        assert!(!is_equirectangular(0, 0));
+    }
+}

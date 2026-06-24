@@ -152,8 +152,7 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(gl: Arc<glow::Context>) -> Result<Self> {
         unsafe {
-            let program =
-                build_program(&gl, SINGLE_TEXTURE_SAMPLER, "", GAMMA_FALLBACK_APPLY)?;
+            let program = build_program(&gl, SINGLE_TEXTURE_SAMPLER, "", GAMMA_FALLBACK_APPLY)?;
             let uniforms = Uniforms::fetch(&gl, program);
             let (vao, vbo) = build_quad(&gl, program)?;
 
@@ -400,7 +399,9 @@ unsafe fn build_quad(
          1.0,  1.0,
     ];
 
-    let vao = gl.create_vertex_array().map_err(|e| anyhow!("create VAO: {e}"))?;
+    let vao = gl
+        .create_vertex_array()
+        .map_err(|e| anyhow!("create VAO: {e}"))?;
     let vbo = gl.create_buffer().map_err(|e| anyhow!("create VBO: {e}"))?;
     gl.bind_vertex_array(Some(vao));
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
@@ -431,7 +432,9 @@ unsafe fn build_program(
         .replace("__OCIO_DECLARATIONS__", ocio_declarations)
         .replace("__OCIO_APPLY__", ocio_apply);
 
-    let program = gl.create_program().map_err(|e| anyhow!("create_program: {e}"))?;
+    let program = gl
+        .create_program()
+        .map_err(|e| anyhow!("create_program: {e}"))?;
     let vs = compile_shader(gl, glow::VERTEX_SHADER, VERTEX_SRC)?;
     let fs = compile_shader(gl, glow::FRAGMENT_SHADER, &fragment_src)?;
     gl.attach_shader(program, vs);
@@ -451,7 +454,9 @@ unsafe fn build_program(
 }
 
 unsafe fn compile_shader(gl: &glow::Context, kind: u32, src: &str) -> Result<glow::Shader> {
-    let shader = gl.create_shader(kind).map_err(|e| anyhow!("create_shader: {e}"))?;
+    let shader = gl
+        .create_shader(kind)
+        .map_err(|e| anyhow!("create_shader: {e}"))?;
     gl.shader_source(shader, src);
     gl.compile_shader(shader);
     if !gl.get_shader_compile_status(shader) {
@@ -475,7 +480,11 @@ unsafe fn upload_lut(gl: &glow::Context, lut: &OcioLut) -> Option<(glow::Texture
     } else {
         (glow::RGB32F as i32, glow::RGB)
     };
-    let filter = if lut.linear { glow::LINEAR } else { glow::NEAREST } as i32;
+    let filter = if lut.linear {
+        glow::LINEAR
+    } else {
+        glow::NEAREST
+    } as i32;
     let bytes: &[u8] = bytemuck::cast_slice(&lut.data);
 
     let target = match lut.dim {

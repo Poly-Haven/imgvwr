@@ -100,6 +100,9 @@ pub fn load_raw(path: &Path) -> Result<ImageData> {
 /// maps channels by name (R/G/B/A), replicating single channels and taking the
 /// first up-to-three channels for arbitrary AOV/data layers. Never fails solely
 /// because the layer is not named RGBA.
+// Without the `ocio` feature the Err arm is a plain `Err(e)`, which clippy
+// flags as a needless match; the OpenEXR fallback (with the feature) is not.
+#[cfg_attr(not(feature = "ocio"), allow(clippy::needless_match))]
 pub fn load_exr(path: &Path) -> Result<ImageData> {
     match load_exr_rust(path) {
         Ok(data) => Ok(data),
@@ -108,7 +111,10 @@ pub fn load_exr(path: &Path) -> Result<ImageData> {
             // compressions; fall back to the OpenEXR C++ shim when available.
             #[cfg(feature = "ocio")]
             {
-                log::warn!("exr crate could not decode {} ({e}); trying OpenEXR fallback", path.display());
+                log::warn!(
+                    "exr crate could not decode {} ({e}); trying OpenEXR fallback",
+                    path.display()
+                );
                 crate::exr_native::load_exr_native(path)
             }
             #[cfg(not(feature = "ocio"))]
@@ -158,9 +164,8 @@ fn load_exr_rust(path: &Path) -> Result<ImageData> {
         }
     };
     // Channel key = the part after the last '.', upper-cased ("diffuse.R" -> "R").
-    let key = |name: &str| -> String {
-        name.rsplit('.').next().unwrap_or(name).to_ascii_uppercase()
-    };
+    let key =
+        |name: &str| -> String { name.rsplit('.').next().unwrap_or(name).to_ascii_uppercase() };
     let find = |k: &str| names.iter().position(|n| key(n) == k);
 
     let mut rgba = vec![0f32; pixel_count * 4];

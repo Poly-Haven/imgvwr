@@ -1,0 +1,23 @@
+# Normalise text files to LF in the repo; binary assets are left untouched.
+* text=auto eol=lf
+
+# Source and config
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.glsl  text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.h     text eol=lf
+*.cpp   text eol=lf
+
+# Binary assets (never munge)
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
+*.exr   binary
+*.hdr   binary
+*.cube  binary
+*.spi1d binary
+*.spimtx binary

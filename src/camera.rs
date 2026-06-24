@@ -263,10 +263,16 @@ mod tests {
             let before = c.camera.center_uv();
             c.set_mode(false); // -> Flat
             let mid = c.camera.center_uv();
-            assert!(uv_approx(before, mid, 1e-4), "Flat center {mid:?} != {before:?}");
+            assert!(
+                uv_approx(before, mid, 1e-4),
+                "Flat center {mid:?} != {before:?}"
+            );
             c.set_mode(true); // -> Pano
             let after = c.camera.center_uv();
-            assert!(uv_approx(before, after, 1e-4), "round-trip {after:?} != {before:?}");
+            assert!(
+                uv_approx(before, after, 1e-4),
+                "round-trip {after:?} != {before:?}"
+            );
         }
     }
 
@@ -289,7 +295,10 @@ mod tests {
             c.set_mode(true); // -> Pano
             c.set_mode(false); // -> Flat
             let after = c.camera.center_uv();
-            assert!(uv_approx(before, after, 1e-4), "pan round-trip {after:?} != {before:?}");
+            assert!(
+                uv_approx(before, after, 1e-4),
+                "pan round-trip {after:?} != {before:?}"
+            );
         }
     }
 

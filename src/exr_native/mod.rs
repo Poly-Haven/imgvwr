@@ -14,8 +14,8 @@ use crate::image_loader::{ImageData, PixelBuffer};
 pub fn load_exr_native(path: &Path) -> Result<ImageData> {
     use std::ffi::CString;
 
-    let c_path = CString::new(path.to_string_lossy().as_ref())
-        .map_err(|_| anyhow!("path contains NUL"))?;
+    let c_path =
+        CString::new(path.to_string_lossy().as_ref()).map_err(|_| anyhow!("path contains NUL"))?;
     let mut width = 0i32;
     let mut height = 0i32;
     let mut channels = 0i32;

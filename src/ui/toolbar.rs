@@ -50,8 +50,7 @@ pub fn build_toolbar(
             if vt.clicked() {
                 state.show_view_submenu = !state.show_view_submenu;
                 if state.show_view_submenu && state.browse_display.is_none() {
-                    state.browse_display =
-                        inputs.active.as_ref().map(|(d, _)| d.clone());
+                    state.browse_display = inputs.active.as_ref().map(|(d, _)| d.clone());
                 }
             }
 
@@ -82,10 +81,7 @@ pub fn build_toolbar(
             .show(ctx, |ui| {
                 ui.add_space(4.0);
                 let display = browse.clone().unwrap_or_default();
-                if ui
-                    .button(format!("Display: {display} ›"))
-                    .clicked()
-                {
+                if ui.button(format!("Display: {display} ›")).clicked() {
                     state.show_display_submenu = !state.show_display_submenu;
                 }
                 if let Some((_, active_view)) = &inputs.active {

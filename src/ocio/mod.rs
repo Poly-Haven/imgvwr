@@ -5,7 +5,9 @@
 
 mod ffi;
 
-use std::path::{Path, PathBuf};
+#[cfg(feature = "ocio")]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// A `(display, view)` pair from the active config.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +70,8 @@ pub struct OcioManager {
     display_views: Vec<DisplayView>,
     active: Option<DisplayView>,
     source_colorspace: String,
+    /// Only read by config discovery, which is compiled with the `ocio` feature.
+    #[cfg_attr(not(feature = "ocio"), allow(dead_code))]
     resources_dir: PathBuf,
 }
 

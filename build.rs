@@ -26,7 +26,9 @@ fn main() {
         "VCPKG_ROOT must be set to build with OCIO \
          (disable the `ocio` feature for a gamma-only dev build)",
     );
-    let installed = PathBuf::from(&vcpkg_root).join("installed").join("x64-windows");
+    let installed = PathBuf::from(&vcpkg_root)
+        .join("installed")
+        .join("x64-windows");
     let include_dir = installed.join("include");
     let lib_dir = installed.join("lib");
     let bin_dir = installed.join("bin");
@@ -90,7 +92,10 @@ fn main() {
     for stem in ["OpenEXR", "OpenEXRCore", "Imath", "Iex", "IlmThread"] {
         match find_versioned_lib(&lib_dir, stem) {
             Some(name) => println!("cargo:rustc-link-lib={name}"),
-            None => println!("cargo:warning=could not find {stem}-*.lib under {}", lib_dir.display()),
+            None => println!(
+                "cargo:warning=could not find {stem}-*.lib under {}",
+                lib_dir.display()
+            ),
         }
     }
 
@@ -150,7 +155,10 @@ fn stage_runtime_dlls(bin_dir: &Path, out_dir: &Path) {
     let entries = match std::fs::read_dir(bin_dir) {
         Ok(e) => e,
         Err(e) => {
-            println!("cargo:warning=cannot read vcpkg bin {}: {e}", bin_dir.display());
+            println!(
+                "cargo:warning=cannot read vcpkg bin {}: {e}",
+                bin_dir.display()
+            );
             return;
         }
     };
@@ -171,7 +179,10 @@ fn stage_runtime_dlls(bin_dir: &Path, out_dir: &Path) {
             };
             if needs_copy {
                 if let Err(e) = std::fs::copy(&path, &dest) {
-                    println!("cargo:warning=failed to stage {}: {e}", name.to_string_lossy());
+                    println!(
+                        "cargo:warning=failed to stage {}: {e}",
+                        name.to_string_lossy()
+                    );
                 }
             }
         }

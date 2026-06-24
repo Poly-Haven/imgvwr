@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
+use glam::Vec2;
 use glow::HasContext as _;
 use glutin::config::{ConfigTemplateBuilder, GlConfig};
 use glutin::context::{
@@ -39,11 +40,12 @@ use glutin::context::{
 use glutin::display::{GetGlDisplay, GlDisplay};
 use glutin::surface::{GlSurface, Surface, SwapInterval, WindowSurface};
 use glutin_winit::{DisplayBuilder, GlWindow};
-use glam::Vec2;
 use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
@@ -322,7 +324,10 @@ impl App {
                 return;
             }
         }
-        if let Some((d, v)) = pairs.iter().find(|(_, v)| v.eq_ignore_ascii_case("standard")) {
+        if let Some((d, v)) = pairs
+            .iter()
+            .find(|(_, v)| v.eq_ignore_ascii_case("standard"))
+        {
             self.ocio.set_active(d, v);
         }
     }
@@ -365,12 +370,17 @@ impl App {
             .with_depth_size(0)
             .with_stencil_size(0);
 
-        let display_builder =
-            DisplayBuilder::new().with_window_attributes(Some(window_attributes));
+        let display_builder = DisplayBuilder::new().with_window_attributes(Some(window_attributes));
         let (window, gl_config) = display_builder
             .build(event_loop, template, |configs| {
                 configs
-                    .reduce(|a, b| if b.num_samples() > a.num_samples() { b } else { a })
+                    .reduce(|a, b| {
+                        if b.num_samples() > a.num_samples() {
+                            b
+                        } else {
+                            a
+                        }
+                    })
                     .expect("at least one GL config")
             })
             .map_err(|e| anyhow::anyhow!("failed to build GL display: {e}"))?;
@@ -398,14 +408,15 @@ impl App {
             .context("failed to make GL context current")?;
 
         if self.capture.is_none() {
-            if let Err(e) = gl_surface.set_swap_interval(
-                &gl_context,
-                SwapInterval::Wait(NonZeroU32::new(1).unwrap()),
-            ) {
+            if let Err(e) = gl_surface
+                .set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::new(1).unwrap()))
+            {
                 log::warn!("could not set vsync swap interval: {e}");
             }
         }
 
+        // `gl` is only mutated by the debug-only KHR_debug callback install.
+        #[cfg_attr(not(debug_assertions), allow(unused_mut))]
         let mut gl = unsafe {
             glow::Context::from_loader_function_cstr(|s| gl_display.get_proc_address(s).cast())
         };
@@ -456,7 +467,10 @@ impl App {
             .current_monitor()
             .map(|m| {
                 let s = m.size();
-                ((s.width as f32 * 0.92) as u32, (s.height as f32 * 0.92) as u32)
+                (
+                    (s.width as f32 * 0.92) as u32,
+                    (s.height as f32 * 0.92) as u32,
+                )
             })
             .unwrap_or((width, height));
         let w = width.min(max_w).max(170);
@@ -472,9 +486,7 @@ impl App {
         let gen = self.load_gen;
         self.load_state = LoadState::Loading;
         self.load_start = Instant::now();
-        self.pending_name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned());
+        self.pending_name = path.file_name().map(|s| s.to_string_lossy().into_owned());
         log::info!("loading (gen {gen}) {}", path.display());
 
         let tx = self.load_tx.clone();
@@ -482,7 +494,8 @@ impl App {
         std::thread::Builder::new()
             .name(format!("image-load-{gen}"))
             .spawn(move || {
-                let result = match std::panic::catch_unwind(AssertUnwindSafe(|| load_image(&path))) {
+                let result = match std::panic::catch_unwind(AssertUnwindSafe(|| load_image(&path)))
+                {
                     Ok(Ok(data)) => Ok(data),
                     Ok(Err(e)) => Err(format!("{e:#}")),
                     Err(_) => Err("decoder panicked".to_string()),
@@ -725,7 +738,11 @@ impl App {
                 }
                 log::info!(
                     "projection -> {}",
-                    if self.camera.is_panorama() { "panorama" } else { "2-D" }
+                    if self.camera.is_panorama() {
+                        "panorama"
+                    } else {
+                        "2-D"
+                    }
                 );
             }
             (_, Some("w")) | (_, Some("W")) => {
@@ -765,7 +782,7 @@ impl App {
         self.fullscreen = on;
         if let Some(gfx) = &self.gfx {
             gfx.window
-                .set_fullscreen(on.then(|| Fullscreen::Borderless(None)));
+                .set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
         }
     }
 
@@ -878,8 +895,7 @@ impl App {
             _ if forced == Some("error") => Some("Example decode error: unsupported format".into()),
             _ => None,
         };
-        let show_hint =
-            (!has_image && !loading && error.is_none()) || forced == Some("hint");
+        let show_hint = (!has_image && !loading && error.is_none()) || forced == Some("hint");
 
         UiInputs {
             toolbar_visible: self.toolbar_visible,
@@ -916,7 +932,11 @@ impl App {
             ("Compression".into(), fi.compression.clone()),
             (
                 "Mode".into(),
-                if fi.panorama { "Panorama".into() } else { "2-D".into() },
+                if fi.panorama {
+                    "Panorama".into()
+                } else {
+                    "2-D".into()
+                },
             ),
             ("View".into(), view),
         ]
@@ -942,8 +962,7 @@ impl App {
         } else if self.toolbar_visible {
             match self.toolbar_hide_deadline {
                 None => {
-                    self.toolbar_hide_deadline =
-                        Some(Instant::now() + Duration::from_millis(100));
+                    self.toolbar_hide_deadline = Some(Instant::now() + Duration::from_millis(100));
                 }
                 Some(t) if Instant::now() >= t => {
                     self.toolbar_visible = false;
@@ -987,9 +1006,8 @@ impl App {
             .add_filter(
                 "Images",
                 &[
-                    "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "ico", "tga",
-                    "pnm", "hdr", "pic", "exr", "nef", "cr2", "cr3", "arw", "dng", "raf", "orf",
-                    "rw2",
+                    "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "ico", "tga", "pnm",
+                    "hdr", "pic", "exr", "nef", "cr2", "cr3", "arw", "dng", "raf", "orf", "rw2",
                 ],
             )
             .pick_file();
@@ -1185,26 +1203,21 @@ impl ApplicationHandler<UserEvent> for App {
                 self.tick_toolbar();
                 self.request_redraw();
             }
-            WindowEvent::MouseInput { state, button, .. } => {
-                if !egui_consumed {
-                    self.on_mouse_button(state, button);
-                }
+            // egui-consumed pointer/wheel/key events fall through to `_ => {}`.
+            WindowEvent::MouseInput { state, button, .. } if !egui_consumed => {
+                self.on_mouse_button(state, button)
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                // Block wheel input when the toolbar is hovered (§11.3).
-                if !egui_consumed {
-                    self.on_wheel(delta);
-                }
-            }
+            // Block wheel input when the toolbar is hovered (§11.3).
+            WindowEvent::MouseWheel { delta, .. } if !egui_consumed => self.on_wheel(delta),
             WindowEvent::DroppedFile(path) => self.load_path(path),
-            WindowEvent::KeyboardInput { event, .. } => {
-                if !egui_consumed && event.state == ElementState::Pressed {
-                    let text = match &event.logical_key {
-                        Key::Character(s) => Some(s.as_str().to_string()),
-                        _ => None,
-                    };
-                    self.on_key(event_loop, &event.logical_key, text.as_deref());
-                }
+            WindowEvent::KeyboardInput { event, .. }
+                if !egui_consumed && event.state == ElementState::Pressed =>
+            {
+                let text = match &event.logical_key {
+                    Key::Character(s) => Some(s.as_str().to_string()),
+                    _ => None,
+                };
+                self.on_key(event_loop, &event.logical_key, text.as_deref());
             }
             _ => {}
         }

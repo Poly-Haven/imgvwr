@@ -48,12 +48,7 @@ fn loading(ctx: &egui::Context, inputs: &UiInputs) {
         });
 }
 
-fn error_panel(
-    ctx: &egui::Context,
-    inputs: &UiInputs,
-    error: &str,
-    actions: &mut Vec<UiAction>,
-) {
+fn error_panel(ctx: &egui::Context, inputs: &UiInputs, error: &str, actions: &mut Vec<UiAction>) {
     egui::Area::new(egui::Id::new("imgvwr_error"))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {

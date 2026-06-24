@@ -12,6 +12,7 @@ mod exr_native;
 mod image_loader;
 mod logging;
 mod ocio;
+mod prefs;
 mod renderer;
 mod ui;
 

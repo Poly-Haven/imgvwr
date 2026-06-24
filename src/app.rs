@@ -24,7 +24,7 @@
 
 use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -51,6 +51,7 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 use crate::camera::{Camera, CameraController};
 use crate::image_loader::{load_image, ImageData};
 use crate::ocio::OcioManager;
+use crate::prefs::{AppPreferences, PreferredView};
 use crate::renderer::{RenderParams, Renderer};
 use crate::ui::{self, UiAction, UiInputs, UiState};
 use crate::UserEvent;
@@ -148,6 +149,7 @@ pub struct App {
     ocio: OcioManager,
     /// Last non-Standard view, for the T toggle.
     last_view: Option<String>,
+    prefs: AppPreferences,
 
     // UI.
     ui_state: UiState,
@@ -193,6 +195,7 @@ impl App {
 
         let (load_tx, load_rx) = std::sync::mpsc::channel();
         let ocio = OcioManager::new(resolve_resources_dir());
+        let prefs = AppPreferences::load();
 
         Self {
             proxy,
@@ -211,6 +214,7 @@ impl App {
             show_metadata: false,
             ocio,
             last_view: None,
+            prefs,
             ui_state: UiState::default(),
             toolbar_visible: false,
             toolbar_hide_deadline: None,
@@ -276,8 +280,78 @@ impl App {
             if self.ocio.set_active(&active.display, &view) {
                 log::info!("view transform -> {}/{}", active.display, view);
                 self.rebuild_ocio();
+                self.persist_view_if_panorama();
             }
         }
+    }
+
+    /// Pick the OCIO view for a freshly-loaded image (§13). Panoramas restore the
+    /// saved per-extension view; 2-D images always use Standard.
+    fn select_view_for_load(&mut self, panorama: bool, path: &Path) {
+        let applied = if panorama {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .and_then(|ext| self.prefs.preferred_view(ext).cloned())
+                .map(|pv| self.ocio.set_active(&pv.display, &pv.view))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if !applied {
+            self.select_standard_view();
+        }
+        self.rebuild_ocio();
+    }
+
+    /// Select a "Standard" view (preferring the current display), if available.
+    fn select_standard_view(&mut self) {
+        let current_display = self.ocio.active().map(|dv| dv.display.clone());
+        let pairs: Vec<(String, String)> = self
+            .ocio
+            .display_views()
+            .iter()
+            .map(|dv| (dv.display.clone(), dv.view.clone()))
+            .collect();
+
+        if let Some(display) = &current_display {
+            if let Some((d, v)) = pairs
+                .iter()
+                .find(|(d, v)| d == display && v.eq_ignore_ascii_case("standard"))
+            {
+                self.ocio.set_active(d, v);
+                return;
+            }
+        }
+        if let Some((d, v)) = pairs.iter().find(|(_, v)| v.eq_ignore_ascii_case("standard")) {
+            self.ocio.set_active(d, v);
+        }
+    }
+
+    /// Persist the active view for the current image's extension (panoramas only).
+    fn persist_view_if_panorama(&mut self) {
+        if !self.file_info.panorama {
+            return;
+        }
+        let (Some(path), Some(active)) = (&self.loaded_path, self.ocio.active()) else {
+            return;
+        };
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            return;
+        };
+        self.prefs.set_preferred_view(
+            ext,
+            PreferredView {
+                display: active.display.clone(),
+                view: active.view.clone(),
+            },
+        );
+        self.prefs.save();
+        log::info!(
+            "saved preferred view {}/{} for .{}",
+            active.display,
+            active.view,
+            ext.to_ascii_lowercase()
+        );
     }
 
     fn create_gfx(&mut self, event_loop: &ActiveEventLoop) -> Result<Gfx> {
@@ -466,6 +540,9 @@ impl App {
                     self.wrap_2d = false;
                     self.load_state = LoadState::Loaded;
                     self.update_window_title();
+                    // Choose the OCIO view: panoramas restore the saved view for
+                    // their extension; 2-D images always default to Standard.
+                    self.select_view_for_load(equirect, &data.path);
                     // Size the window to the first 2-D image (panoramas keep the
                     // current window).
                     if !equirect {
@@ -732,6 +809,8 @@ impl App {
             if let Some((display, view)) = spec.split_once('/') {
                 if self.ocio.set_active(display, view) {
                     self.rebuild_ocio();
+                    // Exercise the same persistence path as a toolbar selection.
+                    self.persist_view_if_panorama();
                 } else {
                     log::warn!("IMGVWR_DEBUG_VIEW: no such display/view '{spec}'");
                 }
@@ -888,7 +967,12 @@ impl App {
             UiAction::SetView { display, view } => {
                 if self.ocio.set_active(&display, &view) {
                     log::info!("view transform -> {display}/{view}");
+                    // Update the T-toggle baseline so it returns here.
+                    if !view.eq_ignore_ascii_case("standard") {
+                        self.last_view = Some(view.clone());
+                    }
                     self.rebuild_ocio();
+                    self.persist_view_if_panorama();
                 }
             }
             UiAction::DismissError => {

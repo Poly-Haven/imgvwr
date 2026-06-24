@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "imgvwr",
+  "version": "0.1.0",
+  "dependencies": [
+    { "name": "opencolorio", "version>=": "2.3.2" },
+    { "name": "lcms" }
+  ]
+}

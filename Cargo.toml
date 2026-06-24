@@ -1,0 +1,73 @@
+[package]
+name = "imgvwr"
+version = "0.1.0"
+edition = "2021"
+description = "A minimal, GPU-accelerated viewer for HDR panoramas and standard images."
+license = "MIT"
+repository = "https://github.com/gregzaal/imgvwr"
+readme = "README.md"
+default-run = "imgvwr"
+
+[dependencies]
+# Window & event loop
+winit = "0.30"
+# OpenGL context
+glutin = "0.32"
+glutin-winit = "0.5"
+raw-window-handle = "0.6"
+# OpenGL API
+glow = "0.16"
+# Immediate-mode GUI (must be a mutually compatible set with glow + winit)
+egui = "0.31"
+egui_glow = { version = "0.31", features = ["winit"] }
+egui-winit = "0.31"
+# Standard images
+image = { version = "0.25", default-features = false, features = [
+    "jpeg", "png", "bmp", "tiff", "webp", "hdr", "gif", "ico", "tga", "pnm",
+] }
+# EXR images (pure-Rust)
+exr = "1"
+# Camera RAW (best-effort, secondary feature)
+rawler = "0.6"
+# ICC profiles (optional, enabled by the `icc` feature)
+lcms2 = { version = "6", optional = true }
+# Byte casting for GPU upload
+bytemuck = "1"
+# Error handling
+anyhow = "1"
+# Logging
+log = "0.4"
+simplelog = "0.12"
+# Serialisation (preferences)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Platform dirs (preferences location)
+dirs = "6"
+# Linear algebra (camera math)
+glam = "0.29"
+# Native file dialog
+rfd = "0.15"
+
+[build-dependencies]
+cc = "1"
+bindgen = "0.71"
+
+[features]
+# OCIO colour management is on by default; `icc` enables lcms2 ICC conversion.
+# Build with `--no-default-features` for a gamma-only dev build with no vcpkg /
+# OCIO / lcms dependency (see plans/rewrite.md §7.2).
+default = ["ocio", "icc"]
+ocio = []
+icc = ["dep:lcms2"]
+
+[profile.release]
+# The primary workload is multi-GB float images; favour an optimised build.
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+# Decoders (exr, image) are painfully slow at opt-level 0; lift dependencies to 2.
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 2

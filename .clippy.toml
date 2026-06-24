@@ -1,0 +1,3 @@
+# Allow the GLSL/OCIO math code to use a handful of similar-looking bindings.
+# (Kept intentionally minimal; CI runs `cargo clippy -- -D warnings`.)
+too-many-arguments-threshold = 10

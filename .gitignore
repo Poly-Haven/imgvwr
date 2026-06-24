@@ -1,0 +1,19 @@
+# Build artifacts
+/target/
+
+# vcpkg manifest-mode install tree (deps are restored from vcpkg.json)
+/vcpkg_installed/
+
+# Local toolchain/build setup scratch (vcpkg/OCIO build logs etc.)
+/.setup/
+
+# Logs
+*.log
+
+# IDE
+*.iml
+.idea/
+.vscode/
+
+# Planning docs (local only)
+/plans/

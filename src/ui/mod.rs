@@ -1,9 +1,19 @@
 //! egui-based overlay UI: the left-edge toolbar (and, from Commit 9, the loading
 //! / error / hint overlays). Rendered on top of the OpenGL scene each frame.
 
+mod overlay;
 mod toolbar;
 
-pub use toolbar::build_toolbar;
+/// Build the whole overlay UI for a frame: toolbar + overlays.
+pub fn build(
+    ctx: &egui::Context,
+    inputs: &UiInputs,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+) {
+    toolbar::build_toolbar(ctx, inputs, state, actions);
+    overlay::build_overlays(ctx, inputs, actions);
+}
 
 /// Immutable per-frame inputs handed to the UI (gathered from `App` before the
 /// mutable egui borrow, to avoid borrow conflicts).
@@ -15,6 +25,14 @@ pub struct UiInputs {
     pub display_views: Vec<(String, String)>,
     pub active: Option<(String, String)>,
     pub ocio_available: bool,
+
+    // Overlays (Commit 9).
+    pub loading: bool,
+    pub loading_name: Option<String>,
+    pub error: Option<String>,
+    pub show_hint: bool,
+    pub show_metadata: bool,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl UiInputs {
@@ -53,4 +71,5 @@ pub enum UiAction {
     OpenFile,
     Reload,
     SetView { display: String, view: String },
+    DismissError,
 }

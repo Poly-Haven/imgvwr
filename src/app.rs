@@ -157,8 +157,12 @@ pub struct App {
     toolbar_hide_deadline: Option<Instant>,
     file_info: FileInfo,
     loaded_path: Option<PathBuf>,
+    /// File name of the in-flight / last-attempted load (for overlays).
+    pending_name: Option<String>,
     /// Headless-test override: force the toolbar visible (IMGVWR_DEBUG_TOOLBAR).
     force_toolbar: bool,
+    /// Headless-test override: force an overlay ("loading"/"error"/"hint").
+    force_overlay: Option<String>,
 
     // Input state.
     modifiers: ModifiersState,
@@ -208,7 +212,9 @@ impl App {
             toolbar_hide_deadline: None,
             file_info: FileInfo::default(),
             loaded_path: None,
+            pending_name: None,
             force_toolbar: std::env::var_os("IMGVWR_DEBUG_TOOLBAR").is_some(),
+            force_overlay: std::env::var("IMGVWR_DEBUG_OVERLAY").ok(),
             modifiers: ModifiersState::empty(),
             dragging: false,
             // Start far from the left edge so the toolbar stays hidden until the
@@ -363,6 +369,9 @@ impl App {
         self.load_gen += 1;
         let gen = self.load_gen;
         self.load_state = LoadState::Loading;
+        self.pending_name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned());
         log::info!("loading (gen {gen}) {}", path.display());
 
         let tx = self.load_tx.clone();
@@ -737,18 +746,62 @@ impl App {
             .ocio
             .active()
             .map(|dv| (dv.display.clone(), dv.view.clone()));
+        let has_image = self
+            .gfx
+            .as_ref()
+            .map(|g| g.renderer.has_image())
+            .unwrap_or(false);
+
+        // Overlay state, with headless-test overrides applied.
+        let forced = self.force_overlay.as_deref();
+        let loading = self.is_loading() || forced == Some("loading");
+        let error = match &self.load_state {
+            LoadState::Failed(e) => Some(e.clone()),
+            _ if forced == Some("error") => Some("Example decode error: unsupported format".into()),
+            _ => None,
+        };
+        let show_hint =
+            (!has_image && !loading && error.is_none()) || forced == Some("hint");
+
         UiInputs {
             toolbar_visible: self.toolbar_visible,
-            has_image: self
-                .gfx
-                .as_ref()
-                .map(|g| g.renderer.has_image())
-                .unwrap_or(false),
+            has_image,
             file_info: self.file_info.summary(),
             display_views,
             active,
             ocio_available: !self.ocio.display_views().is_empty(),
+            loading,
+            loading_name: self.pending_name.clone(),
+            error,
+            show_hint,
+            show_metadata: self.show_metadata || forced == Some("metadata"),
+            metadata: self.metadata_lines(),
         }
+    }
+
+    /// Key/value lines for the F2 metadata HUD (§12.3).
+    fn metadata_lines(&self) -> Vec<(String, String)> {
+        let fi = &self.file_info;
+        if fi.width == 0 {
+            return Vec::new();
+        }
+        let view = self
+            .ocio
+            .active()
+            .map(|dv| format!("{}/{}", dv.display, dv.view))
+            .unwrap_or_else(|| "gamma 2.2".to_string());
+        vec![
+            ("File".into(), fi.name.clone()),
+            ("Size".into(), format!("{}×{}", fi.width, fi.height)),
+            ("Channels".into(), fi.channels.to_string()),
+            ("Type".into(), fi.dtype.clone()),
+            ("Compression".into(), fi.compression.clone()),
+            (
+                "Mode".into(),
+                if fi.panorama { "Panorama".into() } else { "2-D".into() },
+            ),
+            ("View".into(), view),
+        ]
     }
 
     /// Update toolbar show/hide from the cursor position and panel hover (§12.1).
@@ -798,6 +851,10 @@ impl App {
                     log::info!("view transform -> {display}/{view}");
                     self.rebuild_ocio();
                 }
+            }
+            UiAction::DismissError => {
+                self.load_state = LoadState::Idle;
+                self.request_redraw();
             }
         }
     }
@@ -878,7 +935,7 @@ impl App {
 
             // egui overlay on top of the scene.
             gfx.egui.run(&gfx.window, |ctx| {
-                ui::build_toolbar(ctx, &inputs, ui_state, &mut actions);
+                ui::build(ctx, &inputs, ui_state, &mut actions);
             });
             gfx.egui.paint(&gfx.window);
 
@@ -1043,6 +1100,10 @@ impl ApplicationHandler<UserEvent> for App {
             if let Some(gfx) = &self.gfx {
                 gfx.window.request_redraw();
             }
+        } else if self.is_loading() {
+            // Keep the loading spinner animating while a decode is in flight.
+            event_loop.set_control_flow(ControlFlow::Poll);
+            self.request_redraw();
         } else if let Some(deadline) = self.toolbar_hide_deadline {
             // Wake at the deadline to evaluate hiding the toolbar.
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));

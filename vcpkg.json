@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "dependencies": [
     { "name": "opencolorio", "version>=": "2.3.2" },
-    { "name": "lcms" }
+    { "name": "lcms" },
+    { "name": "openexr" }
   ]
 }

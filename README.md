@@ -64,8 +64,17 @@ Target platform is **Windows only** (x64).
   git clone https://github.com/microsoft/vcpkg %USERPROFILE%\vcpkg
   %USERPROFILE%\vcpkg\bootstrap-vcpkg.bat
   setx VCPKG_ROOT %USERPROFILE%\vcpkg
-  %VCPKG_ROOT%\vcpkg install opencolorio lcms --triplet x64-windows
+  %VCPKG_ROOT%\vcpkg install opencolorio lcms openexr --triplet x64-windows
   ```
+
+  (`openexr` provides the fallback decoder for DWAA/DWAB-compressed EXRs.)
+
+### Packaging
+
+`scripts\package.ps1` bundles `imgvwr.exe`, the full runtime DLL closure, the
+`resources/` directory, and the licenses into a self-contained
+`dist\imgvwr-<version>-windows-x64.zip`. CI does this automatically on `v*` tags
+(`.github/workflows/release.yml`).
 
 ### Build
 

@@ -1,12 +1,10 @@
 //! Image loading and the in-memory `ImageData` representation.
-//!
-//! Commit 3 implements only the JPEG/PNG path (8-bit, sRGB-encoded). The full
-//! dispatch table (HDR, EXR, RAW, channel normalisation, background threading)
-//! lands in Commit 4.
+
+mod formats;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 
 /// A decoded image, normalised to 4-channel RGBA interleaved.
 ///
@@ -54,10 +52,14 @@ pub fn is_equirectangular(width: u32, height: u32) -> bool {
     height > 0 && width == height * 2
 }
 
-/// Decode an image file into RGBA `ImageData`.
-///
-/// Commit 3: JPEG and PNG only. Other extensions return a descriptive error
-/// until the full dispatch table is implemented in Commit 4.
+/// Camera RAW extensions handled (best-effort) by `rawler`.
+const RAW_EXTS: &[&str] = &[
+    "nef", "cr2", "cr3", "arw", "dng", "raf", "orf", "rw2", "nrw", "pef", "rwl", "sr2", "srf",
+    "crw", "raw",
+];
+
+/// Decode an image file into RGBA `ImageData`, dispatching on the (lower-cased)
+/// file extension. See plans/rewrite.md §8.2.
 pub fn load_image(path: &Path) -> Result<ImageData> {
     let ext = path
         .extension()
@@ -65,30 +67,13 @@ pub fn load_image(path: &Path) -> Result<ImageData> {
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    match ext.as_str() {
-        "jpg" | "jpeg" | "png" => load_ldr(path),
-        other => Err(anyhow!(
-            "format '.{other}' not supported yet (full loader lands in Commit 4)"
-        )),
+    if ext == "exr" {
+        formats::load_exr(path)
+    } else if RAW_EXTS.contains(&ext.as_str()) {
+        formats::load_raw(path)
+    } else {
+        // PNG/JPEG/BMP/TIFF/WebP/GIF/ICO/TGA/PNM, Radiance HDR, and anything
+        // else the `image` crate recognises.
+        formats::load_via_image(path)
     }
-}
-
-/// 8-bit, sRGB-encoded path via the `image` crate (JPEG / PNG).
-fn load_ldr(path: &Path) -> Result<ImageData> {
-    let decoded =
-        image::open(path).with_context(|| format!("failed to decode {}", path.display()))?;
-    let channels = decoded.color().channel_count();
-    let rgba = decoded.to_rgba8();
-    let (width, height) = rgba.dimensions();
-
-    Ok(ImageData {
-        path: path.to_path_buf(),
-        width,
-        height,
-        channels,
-        dtype_name: "uint8".to_string(),
-        compression: "-".to_string(),
-        pixels: PixelBuffer::U8(rgba.into_raw()),
-        is_encoded_srgb: true,
-    })
 }

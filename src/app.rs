@@ -1,8 +1,7 @@
 //! Application struct and winit event loop.
 //!
-//! Commit 2 brings up the window, the glutin OpenGL 4.3 core context, and a
-//! glow context, and clears the framebuffer each frame. Rendering, input, and
-//! image loading are layered on in later commits.
+//! Brings up the window, the glutin OpenGL 4.3 core context, and a glow
+//! context; loads images on a background thread; and renders each frame.
 //!
 //! ## Headless framebuffer capture
 //!
@@ -11,12 +10,15 @@
 //! rendering headlessly we instead read the GL back buffer with `glReadPixels`
 //! and write a PNG. Driven by env vars:
 //!   * `IMGVWR_CAPTURE`           – output PNG path (enables capture)
-//!   * `IMGVWR_CAPTURE_DELAY_MS`  – wait this long after the window appears
-//!                                  before capturing (lets a load finish), then
-//!                                  capture one frame and exit.
+//!   * `IMGVWR_CAPTURE_DELAY_MS`  – minimum wait after the window appears before
+//!                                  capturing. Capture also waits for any
+//!                                  in-flight load to finish (up to a cap), then
+//!                                  captures one frame and exits.
 
 use std::num::NonZeroU32;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,13 +40,30 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::image_loader::load_image;
+use crate::image_loader::{load_image, ImageData};
 use crate::renderer::{RenderParams, Renderer};
 use crate::UserEvent;
 
 /// Hard-coded fixture used to verify the pipeline end-to-end before drag-drop /
 /// CLI loading exists. Removed in Commit 10.
 const TEST_IMAGE: &str = r"C:\tmp\imgvwr_test_files\american_walnut_veneer_rough_1k.png";
+
+/// Hard cap on how long a capture run waits for a load before grabbing anyway.
+const CAPTURE_LOAD_CAP: Duration = Duration::from_secs(120);
+
+/// Result of a background decode, tagged with its generation id.
+struct LoadResult {
+    gen: u64,
+    result: Result<ImageData, String>,
+}
+
+/// Coarse load status (the error string is surfaced in the UI from Commit 9).
+enum LoadState {
+    Idle,
+    Loading,
+    Loaded,
+    Failed(String),
+}
 
 /// Live graphics state, created once the event loop is `Resumed`.
 struct Gfx {
@@ -70,12 +89,16 @@ enum RenderOutcome {
 }
 
 pub struct App {
-    #[allow(dead_code)] // used to wake the loop from load threads, from Commit 4.
     proxy: EventLoopProxy<UserEvent>,
-    #[allow(dead_code)] // CLI path is loaded once GL is ready, from Commit 10.
     initial_path: Option<PathBuf>,
     gfx: Option<Gfx>,
     capture: Option<Capture>,
+
+    // Background loading.
+    load_tx: Sender<LoadResult>,
+    load_rx: Receiver<LoadResult>,
+    load_gen: u64,
+    load_state: LoadState,
 }
 
 impl App {
@@ -93,11 +116,18 @@ impl App {
                 done: false,
             }
         });
+
+        let (load_tx, load_rx) = std::sync::mpsc::channel();
+
         Self {
             proxy,
             initial_path,
             gfx: None,
             capture,
+            load_tx,
+            load_rx,
+            load_gen: 0,
+            load_state: LoadState::Idle,
         }
     }
 
@@ -118,7 +148,6 @@ impl App {
             DisplayBuilder::new().with_window_attributes(Some(window_attributes));
         let (window, gl_config) = display_builder
             .build(event_loop, template, |configs| {
-                // Prefer the config with the most samples; otherwise the first.
                 configs
                     .reduce(|a, b| if b.num_samples() > a.num_samples() { b } else { a })
                     .expect("at least one GL config")
@@ -129,8 +158,6 @@ impl App {
         let gl_display = gl_config.display();
         let raw_window_handle = window.window_handle()?.as_raw();
 
-        // OpenGL 4.3 core: 4.1 is the floor for OCIO's GLSL 4.0; 4.3 gives
-        // KHR_debug on Windows (Windows-only target — see §9.1).
         let context_attributes = ContextAttributesBuilder::new()
             .with_context_api(ContextApi::OpenGl(Some(Version::new(4, 3))))
             .with_profile(GlProfile::Core)
@@ -149,8 +176,6 @@ impl App {
             .make_current(&gl_surface)
             .context("failed to make GL context current")?;
 
-        // Enable vsync (best-effort). Disabled while capturing so we are not
-        // throttled to the refresh rate during the (short) capture run.
         if self.capture.is_none() {
             if let Err(e) = gl_surface.set_swap_interval(
                 &gl_context,
@@ -164,13 +189,13 @@ impl App {
             glow::Context::from_loader_function_cstr(|s| gl_display.get_proc_address(s).cast())
         };
 
-        let (version, renderer) = unsafe {
+        let (version, renderer_name) = unsafe {
             (
                 gl.get_parameter_string(glow::VERSION),
                 gl.get_parameter_string(glow::RENDERER),
             )
         };
-        log::info!("OpenGL {version} on {renderer}");
+        log::info!("OpenGL {version} on {renderer_name}");
 
         #[cfg(debug_assertions)]
         install_debug_callback(&mut gl);
@@ -187,40 +212,100 @@ impl App {
         })
     }
 
-    /// Commit 3: synchronously load the CLI path (if any) or the hard-coded test
-    /// fixture so the texture pipeline can be verified. Background threading and
-    /// full-format support arrive in Commit 4; this is removed in Commit 10.
+    /// Load the CLI path (if any) or the hard-coded test fixture. Removed in
+    /// Commit 10 once drag-drop / CLI loading are wired up.
     fn load_initial_image(&mut self) {
         let path = self.initial_path.clone().or_else(|| {
             let p = PathBuf::from(TEST_IMAGE);
             p.exists().then_some(p)
         });
-        let Some(path) = path else {
-            log::info!("no initial image to load");
-            return;
-        };
-        match load_image(&path) {
-            Ok(data) => {
-                if let Some(gfx) = &mut self.gfx {
-                    gfx.renderer.set_image(&data);
-                    gfx.window.request_redraw();
-                }
-                log::info!("loaded {}", path.display());
-            }
-            Err(e) => log::error!("failed to load {}: {e:#}", path.display()),
+        match path {
+            Some(p) => self.load_path(p),
+            None => log::info!("no initial image to load"),
         }
     }
 
-    /// Whether a capture is configured and not yet taken.
+    /// Begin a background decode of `path`. Bumps the generation id so stale
+    /// results from earlier loads are discarded (§5.2).
+    fn load_path(&mut self, path: PathBuf) {
+        self.load_gen += 1;
+        let gen = self.load_gen;
+        self.load_state = LoadState::Loading;
+        log::info!("loading (gen {gen}) {}", path.display());
+
+        let tx = self.load_tx.clone();
+        let proxy = self.proxy.clone();
+        std::thread::Builder::new()
+            .name(format!("image-load-{gen}"))
+            .spawn(move || {
+                // A panicking decoder becomes a Failed state, not a crash.
+                let result = match std::panic::catch_unwind(AssertUnwindSafe(|| load_image(&path))) {
+                    Ok(Ok(data)) => Ok(data),
+                    Ok(Err(e)) => Err(format!("{e:#}")),
+                    Err(_) => Err("decoder panicked".to_string()),
+                };
+                let _ = tx.send(LoadResult { gen, result });
+                // Wake the reactive event loop so the result is observed.
+                let _ = proxy.send_event(UserEvent::LoadFinished(gen));
+            })
+            .expect("spawn image-load thread");
+    }
+
+    /// Drain finished loads, adopting only the one matching the current gen.
+    fn poll_loads(&mut self) {
+        let mut adopted = false;
+        while let Ok(msg) = self.load_rx.try_recv() {
+            if msg.gen != self.load_gen {
+                log::debug!("discarding stale load result (gen {})", msg.gen);
+                continue;
+            }
+            match msg.result {
+                Ok(data) => {
+                    log::info!(
+                        "loaded {}x{} ({} ch, {}) from {}",
+                        data.width,
+                        data.height,
+                        data.channels,
+                        data.dtype_name,
+                        data.path.display()
+                    );
+                    if let Some(gfx) = &mut self.gfx {
+                        gfx.renderer.set_image(&data);
+                    }
+                    self.load_state = LoadState::Loaded;
+                    adopted = true;
+                }
+                Err(e) => {
+                    log::error!("load failed (gen {}): {e}", msg.gen);
+                    self.load_state = LoadState::Failed(e);
+                    adopted = true;
+                }
+            }
+        }
+        if adopted {
+            if let Some(gfx) = &self.gfx {
+                gfx.window.request_redraw();
+            }
+        }
+    }
+
+    fn is_loading(&self) -> bool {
+        matches!(self.load_state, LoadState::Loading)
+    }
+
     fn capture_active(&self) -> bool {
         self.capture.as_ref().is_some_and(|c| !c.done)
     }
 
-    /// Whether the capture delay has elapsed so this frame should be grabbed.
+    /// Whether this frame should be grabbed: capture configured, delay elapsed,
+    /// and (any in-flight load finished, or the hard cap reached).
     fn capture_ready(&self) -> bool {
-        self.capture
-            .as_ref()
-            .is_some_and(|c| !c.done && c.start.elapsed() >= c.delay)
+        self.capture.as_ref().is_some_and(|c| {
+            let elapsed = c.start.elapsed();
+            !c.done
+                && elapsed >= c.delay
+                && (!self.is_loading() || elapsed >= c.delay + CAPTURE_LOAD_CAP)
+        })
     }
 
     fn render(&mut self) -> RenderOutcome {
@@ -230,21 +315,18 @@ impl App {
                 return RenderOutcome::Idle;
             };
             let size = gfx.window.inner_size();
-            // Guard against a zero-size framebuffer (minimised window).
             if size.width == 0 || size.height == 0 {
                 return RenderOutcome::Idle;
             }
             let (w, h) = (size.width as i32, size.height as i32);
 
-            // Commit 3: fixed 2-D view (90° FOV, no pan). Camera control and
-            // exposure/gamma state are wired in at Commits 5 and 6.
+            // Fixed 2-D view until the camera lands in Commit 5.
             let params = RenderParams {
                 viewport: (w, h),
                 ..RenderParams::default()
             };
             gfx.renderer.render(&params);
 
-            // Read the back buffer *before* swapping.
             if self.capture_ready() {
                 let mut buf = vec![0u8; (w * h * 4) as usize];
                 unsafe {
@@ -277,7 +359,6 @@ impl App {
         RenderOutcome::Drew
     }
 
-    /// Save a captured RGBA framebuffer to a PNG (flipped to top-down).
     fn write_capture(&self, width: u32, height: u32, buf: Vec<u8>) {
         let Some(capture) = &self.capture else { return };
         match image::RgbaImage::from_raw(width, height, buf) {
@@ -305,7 +386,6 @@ impl ApplicationHandler<UserEvent> for App {
             Ok(gfx) => {
                 gfx.window.request_redraw();
                 self.gfx = Some(gfx);
-                // Reset the capture clock to when the window actually appeared.
                 if let Some(c) = &mut self.capture {
                     c.start = Instant::now();
                 }
@@ -341,6 +421,7 @@ impl ApplicationHandler<UserEvent> for App {
                     event_loop.exit();
                 }
             }
+            WindowEvent::DroppedFile(path) => self.load_path(path),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed
                     && matches!(event.logical_key, Key::Named(NamedKey::Escape))
@@ -353,8 +434,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // While a capture is pending, drive continuous frames so the delay can
-        // elapse; otherwise stay reactive.
+        // Drive continuous frames only while a capture is pending.
         if self.capture_active() {
             event_loop.set_control_flow(ControlFlow::Poll);
             if let Some(gfx) = &self.gfx {
@@ -363,8 +443,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: UserEvent) {
-        // Load results are handled from Commit 4 onward.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::LoadFinished(_gen) => self.poll_loads(),
+        }
     }
 }
 

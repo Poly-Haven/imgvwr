@@ -232,6 +232,9 @@ pub struct App {
     cursor_in_window: bool,
     /// Eased 0..1 opacity of the auto-hiding titlebar.
     titlebar_alpha: f32,
+    /// Active Alt+right-drag resize: the edge(s) being dragged. Resized manually
+    /// (not via the OS loop, which is left-button only) so it ends on release.
+    alt_resize: Option<ResizeDirection>,
     /// A left-press landed in a window-move zone (Alt anywhere, or a 2D-fit
     /// body): it becomes an OS move on the first motion, or a click on release.
     window_drag_armed: bool,
@@ -379,6 +382,7 @@ impl App {
             animating: false,
             cursor_in_window: false,
             titlebar_alpha: 0.0,
+            alt_resize: None,
             window_drag_armed: false,
             window_drag_motion: 0.0,
             should_exit: false,
@@ -1734,15 +1738,76 @@ impl App {
         })
     }
 
-    /// Begin an Alt+right-drag resize from the cursor's third; returns whether
-    /// one started.
+    /// Arm an Alt+right-drag resize from the cursor's third (applied manually in
+    /// `apply_alt_resize` as the mouse moves, ended on release). Returns whether
+    /// one was armed.
     fn start_third_resize(&mut self) -> bool {
         let Some(dir) = self.resize_third_at_cursor() else {
             return false;
         };
-        self.gfx
-            .as_ref()
-            .is_some_and(|g| g.window.drag_resize_window(dir).is_ok())
+        self.alt_resize = Some(dir);
+        // Cancel any in-flight zoom window animation so it doesn't fight the
+        // manual resize.
+        self.window_anim_target = None;
+        true
+    }
+
+    /// Apply one step of an Alt+right-drag resize: move the dragged edge(s) by the
+    /// raw motion delta, clamped to the minimum size, in a single atomic call.
+    fn apply_alt_resize(&mut self, dx: f32, dy: f32) {
+        let Some(dir) = self.alt_resize else {
+            return;
+        };
+        let applied = {
+            let Some(gfx) = &self.gfx else {
+                return;
+            };
+            let Ok(pos) = gfx.window.outer_position() else {
+                return;
+            };
+            let size = gfx.window.outer_size();
+            let (dx, dy) = (dx.round() as i32, dy.round() as i32);
+            use ResizeDirection::*;
+            let west = matches!(dir, West | NorthWest | SouthWest);
+            let east = matches!(dir, East | NorthEast | SouthEast);
+            let north = matches!(dir, North | NorthWest | NorthEast);
+            let south = matches!(dir, South | SouthWest | SouthEast);
+            let (mut x, mut y) = (pos.x, pos.y);
+            let (mut w, mut h) = (size.width as i32, size.height as i32);
+            if east {
+                w += dx;
+            }
+            if west {
+                w -= dx;
+                x += dx;
+            }
+            if south {
+                h += dy;
+            }
+            if north {
+                h -= dy;
+                y += dy;
+            }
+            // Clamp to the minimum, keeping the opposite (fixed) edge in place.
+            let min = MIN_DIM as i32;
+            if w < min {
+                if west {
+                    x -= min - w;
+                }
+                w = min;
+            }
+            if h < min {
+                if north {
+                    y -= min - h;
+                }
+                h = min;
+            }
+            set_window_outer_rect(&gfx.window, x, y, w as u32, h as u32)
+        };
+        if applied {
+            // A deliberate manual resize: keep this size until the next zoom.
+            self.manual_window = true;
+        }
     }
 
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
@@ -1937,20 +2002,24 @@ impl App {
             resize_cursor: if self.dragging || self.window_drag_armed {
                 None
             } else {
-                self.resize_edge_at_cursor().map(|d| match d {
-                    ResizeDirection::East | ResizeDirection::West => {
-                        egui::CursorIcon::ResizeHorizontal
-                    }
-                    ResizeDirection::North | ResizeDirection::South => {
-                        egui::CursorIcon::ResizeVertical
-                    }
-                    ResizeDirection::NorthEast | ResizeDirection::SouthWest => {
-                        egui::CursorIcon::ResizeNeSw
-                    }
-                    ResizeDirection::NorthWest | ResizeDirection::SouthEast => {
-                        egui::CursorIcon::ResizeNwSe
-                    }
-                })
+                // The active Alt-resize direction (if dragging), else the edge
+                // under the cursor.
+                self.alt_resize
+                    .or_else(|| self.resize_edge_at_cursor())
+                    .map(|d| match d {
+                        ResizeDirection::East | ResizeDirection::West => {
+                            egui::CursorIcon::ResizeHorizontal
+                        }
+                        ResizeDirection::North | ResizeDirection::South => {
+                            egui::CursorIcon::ResizeVertical
+                        }
+                        ResizeDirection::NorthEast | ResizeDirection::SouthWest => {
+                            egui::CursorIcon::ResizeNeSw
+                        }
+                        ResizeDirection::NorthWest | ResizeDirection::SouthEast => {
+                            egui::CursorIcon::ResizeNwSe
+                        }
+                    })
             },
         }
     }
@@ -2420,15 +2489,22 @@ impl ApplicationHandler<UserEvent> for App {
             // (direction from the cursor's third of the window). Otherwise
             // egui-consumed events fall through to `_ => {}`.
             WindowEvent::MouseInput { state, button, .. } => {
-                let resized = state == ElementState::Pressed
-                    && !self.fullscreen
-                    && match button {
-                        MouseButton::Left => self.start_edge_resize(),
-                        MouseButton::Right if self.modifiers.alt_key() => self.start_third_resize(),
-                        _ => false,
-                    };
-                if !resized && !egui_consumed {
-                    self.on_mouse_button(state, button);
+                // End an in-progress Alt+right-drag resize on any release.
+                if state == ElementState::Released && self.alt_resize.is_some() {
+                    self.alt_resize = None;
+                } else {
+                    let resized = state == ElementState::Pressed
+                        && !self.fullscreen
+                        && match button {
+                            MouseButton::Left => self.start_edge_resize(),
+                            MouseButton::Right if self.modifiers.alt_key() => {
+                                self.start_third_resize()
+                            }
+                            _ => false,
+                        };
+                    if !resized && !egui_consumed {
+                        self.on_mouse_button(state, button);
+                    }
                 }
             }
             // Block wheel input when the toolbar is hovered (§11.3).
@@ -2472,7 +2548,9 @@ impl ApplicationHandler<UserEvent> for App {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta } = event {
-            if self.dragging {
+            if self.alt_resize.is_some() {
+                self.apply_alt_resize(delta.0 as f32, delta.1 as f32);
+            } else if self.dragging {
                 self.on_drag_motion(delta.0 as f32, delta.1 as f32);
             } else if self.window_drag_armed {
                 // Past the click threshold, hand off to the OS move loop (so

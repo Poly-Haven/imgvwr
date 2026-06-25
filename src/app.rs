@@ -217,6 +217,8 @@ pub struct App {
     image_stretch: Vec2,
     /// Active Alt+middle-drag squash/stretch gesture.
     stretching: bool,
+    /// Sharpness checker (S): show the original-resolution high-pass.
+    sharpness: bool,
     show_metadata: bool,
 
     // Colour management.
@@ -387,6 +389,7 @@ impl App {
             clarity_radius: 64.0,
             image_stretch: Vec2::ONE,
             stretching: false,
+            sharpness: false,
             show_metadata: false,
             ocio,
             last_view: None,
@@ -1397,6 +1400,7 @@ impl App {
         self.clarity_amount = 0.0;
         self.clarity_radius = 64.0;
         self.isolate_channel = None;
+        self.sharpness = false;
         self.show_toast("Adjustments reset".to_string());
         self.request_redraw();
     }
@@ -1807,6 +1811,18 @@ impl App {
                     .to_string(),
                 );
             }
+            (_, Some("s")) | (_, Some("S")) => {
+                self.sharpness = !self.sharpness;
+                self.show_toast(
+                    if self.sharpness {
+                        "Sharpness check"
+                    } else {
+                        "Sharpness off"
+                    }
+                    .to_string(),
+                );
+                self.request_redraw();
+            }
             (_, Some("q")) | (_, Some("Q")) => self.escape_or_exit(event_loop),
             (Key::Named(NamedKey::F2), _) => {
                 self.show_metadata = !self.show_metadata;
@@ -2211,6 +2227,9 @@ impl App {
         }
         if let Some(v) = f("IMGVWR_DEBUG_STRETCH_X") {
             self.image_stretch.x = v;
+        }
+        if std::env::var_os("IMGVWR_DEBUG_SHARPNESS").is_some() {
+            self.sharpness = true;
         }
         if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
             self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
@@ -2676,6 +2695,7 @@ impl App {
             background: srgb_u8_to_f32(self.prefs.background_color),
             isolate_channel: self.isolate_channel.map(|c| c as i32).unwrap_or(-1),
             stretch: [self.image_stretch.x, self.image_stretch.y],
+            sharpness: self.sharpness,
             clarity_amount: self.clarity_amount,
             clarity_radius: self.clarity_radius,
         };

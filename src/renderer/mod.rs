@@ -49,6 +49,8 @@ pub struct RenderParams {
     pub isolate_channel: i32,
     /// Per-axis image squash/stretch (1,1 = none).
     pub stretch: [f32; 2],
+    /// Show the original-resolution sharpness high-pass instead of the image.
+    pub sharpness: bool,
     /// Clarity (local-contrast) strength; 0 bypasses the whole post chain.
     pub clarity_amount: f32,
     /// Clarity unsharp-mask blur radius, in viewport pixels.
@@ -72,6 +74,7 @@ impl Default for RenderParams {
             background: [0.02, 0.02, 0.02],
             isolate_channel: -1,
             stretch: [1.0, 1.0],
+            sharpness: false,
             clarity_amount: 0.0,
             clarity_radius: 64.0,
         }
@@ -92,6 +95,7 @@ struct Uniforms {
     wrap_2d: Option<glow::UniformLocation>,
     isolate_channel: Option<glow::UniformLocation>,
     stretch: Option<glow::UniformLocation>,
+    sharpness: Option<glow::UniformLocation>,
     // Single-texture sampler.
     image: Option<glow::UniformLocation>,
     // Tiled-texture sampler + grid.
@@ -121,6 +125,7 @@ impl Uniforms {
             wrap_2d: u("u_wrap_2d"),
             isolate_channel: u("u_isolate_channel"),
             stretch: u("u_stretch"),
+            sharpness: u("u_sharpness"),
             image: u("u_image"),
             tiles: u("u_tiles"),
             tile_cols: u("u_tile_cols"),
@@ -413,6 +418,7 @@ impl Renderer {
             gl.uniform_1_i32(u.wrap_2d.as_ref(), params.wrap_2d as i32);
             gl.uniform_1_i32(u.isolate_channel.as_ref(), params.isolate_channel);
             gl.uniform_2_f32(u.stretch.as_ref(), params.stretch[0], params.stretch[1]);
+            gl.uniform_1_i32(u.sharpness.as_ref(), params.sharpness as i32);
 
             // Min/mag filters for the active interpolation mode (I key).
             let (min_f, mag_f) = if params.nearest {

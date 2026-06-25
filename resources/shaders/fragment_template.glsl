@@ -16,6 +16,7 @@ uniform bool  u_input_is_encoded_srgb;  // true when source pixels are sRGB-enco
 uniform bool  u_wrap_2d;             // 2D mode: repeat the image instead of clamping
 uniform int   u_isolate_channel;     // -1 = all channels; 0=R 1=G 2=B 3=A shown as greyscale
 uniform vec2  u_stretch;             // per-axis image squash/stretch (1,1 = none)
+uniform int   u_sharpness;           // 1 = show the original-resolution high-pass
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -127,5 +128,12 @@ void main() {
     //    post-display tweak applied exactly ONCE in both the OCIO and fallback
     //    paths (do not also fold gamma into __OCIO_APPLY__).
     color = pow(max(color, vec3(0.0)), vec3(1.0 / max(u_gamma, 1e-6)));
+
+    // 5. Sharpness checker: replace the (mip-filtered) display with a high-pass of
+    //    the ORIGINAL full-resolution pixels, so it reveals the source sharpness
+    //    rather than the displayed buffer's.
+    if (u_sharpness != 0) {
+        color = clamp(sharp_highpass(uv), 0.0, 1.0);
+    }
     frag_color = vec4(color, out_alpha);
 }

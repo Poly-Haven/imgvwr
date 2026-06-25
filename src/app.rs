@@ -100,6 +100,9 @@ const FILL_FRACTION: f32 = 0.9;
 /// Target average linear value for HDR-panorama auto-exposure on load.
 const AUTO_EXPOSURE_TARGET: f32 = 0.732;
 
+/// Time constant (seconds) for easing exposure / gamma toward their targets.
+const TONE_EASE_TAU: f32 = 0.045;
+
 /// Smallest window dimension (physical px); matches `with_min_inner_size`.
 const MIN_DIM: u32 = 170;
 
@@ -182,8 +185,12 @@ pub struct App {
 
     // View state.
     camera: CameraController,
+    /// Rendered (eased) exposure / gamma. The `*_target` values are what the
+    /// user dialed; the rendered values chase them so adjustments animate.
     exposure: f32,
     gamma: f32,
+    exposure_target: f32,
+    gamma_target: f32,
     wrap_2d: bool,
     /// Nearest-neighbour filtering instead of bilinear (I key).
     nearest_filter: bool,
@@ -340,6 +347,8 @@ impl App {
             camera: CameraController::for_image(false),
             exposure: 0.0,
             gamma: 1.0,
+            exposure_target: 0.0,
+            gamma_target: 1.0,
             wrap_2d: false,
             nearest_filter: false,
             show_metadata: false,
@@ -1079,6 +1088,9 @@ impl App {
                     }
                 }
             }
+            // A fresh image applies its default tone instantly (no animation).
+            self.exposure_target = self.exposure;
+            self.gamma_target = self.gamma;
         }
         self.load_state = LoadState::Loaded;
         self.update_window_title();
@@ -1310,13 +1322,35 @@ impl App {
     }
 
     fn show_exposure_toast(&mut self) {
-        let text = fmt_ev(self.exposure);
+        let text = fmt_ev(self.exposure_target);
         self.show_toast(text);
     }
 
     fn show_gamma_toast(&mut self) {
-        let text = format!("Gamma {:.1}", self.gamma);
+        let text = format!("Gamma {:.1}", self.gamma_target);
         self.show_toast(text);
+    }
+
+    /// Ease the rendered exposure / gamma toward their targets (so keyboard and
+    /// slider adjustments animate like zoom). Returns true while still moving.
+    fn animate_tone(&mut self, dt: f32) -> bool {
+        let k = 1.0 - (-dt / TONE_EASE_TAU).exp();
+        let mut moving = false;
+        let de = self.exposure_target - self.exposure;
+        if de.abs() > 1e-4 {
+            self.exposure += de * k;
+            moving = true;
+        } else {
+            self.exposure = self.exposure_target;
+        }
+        let dg = self.gamma_target - self.gamma;
+        if dg.abs() > 1e-4 {
+            self.gamma += dg * k;
+            moving = true;
+        } else {
+            self.gamma = self.gamma_target;
+        }
+        moving
     }
 
     fn show_zoom_toast(&mut self) {
@@ -1598,26 +1632,26 @@ impl App {
         match (key, is_char) {
             (_, Some(",")) => {
                 if ctrl {
-                    self.gamma = (self.gamma - 0.1).max(0.1);
+                    self.gamma_target = (self.gamma_target - 0.1).max(0.1);
                     self.show_gamma_toast();
                 } else {
-                    self.exposure -= 0.5;
+                    self.exposure_target -= 0.5;
                     self.show_exposure_toast();
                 }
             }
             (_, Some(".")) => {
                 if ctrl {
-                    self.gamma = (self.gamma + 0.1).min(4.0);
+                    self.gamma_target = (self.gamma_target + 0.1).min(4.0);
                     self.show_gamma_toast();
                 } else {
-                    self.exposure += 0.5;
+                    self.exposure_target += 0.5;
                     self.show_exposure_toast();
                 }
             }
-            // Ctrl+R: reset exposure & gamma.
+            // Ctrl+R: reset exposure & gamma (eased).
             (_, Some("r")) | (_, Some("R")) if ctrl => {
-                self.exposure = 0.0;
-                self.gamma = 1.0;
+                self.exposure_target = 0.0;
+                self.gamma_target = 1.0;
                 self.show_toast(format!("{}   Gamma {:.1}", fmt_ev(0.0), 1.0));
             }
             // R (no Ctrl): reset the view, same as Home / Backspace.
@@ -2040,9 +2074,11 @@ impl App {
         let f = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<f32>().ok());
         if let Some(v) = f("IMGVWR_DEBUG_EXPOSURE") {
             self.exposure = v;
+            self.exposure_target = v;
         }
         if let Some(v) = f("IMGVWR_DEBUG_GAMMA") {
             self.gamma = v;
+            self.gamma_target = v;
         }
         if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
             self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
@@ -2447,6 +2483,7 @@ impl App {
             .unwrap_or(0.0)
             .min(0.1);
         let cam_moving = self.camera.animate(dt);
+        let tone_moving = self.animate_tone(dt);
         // Ease the titlebar opacity toward shown only while the cursor is near
         // the top edge of the window.
         let tb_target = if self.titlebar_should_show() {
@@ -2471,7 +2508,7 @@ impl App {
         };
         // Keep scheduling frames while the camera, titlebar, or window geometry
         // is still moving; all settle, after which about_to_wait returns to Wait.
-        self.animating = cam_moving || !tb_settled || win_moving;
+        self.animating = cam_moving || tone_moving || !tb_settled || win_moving;
         // Dev-only: force the settings dialog open for headless verification.
         #[cfg(debug_assertions)]
         if self.force_overlay.as_deref() == Some("settings") {

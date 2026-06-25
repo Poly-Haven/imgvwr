@@ -219,6 +219,8 @@ pub struct App {
     stretching: bool,
     /// Sharpness checker (S): show the original-resolution high-pass.
     sharpness: bool,
+    /// Guide lines: `[image_coord (0..1), 0=vertical / 1=horizontal]` (max 32).
+    guides: Vec<[f32; 2]>,
     show_metadata: bool,
 
     // Colour management.
@@ -390,6 +392,7 @@ impl App {
             image_stretch: Vec2::ONE,
             stretching: false,
             sharpness: false,
+            guides: Vec::new(),
             show_metadata: false,
             ocio,
             last_view: None,
@@ -1150,6 +1153,7 @@ impl App {
             self.gamma_target = self.gamma;
             self.isolate_channel = None;
             self.image_stretch = Vec2::ONE;
+            self.guides.clear();
         }
         self.load_state = LoadState::Loaded;
         self.update_window_title();
@@ -1401,8 +1405,20 @@ impl App {
         self.clarity_radius = 64.0;
         self.isolate_channel = None;
         self.sharpness = false;
+        self.guides.clear();
         self.show_toast("Adjustments reset".to_string());
         self.request_redraw();
+    }
+
+    /// Add a guide line (image coord 0..1; `horizontal` = a constant-image-y
+    /// line). Capped at 32. Guides clear with the image or Ctrl+R.
+    fn add_guide(&mut self, coord: f32, horizontal: bool) {
+        if self.guides.len() < 32 {
+            self.guides
+                .push([coord.clamp(0.0, 1.0), if horizontal { 1.0 } else { 0.0 }]);
+            self.show_toast("Guide added".to_string());
+            self.request_redraw();
+        }
     }
 
     /// Adjust the Clarity strength (0 = off). Chunky steps; the range goes well
@@ -1823,6 +1839,8 @@ impl App {
                 );
                 self.request_redraw();
             }
+            // G: add a horizontal guide at 50% image height (pano horizon).
+            (_, Some("g")) | (_, Some("G")) => self.add_guide(0.5, true),
             (_, Some("q")) | (_, Some("Q")) => self.escape_or_exit(event_loop),
             (Key::Named(NamedKey::F2), _) => {
                 self.show_metadata = !self.show_metadata;
@@ -2230,6 +2248,9 @@ impl App {
         }
         if std::env::var_os("IMGVWR_DEBUG_SHARPNESS").is_some() {
             self.sharpness = true;
+        }
+        if std::env::var_os("IMGVWR_DEBUG_GUIDES").is_some() {
+            self.guides = vec![[0.5, 1.0], [0.5, 0.0], [0.25, 0.0]];
         }
         if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
             self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
@@ -2681,6 +2702,9 @@ impl App {
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();
         let cam = self.camera.camera;
+        let mut guide_arr = [[0.0f32; 2]; 32];
+        let guide_n = self.guides.len().min(32);
+        guide_arr[..guide_n].copy_from_slice(&self.guides[..guide_n]);
         let base = RenderParams {
             viewport: (1, 1),
             exposure: self.exposure,
@@ -2696,6 +2720,8 @@ impl App {
             isolate_channel: self.isolate_channel.map(|c| c as i32).unwrap_or(-1),
             stretch: [self.image_stretch.x, self.image_stretch.y],
             sharpness: self.sharpness,
+            guides: guide_arr,
+            guide_count: guide_n as i32,
             clarity_amount: self.clarity_amount,
             clarity_radius: self.clarity_radius,
         };

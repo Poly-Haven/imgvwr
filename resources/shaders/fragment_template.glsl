@@ -17,6 +17,9 @@ uniform bool  u_wrap_2d;             // 2D mode: repeat the image instead of cla
 uniform int   u_isolate_channel;     // -1 = all channels; 0=R 1=G 2=B 3=A shown as greyscale
 uniform vec2  u_stretch;             // per-axis image squash/stretch (1,1 = none)
 uniform int   u_sharpness;           // 1 = show the original-resolution high-pass
+// Guide lines, each .x = image coordinate (0..1), .y = 0 vertical / 1 horizontal.
+uniform int   u_guide_count;
+uniform vec2  u_guides[32];
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -134,6 +137,17 @@ void main() {
     //    rather than the displayed buffer's.
     if (u_sharpness != 0) {
         color = clamp(sharp_highpass(uv), 0.0, 1.0);
+    }
+
+    // 6. Guide lines, drawn last so they sit on top of every mode. The line
+    //    sticks to the image (compared in image-uv space) but is a constant 1px
+    //    in screen space (distance normalised by the per-pixel uv derivative),
+    //    with a 50% black shadow on either side. Works for 2D and panorama alike.
+    for (int i = 0; i < u_guide_count; i++) {
+        float coord = (u_guides[i].y < 0.5) ? uv.x : uv.y;
+        float d = abs(coord - u_guides[i].x) / max(fwidth(coord), 1e-9);
+        if (d < 1.5) { color = mix(color, vec3(0.0), 0.5); out_alpha = 1.0; }
+        if (d < 0.5) { color = vec3(0.0, 1.0, 1.0); }
     }
     frag_color = vec4(color, out_alpha);
 }

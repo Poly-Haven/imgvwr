@@ -51,6 +51,9 @@ pub struct RenderParams {
     pub stretch: [f32; 2],
     /// Show the original-resolution sharpness high-pass instead of the image.
     pub sharpness: bool,
+    /// Guide lines: `[image_coord (0..1), orientation (0=vertical/1=horizontal)]`.
+    pub guides: [[f32; 2]; 32],
+    pub guide_count: i32,
     /// Clarity (local-contrast) strength; 0 bypasses the whole post chain.
     pub clarity_amount: f32,
     /// Clarity unsharp-mask blur radius, in viewport pixels.
@@ -75,6 +78,8 @@ impl Default for RenderParams {
             isolate_channel: -1,
             stretch: [1.0, 1.0],
             sharpness: false,
+            guides: [[0.0; 2]; 32],
+            guide_count: 0,
             clarity_amount: 0.0,
             clarity_radius: 64.0,
         }
@@ -96,6 +101,8 @@ struct Uniforms {
     isolate_channel: Option<glow::UniformLocation>,
     stretch: Option<glow::UniformLocation>,
     sharpness: Option<glow::UniformLocation>,
+    guide_count: Option<glow::UniformLocation>,
+    guides: Option<glow::UniformLocation>,
     // Single-texture sampler.
     image: Option<glow::UniformLocation>,
     // Tiled-texture sampler + grid.
@@ -126,6 +133,8 @@ impl Uniforms {
             isolate_channel: u("u_isolate_channel"),
             stretch: u("u_stretch"),
             sharpness: u("u_sharpness"),
+            guide_count: u("u_guide_count"),
+            guides: u("u_guides"),
             image: u("u_image"),
             tiles: u("u_tiles"),
             tile_cols: u("u_tile_cols"),
@@ -419,6 +428,14 @@ impl Renderer {
             gl.uniform_1_i32(u.isolate_channel.as_ref(), params.isolate_channel);
             gl.uniform_2_f32(u.stretch.as_ref(), params.stretch[0], params.stretch[1]);
             gl.uniform_1_i32(u.sharpness.as_ref(), params.sharpness as i32);
+            let n = params.guide_count.clamp(0, 32) as usize;
+            gl.uniform_1_i32(u.guide_count.as_ref(), n as i32);
+            if n > 0 {
+                gl.uniform_2_f32_slice(
+                    u.guides.as_ref(),
+                    bytemuck::cast_slice(&params.guides[..n]),
+                );
+            }
 
             // Min/mag filters for the active interpolation mode (I key).
             let (min_f, mag_f) = if params.nearest {

@@ -723,21 +723,24 @@ impl App {
     /// when maximized/fullscreen. A zoom re-asserts the follow even after a manual
     /// resize (the manual size persists only until the next zoom), so the window
     /// re-hugs the image and no black canvas is left around it.
-    fn follow_zoom_with_window(&mut self) {
+    /// Returns whether the window ended up *uncapped* (the image fits and the pan
+    /// was re-centred), so the caller can skip zoom-toward-cursor (which would
+    /// otherwise re-introduce an offset on top of the recentre).
+    fn follow_zoom_with_window(&mut self) -> bool {
         if self.fullscreen {
-            return;
+            return false;
         }
         let Some(zoom) = self.camera.target_zoom() else {
-            return;
+            return false;
         };
         let (img_w, img_h) = (self.file_info.width, self.file_info.height);
         if img_w == 0 || img_h == 0 {
-            return;
+            return false;
         }
         let mon = match &self.gfx {
-            Some(gfx) if gfx.window.is_maximized() => return,
+            Some(gfx) if gfx.window.is_maximized() => return false,
             Some(gfx) => gfx.window.current_monitor(),
-            None => return,
+            None => return false,
         };
         // A zoom overrides any earlier manual resize.
         self.manual_window = false;
@@ -756,10 +759,12 @@ impl App {
         self.camera.set_zoom(new_zoom);
         // Once the window can fit the whole image again (uncapped), re-centre it
         // so a leftover pan from the zoomed-in view doesn't leave black canvas.
-        if new_zoom <= 1.0 + 1e-3 {
+        let uncapped = new_zoom <= 1.0 + 1e-3;
+        if uncapped {
             self.camera.set_pan_target(Vec2::ZERO);
         }
         self.resize_window_centered(PhysicalSize::new(win_w, win_h));
+        uncapped
     }
 
     /// Grow/shrink the window by `factor` about its centre (capped to
@@ -1347,9 +1352,11 @@ impl App {
             }
         }
         self.show_zoom_toast();
-        self.follow_zoom_with_window();
+        let uncapped = self.follow_zoom_with_window();
         if let Some(z0) = z0 {
-            self.zoom_toward_cursor(z0);
+            if !uncapped {
+                self.zoom_toward_cursor(z0);
+            }
         }
         self.request_redraw();
     }
@@ -1501,9 +1508,11 @@ impl App {
             }
         }
         self.show_zoom_toast();
-        self.follow_zoom_with_window();
+        let uncapped = self.follow_zoom_with_window();
         if let Some(z0) = z0 {
-            self.zoom_toward_cursor(z0);
+            if !uncapped {
+                self.zoom_toward_cursor(z0);
+            }
         }
         self.request_redraw();
     }

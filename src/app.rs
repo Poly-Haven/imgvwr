@@ -331,6 +331,10 @@ pub struct App {
     /// Timestamp of the previous rendered frame, for frame-rate-independent
     /// easing (`None` until the first frame).
     last_frame: Option<Instant>,
+    /// Timestamp of the last window-ease step (the ease is driven by the Resized
+    /// event chain, vsync-gated, so it times itself rather than using the render
+    /// dt). `None` between animations.
+    last_window_ease: Option<Instant>,
     /// True while the camera is easing toward its target, so `about_to_wait`
     /// keeps scheduling frames (and stops, returning to `Wait`, once settled).
     animating: bool,
@@ -426,6 +430,7 @@ impl App {
             pending: None,
             upload_progress: 0.0,
             last_frame: None,
+            last_window_ease: None,
             animating: false,
             cursor_in_window: false,
             titlebar_slide: 0.0,
@@ -864,25 +869,38 @@ impl App {
         });
         if computed.is_some() {
             self.window_anim_target = computed;
-            self.request_redraw();
+            // Kick off the geometry animation: this first step posts a resize,
+            // whose Resized event draws and advances the next step (a self-
+            // sustaining, vsync-gated chain — see `ease_window`).
+            self.last_window_ease = None;
+            self.ease_window();
         }
     }
 
-    /// Ease the window's outer rect toward `window_anim_target` (set by the
-    /// window-follow), one step per frame, so the geometry change looks smooth
-    /// instead of snapping. Returns true while still moving. The per-frame OS
-    /// resize is bounded to this short animation, after which the loop returns to
-    /// `Wait`. Move + resize go through a single atomic `SetWindowPos`. Advanced
-    /// only on the vsync-gated timed redraw — never skip the redraw that drives
-    /// it, or queued resizes drain one-per-vblank and the window crawls.
-    fn ease_window(&mut self, dt: f32) -> bool {
+    /// Advance the window's outer rect one step toward `window_anim_target`,
+    /// returning true while still moving. Driven by the `Resized` event chain
+    /// (each step posts a `SetWindowPos`, whose `Resized` draws the new size and
+    /// calls this again) — one resize per presented frame, vsync-gated, so the
+    /// geometry animates at the refresh rate with no queued-resize backlog. The
+    /// move + resize go through a single atomic `SetWindowPos`. Self-timed (its
+    /// own `dt`) since it's not on the render clock.
+    fn ease_window(&mut self) -> bool {
         if self.fullscreen {
             self.window_anim_target = None;
+            self.last_window_ease = None;
             return false;
         }
         let Some((tpos, tsize)) = self.window_anim_target else {
+            self.last_window_ease = None;
             return false;
         };
+        let now = Instant::now();
+        let dt = self
+            .last_window_ease
+            .map(|t| now.saturating_duration_since(t).as_secs_f32())
+            .unwrap_or(0.016)
+            .clamp(0.001, 0.1);
+        self.last_window_ease = Some(now);
         let result = self.gfx.as_ref().map(|gfx| {
             let cur = gfx.window.outer_size();
             let curpos = gfx
@@ -923,11 +941,13 @@ impl App {
                 }
                 if settled {
                     self.window_anim_target = None;
+                    self.last_window_ease = None;
                 }
                 !settled
             }
             None => {
                 self.window_anim_target = None;
+                self.last_window_ease = None;
                 false
             }
         }
@@ -2559,14 +2579,16 @@ impl App {
         })
     }
 
-    fn render(&mut self, advance_window: bool) -> RenderOutcome {
+    fn render(&mut self) -> RenderOutcome {
         // Advance any in-progress incremental upload before drawing this frame.
         if self.pending.is_some() {
             self.pump_upload();
         }
         // Advance the zoom/pan easing toward the target (frame-rate independent;
         // dt is clamped so a long idle gap can't cause a jump). `animating`
-        // drives the redraw scheduling in `about_to_wait`.
+        // drives the redraw scheduling in `about_to_wait`. The window-geometry
+        // ease is NOT advanced here — it rides its own Resized-event chain so the
+        // window resize and the content present stay one-to-one (see ease_window).
         let now = Instant::now();
         let dt = self
             .last_frame
@@ -2576,15 +2598,6 @@ impl App {
             .min(0.1);
         let cam_moving = self.camera.animate(dt);
         let tone_moving = self.animate_tone(dt);
-        // Advance the window-geometry ease (the window-follow animates its size
-        // smoothly rather than snapping) only on the timed redraws. A redraw
-        // triggered *by* a resize just re-tracks content at the new size without
-        // posting another resize (which would cause a resize storm).
-        let win_moving = if advance_window {
-            self.ease_window(dt)
-        } else {
-            self.window_anim_target.is_some()
-        };
         // Dev-only: force the settings dialog open for headless verification.
         #[cfg(debug_assertions)]
         if self.force_overlay.as_deref() == Some("settings") {
@@ -2604,9 +2617,10 @@ impl App {
         let slides_moving =
             self.titlebar_slide != tb_t || self.metadata_slide != md_t || self.bottom_slide != bp_t;
 
-        // Keep scheduling frames while anything is still moving; all settle,
-        // after which about_to_wait returns to Wait.
-        self.animating = cam_moving || tone_moving || win_moving || slides_moving;
+        // Keep scheduling timed frames while the camera, tone, or panels are
+        // moving (the window geometry self-drives via Resized events, so it's not
+        // included here — that's what keeps it from double-presenting).
+        self.animating = cam_moving || tone_moving || slides_moving;
 
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();
@@ -2766,16 +2780,13 @@ impl ApplicationHandler<UserEvent> for App {
                     apply_window_corners(&gfx.window, radius);
                 }
                 // Redraw synchronously so the new surface size is presented this
-                // frame (otherwise the previous frame shows stretched). Pass
-                // advance_window = false so a redraw caused by the geometry ease's
-                // own resize doesn't post another resize (avoids a resize storm),
-                // while still tracking the content to the new size. During an
+                // frame (otherwise the previous frame shows stretched). During an
                 // Alt-resize, skip the synchronous (vsync-blocked) redraw — its
-                // per-frame resize would otherwise crawl in slow motion; the
-                // timed loop redraws instead.
+                // per-frame resize would otherwise crawl in slow motion; the timed
+                // loop redraws instead.
                 if self.alt_resize.is_some() {
                     self.request_redraw();
-                } else if matches!(self.render(false), RenderOutcome::Captured) {
+                } else if matches!(self.render(), RenderOutcome::Captured) {
                     event_loop.exit();
                 }
                 // A resize we didn't initiate (outside the suppression window),
@@ -2789,9 +2800,15 @@ impl ApplicationHandler<UserEvent> for App {
                 if !programmatic && !special && self.loaded_path.is_some() {
                     self.manual_window = true;
                 }
+                // Advance the geometry ease one step: this just presented the new
+                // size, so post the next resize (whose Resized presents again) —
+                // a vsync-gated, one-resize-per-present chain. No-op when idle.
+                if self.alt_resize.is_none() {
+                    self.ease_window();
+                }
             }
             WindowEvent::RedrawRequested => {
-                if matches!(self.render(true), RenderOutcome::Captured) {
+                if matches!(self.render(), RenderOutcome::Captured) {
                     event_loop.exit();
                 }
             }

@@ -98,12 +98,25 @@ Target platform is **Windows only** (x64).
   DWAA/DWAB-compressed EXRs; `lcms` powers ICC-profile conversion (JPEGs/PNGs with
   a non-sRGB embedded profile are converted to sRGB on load).
 
-### Packaging
+### Packaging & releasing
 
 `scripts\package.ps1` bundles `imgvwr.exe`, the full runtime DLL closure, the
 `resources/` directory, and the licenses into a self-contained
-`dist\imgvwr-<version>-windows-x64.zip`. CI does this automatically on `v*` tags
-(`.github/workflows/release.yml`).
+`dist\imgvwr-<version>-windows-x64.zip`.
+
+Releases are built **locally** rather than in CI — the native deps
+(OpenColorIO / OpenEXR) compile from source via vcpkg, which takes 20+ minutes
+on a clean GitHub runner. From a shell with `VCPKG_ROOT` and `LIBCLANG_PATH`
+set (see the prerequisites above):
+
+```powershell
+# Bump the version in Cargo.toml first, then:
+pwsh scripts\release.ps1            # build + package only -> dist\
+pwsh scripts\release.ps1 -Publish   # also tag vX.Y.Z and create the GitHub release (needs gh)
+```
+
+`-Publish` derives the tag from `Cargo.toml`, pushes it, and uploads the zip to
+a new GitHub release via the `gh` CLI.
 
 ### Build
 

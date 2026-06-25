@@ -1176,18 +1176,11 @@ impl App {
             self.camera.snap_look(0.0, 0.0);
             self.camera.set_fov(crate::camera::DEFAULT_PANO_FOV_DEG);
         } else {
-            let (vw, vh) = self.viewport();
-            let aspect = self
-                .gfx
-                .as_ref()
-                .and_then(|g| g.renderer.image_aspect())
-                .unwrap_or(1.0);
-            // Contain-fit: largest zoom that still shows the whole image. Ease
-            // zoom and pan toward it within the current window (Home doesn't
-            // re-frame the window).
-            let fit = (vw / vh / aspect.max(1e-4)).min(1.0);
-            self.camera.set_zoom(fit);
+            // Re-frame the window to the image's default (framed) size and fit
+            // the image in it: the window hugs the image, so the fit zoom is 1.0.
+            self.camera.set_zoom(1.0);
             self.camera.set_pan_target(Vec2::ZERO);
+            self.resize_window_to_image(self.file_info.width, self.file_info.height);
         }
         self.request_redraw();
     }
@@ -1666,7 +1659,11 @@ impl App {
             .and_then(|g| g.renderer.image_aspect())
             .unwrap_or(1.0);
         let fit = (vw / vh / aspect.max(1e-4)).min(1.0);
-        zoom <= fit * 1.001
+        // Generous tolerance: in the window-follow's hugging regime the target
+        // zoom lands at ~1.0 but drifts by up to ~0.1% from integer window
+        // rounding, which a tight threshold would flip in and out of. The next
+        // regime (capped / zoomed-in) jumps to ~1.21, so 5% is safely between.
+        zoom <= fit * 1.05
     }
 
     /// The resize direction for the window edge/corner under the cursor, within a

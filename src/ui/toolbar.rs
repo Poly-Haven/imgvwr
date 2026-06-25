@@ -54,8 +54,9 @@ pub fn build_toolbar(
                 }
             }
 
-            if clickable(ui.button("⭐  Set as default viewer")).clicked() {
-                actions.push(UiAction::SetDefaultApp);
+            if clickable(ui.button("⚙  Settings")).clicked() {
+                state.show_settings = true;
+                state.confirm_default = false;
             }
 
             // Image dimensions / channels / depth live in the F2 metadata box;

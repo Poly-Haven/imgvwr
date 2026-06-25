@@ -533,7 +533,20 @@ impl App {
         // so the window opens already framing it — eliminating the size/position
         // jump that a post-decode resize would cause. RAW and equirectangular
         // images aren't pre-sized (no cheap probe / panoramas keep the window).
-        let monitor = event_loop.primary_monitor();
+        // Open on the configured startup monitor (by name) if set, else the
+        // primary. `force_center` centres the window on that monitor rather than
+        // restoring the last-used position.
+        let force_center = self.prefs.startup_monitor.is_some();
+        let monitor = self
+            .prefs
+            .startup_monitor
+            .as_ref()
+            .and_then(|name| {
+                event_loop
+                    .available_monitors()
+                    .find(|m| m.name().as_deref() == Some(name.as_str()))
+            })
+            .or_else(|| event_loop.primary_monitor());
         let scale = monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
         let probed = self
             .initial_path
@@ -542,7 +555,13 @@ impl App {
             .filter(|(w, h)| !is_equirectangular(*w, *h));
         // Set both size and position at creation so the window never visibly
         // jumps into place.
-        let (size, position) = startup_geometry(self.prefs.window, probed, monitor.as_ref(), scale);
+        let (size, position) = startup_geometry(
+            self.prefs.window,
+            probed,
+            monitor.as_ref(),
+            scale,
+            force_center,
+        );
         window_attributes = window_attributes.with_inner_size(size);
         if let Some(pos) = position {
             window_attributes = window_attributes.with_position(pos);
@@ -1532,6 +1551,27 @@ impl App {
         }
     }
 
+    /// Available monitors as `(winit name, friendly label)` for the settings
+    /// startup-display picker. Monitors without a name are skipped (can't be
+    /// persisted by identity).
+    fn monitor_list(&self) -> Vec<(String, String)> {
+        let Some(gfx) = &self.gfx else {
+            return Vec::new();
+        };
+        gfx.window
+            .available_monitors()
+            .enumerate()
+            .filter_map(|(i, m)| {
+                let name = m.name()?;
+                let s = m.size();
+                Some((
+                    name,
+                    format!("Display {} ({}×{})", i + 1, s.width, s.height),
+                ))
+            })
+            .collect()
+    }
+
     /// True when the window is too small to comfortably overlay the metadata box
     /// (so its hover auto-reveal is suppressed).
     fn window_is_small(&self) -> bool {
@@ -1839,6 +1879,8 @@ impl App {
             },
             title: self.file_info.name.clone(),
             icon: self.titlebar_icon.clone(),
+            monitors: self.monitor_list(),
+            startup_display: self.prefs.startup_monitor.clone(),
             is_maximized: self.gfx.as_ref().is_some_and(|g| g.window.is_maximized()),
             resize_cursor: if self.dragging || self.window_drag_armed {
                 None
@@ -2016,6 +2058,18 @@ impl App {
                     self.show_toast("Could not set default".to_string());
                 }
             },
+            UiAction::SetStartupDisplay(name) => {
+                self.prefs.startup_monitor = name;
+                self.prefs.save();
+                self.show_toast(
+                    if self.prefs.startup_monitor.is_some() {
+                        "Startup display saved"
+                    } else {
+                        "Will remember last position"
+                    }
+                    .to_string(),
+                );
+            }
             // Borderless titlebar controls.
             UiAction::DragWindow => {
                 if let Some(gfx) = &self.gfx {
@@ -2108,6 +2162,11 @@ impl App {
         // Keep scheduling frames while the camera or the titlebar is still
         // moving; both settle, after which about_to_wait returns to Wait (idle).
         self.animating = cam_moving || !tb_settled;
+        // Dev-only: force the settings dialog open for headless verification.
+        #[cfg(debug_assertions)]
+        if self.force_overlay.as_deref() == Some("settings") {
+            self.ui_state.show_settings = true;
+        }
         self.tick_toolbar();
         self.tick_metadata();
 
@@ -2464,6 +2523,7 @@ fn startup_geometry(
     probed: Option<(u32, u32)>,
     monitor: Option<&MonitorHandle>,
     scale: f64,
+    force_center: bool,
 ) -> (PhysicalSize<u32>, Option<PhysicalPosition<i32>>) {
     let size = if let Some((iw, ih)) = probed {
         let (w, h) = fit_to_monitor(iw as f32, ih as f32, monitor);
@@ -2474,20 +2534,21 @@ fn startup_geometry(
         PhysicalSize::new((1280.0 * scale) as u32, (720.0 * scale) as u32)
     };
 
-    // No image to size to but a saved window → restore it verbatim.
-    if probed.is_none() {
+    // No image to size to but a saved window → restore it verbatim, unless a
+    // startup monitor is configured (then centre on it instead).
+    if probed.is_none() && !force_center {
         if let Some(g) = saved {
             return (size, Some(PhysicalPosition::new(g.x, g.y)));
         }
     }
 
-    // Otherwise centre: on the saved window's centre (returning user) or the
-    // screen (first launch), clamped on-screen.
+    // Otherwise centre: on the chosen monitor when forced (or first launch), else
+    // on the saved window's centre. Clamped on-screen.
     let position = monitor.map(|m| {
         let (mp, ms) = (m.position(), m.size());
         let (cx, cy) = match saved {
-            Some(g) => (g.x + g.width as i32 / 2, g.y + g.height as i32 / 2),
-            None => (mp.x + ms.width as i32 / 2, mp.y + ms.height as i32 / 2),
+            Some(g) if !force_center => (g.x + g.width as i32 / 2, g.y + g.height as i32 / 2),
+            _ => (mp.x + ms.width as i32 / 2, mp.y + ms.height as i32 / 2),
         };
         let x = (cx - size.width as i32 / 2)
             .clamp(mp.x, mp.x + (ms.width as i32 - size.width as i32).max(0));

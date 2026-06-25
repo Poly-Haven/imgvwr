@@ -66,6 +66,11 @@ pub struct UiInputs {
     pub title: String,
     /// App icon texture shown at the left of the titlebar.
     pub icon: Option<egui::TextureHandle>,
+    /// Available monitors as `(winit name, friendly label)` for the settings
+    /// startup-display picker.
+    pub monitors: Vec<(String, String)>,
+    /// The configured startup monitor name (`None` = remember last position).
+    pub startup_display: Option<String>,
     /// Whether the window is maximized (drives the maximize/restore glyph).
     pub is_maximized: bool,
     /// Resize cursor for a borderless edge under the pointer (set via egui so it
@@ -106,6 +111,10 @@ pub struct UiState {
     pub pointer_over_metadata: bool,
     /// Whether the H help dialog is open.
     pub show_help: bool,
+    /// Whether the settings dialog is open.
+    pub show_settings: bool,
+    /// Whether the "set as default viewer" confirmation is showing.
+    pub confirm_default: bool,
 }
 
 /// Actions emitted by the UI, processed by `App` after the egui pass.
@@ -122,6 +131,8 @@ pub enum UiAction {
     RecallSlot(usize),
     /// Register imgvwr as the default app for supported file types.
     SetDefaultApp,
+    /// Set the monitor to open on by default (`None` = remember last position).
+    SetStartupDisplay(Option<String>),
     // Borderless titlebar controls.
     /// Start an OS window move (titlebar drag).
     DragWindow,

@@ -49,8 +49,98 @@ pub fn build_overlays(
         help_dialog(ctx, actions);
     }
 
+    settings_dialog(ctx, inputs, state, actions);
+
     // Auto-hiding borderless titlebar, drawn last so its controls sit on top.
     titlebar(ctx, inputs, actions);
+}
+
+/// The settings dialog (opened from the toolbar): startup-display picker and the
+/// "set as default viewer" action (with a confirmation step).
+fn settings_dialog(
+    ctx: &egui::Context,
+    inputs: &UiInputs,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+) {
+    if !state.show_settings {
+        return;
+    }
+    egui::Area::new(egui::Id::new("imgvwr_settings"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            overlay_frame().show(ui, |ui| {
+                ui.set_min_width(340.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Settings")
+                            .strong()
+                            .color(egui::Color32::WHITE)
+                            .size(18.0),
+                    );
+                });
+                ui.add_space(14.0);
+
+                // Startup display.
+                ui.horizontal(|ui| {
+                    ui.label("Open on display:");
+                    let current = match &inputs.startup_display {
+                        None => "Remember last used".to_string(),
+                        Some(name) => inputs
+                            .monitors
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .map(|(_, l)| l.clone())
+                            .unwrap_or_else(|| name.clone()),
+                    };
+                    egui::ComboBox::from_id_salt("imgvwr_startup_display")
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(
+                                    inputs.startup_display.is_none(),
+                                    "Remember last used",
+                                )
+                                .clicked()
+                            {
+                                actions.push(UiAction::SetStartupDisplay(None));
+                            }
+                            for (name, label) in &inputs.monitors {
+                                let selected = inputs.startup_display.as_deref() == Some(name);
+                                if ui.selectable_label(selected, label).clicked() {
+                                    actions.push(UiAction::SetStartupDisplay(Some(name.clone())));
+                                }
+                            }
+                        });
+                });
+                ui.add_space(14.0);
+
+                // Set as default viewer, with a confirmation step.
+                if state.confirm_default {
+                    ui.label("Make imgvwr the default viewer for all supported image types?");
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if clickable(ui.button("Confirm")).clicked() {
+                            actions.push(UiAction::SetDefaultApp);
+                            state.confirm_default = false;
+                        }
+                        if clickable(ui.button("Cancel")).clicked() {
+                            state.confirm_default = false;
+                        }
+                    });
+                } else if clickable(ui.button("⭐  Set as default viewer")).clicked() {
+                    state.confirm_default = true;
+                }
+
+                ui.add_space(14.0);
+                ui.vertical_centered(|ui| {
+                    if clickable(ui.button("Close")).clicked() {
+                        state.show_settings = false;
+                        state.confirm_default = false;
+                    }
+                });
+            });
+        });
 }
 
 /// The auto-hiding borderless titlebar: a drag strip showing the filename, plus

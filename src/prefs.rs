@@ -36,6 +36,10 @@ pub struct AppPreferences {
     /// Last window position/size, restored on launch.
     #[serde(default)]
     pub window: Option<WindowGeometry>,
+    /// Monitor to open on by default (winit monitor name). `None` = remember the
+    /// last-used position (restore `window`).
+    #[serde(default)]
+    pub startup_monitor: Option<String>,
 }
 
 impl Default for AppPreferences {
@@ -44,6 +48,7 @@ impl Default for AppPreferences {
             version: PREFS_VERSION,
             preferred_view_by_filetype: HashMap::new(),
             window: None,
+            startup_monitor: None,
         }
     }
 }

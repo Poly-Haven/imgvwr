@@ -1197,6 +1197,7 @@ impl App {
         let (_, vh) = self.viewport();
         let img_h = self.file_info.height.max(1) as f32;
         let zoom = (pct / 100.0) * (img_h / vh);
+        let z0 = self.camera.target_zoom();
         match self.camera.camera {
             Camera::Flat { .. } => self.camera.set_zoom(zoom),
             Camera::Pano { .. } => {
@@ -1206,6 +1207,9 @@ impl App {
         }
         self.show_zoom_toast();
         self.follow_zoom_with_window();
+        if let Some(z0) = z0 {
+            self.zoom_toward_cursor(z0);
+        }
         self.request_redraw();
     }
 
@@ -1333,6 +1337,7 @@ impl App {
             return;
         }
 
+        let z0 = self.camera.target_zoom();
         match self.camera.camera {
             Camera::Pano { fov_deg, .. } => {
                 // Progressive feel: step scaled by current FOV (2× strength).
@@ -1346,7 +1351,37 @@ impl App {
         }
         self.show_zoom_toast();
         self.follow_zoom_with_window();
+        if let Some(z0) = z0 {
+            self.zoom_toward_cursor(z0);
+        }
         self.request_redraw();
+    }
+
+    /// Shift the 2D pan target so the image point under the cursor stays put as
+    /// the zoom changes from `z0` to the current target — i.e. zoom toward the
+    /// cursor rather than the view centre. No-op in panorama mode. (In the
+    /// uncapped window-follow regime the zoom barely changes, so this is ~0 and
+    /// zooming just grows the window; it matters once the window is capped.)
+    fn zoom_toward_cursor(&mut self, z0: f32) {
+        let Some(z1) = self.camera.target_zoom() else {
+            return;
+        };
+        if (z1 - z0).abs() < 1e-6 || z0 <= 0.0 || z1 <= 0.0 {
+            return;
+        }
+        let (vw, vh) = self.viewport();
+        let aspect = self
+            .gfx
+            .as_ref()
+            .and_then(|g| g.renderer.image_aspect())
+            .unwrap_or(1.0)
+            .max(1e-4);
+        // UV offset of the cursor from the view centre, per unit inverse-zoom.
+        let off = Vec2::new(
+            (self.cursor_pos.x as f32 - vw * 0.5) / (aspect * vh),
+            (self.cursor_pos.y as f32 - vh * 0.5) / vh,
+        );
+        self.camera.pan_target(off * (1.0 / z0 - 1.0 / z1));
     }
 
     /// Wheel pan: `horizontal` pans left/right (yaw in panorama), otherwise
@@ -1568,6 +1603,45 @@ impl App {
     /// whether one started.
     fn start_edge_resize(&mut self) -> bool {
         let Some(dir) = self.resize_edge_at_cursor() else {
+            return false;
+        };
+        self.gfx
+            .as_ref()
+            .is_some_and(|g| g.window.drag_resize_window(dir).is_ok())
+    }
+
+    /// Resize direction from which third of the window the cursor is in (for the
+    /// Alt+right-drag resize): e.g. middle-right → East, bottom-right → SouthEast.
+    /// The centre cell resizes nothing.
+    fn resize_third_at_cursor(&self) -> Option<ResizeDirection> {
+        let gfx = self.gfx.as_ref()?;
+        if gfx.window.is_maximized() {
+            return None;
+        }
+        let size = gfx.window.inner_size();
+        let (w, h) = (size.width as f64, size.height as f64);
+        let col =
+            (self.cursor_pos.x >= w / 3.0) as i32 + (self.cursor_pos.x > 2.0 * w / 3.0) as i32;
+        let row =
+            (self.cursor_pos.y >= h / 3.0) as i32 + (self.cursor_pos.y > 2.0 * h / 3.0) as i32;
+        // col/row: 0 = first third (top/left), 1 = middle, 2 = last third.
+        Some(match (row, col) {
+            (0, 0) => ResizeDirection::NorthWest,
+            (0, 2) => ResizeDirection::NorthEast,
+            (2, 0) => ResizeDirection::SouthWest,
+            (2, 2) => ResizeDirection::SouthEast,
+            (0, 1) => ResizeDirection::North,
+            (2, 1) => ResizeDirection::South,
+            (1, 0) => ResizeDirection::West,
+            (1, 2) => ResizeDirection::East,
+            _ => return None, // centre cell
+        })
+    }
+
+    /// Begin an Alt+right-drag resize from the cursor's third; returns whether
+    /// one started.
+    fn start_third_resize(&mut self) -> bool {
+        let Some(dir) = self.resize_third_at_cursor() else {
             return false;
         };
         self.gfx
@@ -2217,15 +2291,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.cursor_in_window = false;
                 self.request_redraw();
             }
-            // A press on a borderless edge/corner hit-zone starts the OS resize
-            // loop — checked before egui so it wins over the toolbar/titlebar that
-            // overlap the window border. Otherwise egui-consumed events fall
-            // through to `_ => {}`.
+            // A press that starts a borderless resize is handled before egui so
+            // it wins over the toolbar/titlebar overlapping the window border:
+            // left-press on an edge/corner hit-zone, or Alt+right-press anywhere
+            // (direction from the cursor's third of the window). Otherwise
+            // egui-consumed events fall through to `_ => {}`.
             WindowEvent::MouseInput { state, button, .. } => {
                 let resized = state == ElementState::Pressed
-                    && button == MouseButton::Left
                     && !self.fullscreen
-                    && self.start_edge_resize();
+                    && match button {
+                        MouseButton::Left => self.start_edge_resize(),
+                        MouseButton::Right if self.modifiers.alt_key() => self.start_third_resize(),
+                        _ => false,
+                    };
                 if !resized && !egui_consumed {
                     self.on_mouse_button(state, button);
                 }

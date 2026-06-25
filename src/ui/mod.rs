@@ -1,6 +1,7 @@
 //! egui-based overlay UI: the left-edge toolbar (and, from Commit 9, the loading
 //! / error / hint overlays). Rendered on top of the OpenGL scene each frame.
 
+mod colors;
 mod overlay;
 mod toolbar;
 

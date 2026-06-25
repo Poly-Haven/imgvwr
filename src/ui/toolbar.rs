@@ -1,14 +1,13 @@
 //! Left-edge hover toolbar (see plans/rewrite.md §12.1, §12.2).
 
+use super::colors::panel_bg;
 use super::{clickable, UiAction, UiInputs, UiState};
 
 const PANEL_WIDTH: f32 = 200.0;
 
 fn panel_frame() -> egui::Frame {
     egui::Frame {
-        // Near-opaque so anti-aliased text edges blend over a flat dark fill
-        // rather than the busy image behind, which reads as soft/fuzzy.
-        fill: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 240),
+        fill: panel_bg(),
         inner_margin: egui::Margin::same(6),
         ..Default::default()
     }

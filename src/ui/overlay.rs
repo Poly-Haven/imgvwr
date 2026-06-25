@@ -2,10 +2,8 @@
 //! "no image" hint, and the F2 metadata HUD (see plans/rewrite.md §12.3, §12.5,
 //! §12.6).
 
+use super::colors::{panel_bg, panel_bg_alpha, ACCENT, PANEL_ALPHA};
 use super::{clickable, UiAction, UiInputs, UiState};
-
-/// Accent colour (active comparator slot flag, progress bar).
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(190, 111, 255);
 
 /// Height of the borderless custom titlebar; the top strip is reserved for it so
 /// the slot flags / metadata box never sit under the window controls.
@@ -13,10 +11,7 @@ const TITLEBAR_H: f32 = 30.0;
 
 fn overlay_frame() -> egui::Frame {
     egui::Frame {
-        // Near-opaque: anti-aliased text over a flat dark fill stays crisp,
-        // whereas a translucent panel lets the busy image bleed through the
-        // glyph edges and look soft.
-        fill: egui::Color32::from_rgba_unmultiplied(20, 20, 20, 245),
+        fill: panel_bg(),
         inner_margin: egui::Margin::same(16),
         corner_radius: egui::CornerRadius::same(8),
         ..Default::default()
@@ -68,11 +63,13 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
         return;
     }
     let alpha = |c: u8| (c as f32 * a) as u8;
-    let bg = egui::Color32::from_rgba_unmultiplied(18, 18, 18, alpha(238));
+    let bg = panel_bg_alpha(alpha(PANEL_ALPHA));
     let fg = egui::Color32::from_rgba_unmultiplied(220, 220, 220, alpha(255));
 
     egui::TopBottomPanel::top("imgvwr_titlebar")
         .exact_height(TITLEBAR_H)
+        // No separator line — its 1px stroke fades on a different schedule.
+        .show_separator_line(false)
         .frame(egui::Frame::NONE.fill(bg))
         .show(ctx, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -161,10 +158,7 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction
                     let (fill, fg) = if active {
                         (ACCENT, egui::Color32::WHITE)
                     } else {
-                        (
-                            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 170),
-                            egui::Color32::from_gray(200),
-                        )
+                        (panel_bg(), egui::Color32::from_gray(200))
                     };
                     // Square top corners so the flag reads as hanging from the edge.
                     let inner = egui::Frame {
@@ -209,7 +203,7 @@ fn loading(ctx: &egui::Context, inputs: &UiInputs) {
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame {
-                fill: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 200),
+                fill: panel_bg(),
                 inner_margin: egui::Margin::symmetric(10, 8),
                 corner_radius: egui::CornerRadius::same(4),
                 ..Default::default()
@@ -325,9 +319,7 @@ fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs) -> bool {
         )
         .show(ctx, |ui| {
             let frame = egui::Frame {
-                // Near-opaque so the selectable metadata text stays crisp over
-                // whatever image is behind it.
-                fill: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 240),
+                fill: panel_bg(),
                 inner_margin: egui::Margin::same(8),
                 corner_radius: egui::CornerRadius::same(4),
                 ..Default::default()
@@ -369,9 +361,7 @@ fn toast(ctx: &egui::Context, text: &str, alpha: f32) {
     if a <= 0.0 {
         return;
     }
-    // Near-opaque at full strength (then fades with `a`) so the text reads
-    // crisply over the image rather than blending into it.
-    let bg = (240.0 * a) as u8;
+    let bg = (PANEL_ALPHA as f32 * a) as u8;
     let fg = (255.0 * a) as u8;
     const FONT_SIZE: f32 = 16.0;
     let font = egui::FontId::proportional(FONT_SIZE);
@@ -388,7 +378,7 @@ fn toast(ctx: &egui::Context, text: &str, alpha: f32) {
         .interactable(false)
         .show(ctx, |ui| {
             let frame = egui::Frame {
-                fill: egui::Color32::from_rgba_unmultiplied(0, 0, 0, bg),
+                fill: panel_bg_alpha(bg),
                 inner_margin: egui::Margin::symmetric(10, 6),
                 corner_radius: egui::CornerRadius::same(4),
                 ..Default::default()

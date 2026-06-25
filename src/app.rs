@@ -103,6 +103,20 @@ const AUTO_EXPOSURE_TARGET: f32 = 0.732;
 /// Time constant (seconds) for easing exposure / gamma toward their targets.
 const TONE_EASE_TAU: f32 = 0.045;
 
+/// Duration (seconds) of the auto-hiding panels' slide in/out.
+const SLIDE_SECS: f32 = 0.15;
+
+/// Move `current` linearly toward `target` so a full 0→1 traversal takes
+/// `SLIDE_SECS`. Used to slide the auto-hiding panels in/out.
+fn approach(current: f32, target: f32, dt: f32) -> f32 {
+    let step = dt / SLIDE_SECS;
+    if target > current {
+        (current + step).min(target)
+    } else {
+        (current - step).max(target)
+    }
+}
+
 /// Smallest window dimension (physical px); matches `with_min_inner_size`.
 const MIN_DIM: u32 = 170;
 
@@ -242,10 +256,14 @@ pub struct App {
     dblclick_motion: f32,
 
     // Borderless window interaction.
-    /// True while the cursor is inside the window, driving the titlebar fade.
+    /// True while the cursor is inside the window, driving the titlebar reveal.
     cursor_in_window: bool,
-    /// Eased 0..1 opacity of the auto-hiding titlebar.
-    titlebar_alpha: f32,
+    /// Slide-in progress 0..1 for the auto-hiding panels (0 = tucked off the
+    /// window edge, 1 = fully in). Ramped over `SLIDE_SECS` toward each panel's
+    /// visibility so they slide rather than pop.
+    titlebar_slide: f32,
+    metadata_slide: f32,
+    bottom_slide: f32,
     /// Active Alt+right-drag resize: the edge(s) being dragged. Resized manually
     /// (not via the OS loop, which is left-button only) so it ends on release.
     alt_resize: Option<ResizeDirection>,
@@ -405,7 +423,9 @@ impl App {
             last_frame: None,
             animating: false,
             cursor_in_window: false,
-            titlebar_alpha: 0.0,
+            titlebar_slide: 0.0,
+            metadata_slide: 0.0,
+            bottom_slide: 0.0,
             alt_resize: None,
             alt_resize_origin: (0, 0, 0, 0),
             alt_resize_press: (0.0, 0.0),
@@ -1806,6 +1826,9 @@ impl App {
     /// its top edge (so it doesn't cover the image while looking around lower
     /// down). Hidden in fullscreen.
     fn titlebar_should_show(&self) -> bool {
+        if cfg!(debug_assertions) && self.force_overlay.as_deref() == Some("titlebar") {
+            return true;
+        }
         if self.fullscreen || !self.cursor_in_window {
             return false;
         }
@@ -1815,6 +1838,16 @@ impl App {
             .map(|g| g.window.scale_factor())
             .unwrap_or(1.0);
         self.cursor_pos.y <= 56.0 * scale
+    }
+
+    /// Whether the F2 metadata box should be revealed: toggled on (F2), the
+    /// cursor near the top-right on a large-enough window, or hovering the box.
+    fn metadata_should_show(&self) -> bool {
+        let forced = cfg!(debug_assertions) && self.force_overlay.as_deref() == Some("metadata");
+        self.show_metadata
+            || (self.metadata_hover && !self.window_is_small())
+            || self.ui_state.pointer_over_metadata
+            || forced
     }
 
     /// True in 2D when the whole image is visible (zoom ≤ contain-fit), so it
@@ -2176,7 +2209,7 @@ impl App {
         let show_hint = (!has_image && !loading && error.is_none()) || forced == Some("hint");
 
         UiInputs {
-            bottom_visible: self.bottom_visible,
+            bottom_slide: self.bottom_slide,
             has_image,
             display_views,
             active,
@@ -2189,12 +2222,7 @@ impl App {
             loading_name: self.pending_name.clone(),
             error,
             show_hint,
-            // F2 always shows it; the top-right hover auto-reveal is suppressed
-            // on a small window (it would cover too much of the image).
-            show_metadata: self.show_metadata
-                || (self.metadata_hover && !self.window_is_small())
-                || self.ui_state.pointer_over_metadata
-                || forced == Some("metadata"),
+            metadata_slide: self.metadata_slide,
             metadata: self.metadata_lines(),
             channel_count: self.file_info.channels,
             isolate_channel: self.isolate_channel,
@@ -2202,13 +2230,7 @@ impl App {
             toast: self.toast_render(),
             slot_labels: self.slot_labels(),
             active_slot: self.active_slot,
-            titlebar_alpha: if self.fullscreen {
-                0.0
-            } else if forced == Some("titlebar") {
-                1.0
-            } else {
-                self.titlebar_alpha
-            },
+            titlebar_slide: self.titlebar_slide,
             title: self.file_info.name.clone(),
             icon: self.titlebar_icon.clone(),
             monitors: self.monitor_list(),
@@ -2508,19 +2530,6 @@ impl App {
             .min(0.1);
         let cam_moving = self.camera.animate(dt);
         let tone_moving = self.animate_tone(dt);
-        // Ease the titlebar opacity toward shown only while the cursor is near
-        // the top edge of the window.
-        let tb_target = if self.titlebar_should_show() {
-            1.0
-        } else {
-            0.0
-        };
-        let tb_k = 1.0 - (-dt / 0.10).exp();
-        self.titlebar_alpha += (tb_target - self.titlebar_alpha) * tb_k;
-        let tb_settled = (self.titlebar_alpha - tb_target).abs() <= 0.01;
-        if tb_settled {
-            self.titlebar_alpha = tb_target;
-        }
         // Advance the window-geometry ease (the window-follow animates its size
         // smoothly rather than snapping) only on the timed redraws. A redraw
         // triggered *by* a resize just re-tracks content at the new size without
@@ -2530,9 +2539,6 @@ impl App {
         } else {
             self.window_anim_target.is_some()
         };
-        // Keep scheduling frames while the camera, titlebar, or window geometry
-        // is still moving; all settle, after which about_to_wait returns to Wait.
-        self.animating = cam_moving || tone_moving || !tb_settled || win_moving;
         // Dev-only: force the settings dialog open for headless verification.
         #[cfg(debug_assertions)]
         if self.force_overlay.as_deref() == Some("settings") {
@@ -2540,6 +2546,21 @@ impl App {
         }
         self.tick_bottom_panel();
         self.tick_metadata();
+
+        // Slide the auto-hiding panels in/out from their edges over SLIDE_SECS,
+        // toward each panel's current visibility target.
+        let tb_t = self.titlebar_should_show() as i32 as f32;
+        let md_t = self.metadata_should_show() as i32 as f32;
+        let bp_t = self.bottom_visible as i32 as f32;
+        self.titlebar_slide = approach(self.titlebar_slide, tb_t, dt);
+        self.metadata_slide = approach(self.metadata_slide, md_t, dt);
+        self.bottom_slide = approach(self.bottom_slide, bp_t, dt);
+        let slides_moving =
+            self.titlebar_slide != tb_t || self.metadata_slide != md_t || self.bottom_slide != bp_t;
+
+        // Keep scheduling frames while anything is still moving; all settle,
+        // after which about_to_wait returns to Wait.
+        self.animating = cam_moving || tone_moving || win_moving || slides_moving;
 
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();

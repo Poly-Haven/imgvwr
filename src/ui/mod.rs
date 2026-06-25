@@ -29,8 +29,8 @@ pub fn build(
 /// Immutable per-frame inputs handed to the UI (gathered from `App` before the
 /// mutable egui borrow, to avoid borrow conflicts).
 pub struct UiInputs {
-    /// Whether the auto-hiding bottom panel is currently revealed.
-    pub bottom_visible: bool,
+    /// Bottom panel slide-in progress, 0 (hidden below the edge) … 1 (fully in).
+    pub bottom_slide: f32,
     pub has_image: bool,
     /// All `(display, view)` pairs from the active OCIO config.
     pub display_views: Vec<(String, String)>,
@@ -47,7 +47,8 @@ pub struct UiInputs {
     pub loading_name: Option<String>,
     pub error: Option<String>,
     pub show_hint: bool,
-    pub show_metadata: bool,
+    /// Metadata box slide-in progress, 0 (hidden off the right) … 1 (fully in).
+    pub metadata_slide: f32,
     pub metadata: Vec<(String, String)>,
     /// Original channel count (1/3/4), for the metadata-box channel boxes.
     pub channel_count: u8,
@@ -63,8 +64,8 @@ pub struct UiInputs {
     pub active_slot: Option<usize>,
 
     // Borderless custom titlebar.
-    /// Eased 0..1 opacity of the auto-hiding titlebar (0 = fully hidden).
-    pub titlebar_alpha: f32,
+    /// Titlebar slide-in progress, 0 (hidden above the edge) … 1 (fully in).
+    pub titlebar_slide: f32,
     /// Filename shown in the titlebar (empty when no image is loaded).
     pub title: String,
     /// App icon texture shown at the left of the titlebar.

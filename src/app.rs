@@ -825,19 +825,25 @@ impl App {
 
     /// Ease the window's outer rect toward `window_anim_target` (set by the
     /// window-follow), one step per frame, so the geometry change looks smooth
-    /// instead of snapping. Returns true while still moving. The per-frame OS
+    /// instead of snapping. Returns `(moving, posted_resize)`: `moving` is true
+    /// while still animating; `posted_resize` is true when this step actually
+    /// changed the rect (so a `Resized` event will follow). The per-frame OS
     /// resize is bounded to this short animation, after which the loop returns to
     /// `Wait`. Move + resize go through a single atomic `SetWindowPos`.
-    fn ease_window(&mut self, dt: f32) -> bool {
+    fn ease_window(&mut self, dt: f32) -> (bool, bool) {
         if self.fullscreen {
             self.window_anim_target = None;
-            return false;
+            return (false, false);
         }
         let Some((tpos, tsize)) = self.window_anim_target else {
-            return false;
+            return (false, false);
         };
         let result = self.gfx.as_ref().map(|gfx| {
             let cur = gfx.window.outer_size();
+            let curpos = gfx
+                .window
+                .outer_position()
+                .unwrap_or(PhysicalPosition::new(tpos.x, tpos.y));
             let k = 1.0 - (-dt / WINDOW_EASE_TAU).exp();
             let lu = |a: u32, b: u32| {
                 ((a as f32 + (b as f32 - a as f32) * k).round() as i32).max(MIN_DIM as i32) as u32
@@ -857,20 +863,28 @@ impl App {
             let cy = tpos.y + tsize.height as i32 / 2;
             let x = cx - w as i32 / 2;
             let y = cy - h as i32 / 2;
-            set_window_outer_rect(&gfx.window, x, y, w, h);
-            settled
+            // Only post when the rect actually changes, so a settled step that
+            // lands on the current size doesn't emit a redundant (no Resized)
+            // SetWindowPos — that would leave the skipped timed draw unpainted.
+            let changed = w != cur.width || h != cur.height || x != curpos.x || y != curpos.y;
+            if changed {
+                set_window_outer_rect(&gfx.window, x, y, w, h);
+            }
+            (settled, changed)
         });
         match result {
-            Some(settled) => {
-                self.suppress_manual_until = Some(Instant::now() + Duration::from_millis(120));
+            Some((settled, changed)) => {
+                if changed {
+                    self.suppress_manual_until = Some(Instant::now() + Duration::from_millis(120));
+                }
                 if settled {
                     self.window_anim_target = None;
                 }
-                !settled
+                (!settled, changed)
             }
             None => {
                 self.window_anim_target = None;
-                false
+                (false, false)
             }
         }
     }
@@ -2425,10 +2439,10 @@ impl App {
         // smoothly rather than snapping) only on the timed redraws. A redraw
         // triggered *by* a resize just re-tracks content at the new size without
         // posting another resize (which would cause a resize storm).
-        let win_moving = if advance_window {
+        let (win_moving, win_posted_resize) = if advance_window {
             self.ease_window(dt)
         } else {
-            self.window_anim_target.is_some()
+            (self.window_anim_target.is_some(), false)
         };
         // Keep scheduling frames while the camera, titlebar, or window geometry
         // is still moving; all settle, after which about_to_wait returns to Wait.
@@ -2440,6 +2454,15 @@ impl App {
         }
         self.tick_toolbar();
         self.tick_metadata();
+
+        // This timed redraw just posted a window resize, so a `Resized` event is
+        // queued and will redraw at the new size. Skip drawing here so there's a
+        // single present per ease step — otherwise both this (old-size) frame and
+        // the Resized frame call swap_buffers, halving the animation's frame rate
+        // (visible as shiver on a 60 Hz panel). Never skip during a capture.
+        if win_posted_resize && self.capture.is_none() {
+            return RenderOutcome::Drew;
+        }
 
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();

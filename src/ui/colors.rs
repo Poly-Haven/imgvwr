@@ -3,12 +3,12 @@
 use egui::Color32;
 
 /// Base RGB for every chrome background.
-const PANEL_RGB: (u8, u8, u8) = (40, 40, 40);
-/// Default chrome background opacity (50%).
-pub const PANEL_ALPHA: u8 = 128;
+const PANEL_RGB: (u8, u8, u8) = (20, 20, 20);
+/// Default chrome background opacity (75%).
+pub const PANEL_ALPHA: u8 = 191;
 
 /// Standard translucent dark background for all chrome — toolbar, titlebar,
-/// overlays, metadata box, toast, slot flags: `rgb(40, 40, 40)` at 50% opacity.
+/// overlays, metadata box, toast, slot flags: `rgb(20, 20, 20)` at 75% opacity.
 pub fn panel_bg() -> Color32 {
     panel_bg_alpha(PANEL_ALPHA)
 }

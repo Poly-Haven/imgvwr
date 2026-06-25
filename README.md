@@ -25,7 +25,7 @@ for Windows.
 | `Shift` / `Ctrl` + wheel | Pan horizontally / vertically |
 | Shift / Ctrl + drag | Lock pan/look to the horizontal / vertical axis |
 | Numpad `1`–`9` | Zoom in `2^(N-1)×` (1=100%, 2=200%, 3=400%…); with `Ctrl`, zoom out |
-| `Home` / `Backspace` | Reset view (fit) |
+| `Home` / `Backspace` / `R` | Reset the view and window to the default |
 | `P` | Toggle 2D ↔ panorama mode |
 | `W` | Toggle tiled wrap (2D) |
 | `I` | Toggle nearest ↔ bilinear filtering |
@@ -49,6 +49,8 @@ for Windows.
 | `Alt` + drag · titlebar drag · 2D-fit body drag | Move the window |
 | Drag a window edge / corner | Resize |
 | `Alt` + right-drag | Resize; edge(s) chosen by the cursor's third of the window |
+| `Alt` + scroll (panorama) | Grow / shrink the window |
+| `A` | Toggle always-on-top |
 | `F` / `F11` / double-click | Toggle fullscreen |
 | `Escape` / `Q` | Exit fullscreen or close |
 | Move cursor to left edge | Show toolbar overlay |

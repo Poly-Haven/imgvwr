@@ -50,7 +50,7 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::monitor::MonitorHandle;
-use winit::window::{CursorGrabMode, Fullscreen, ResizeDirection, Window, WindowId};
+use winit::window::{CursorGrabMode, Fullscreen, ResizeDirection, Window, WindowId, WindowLevel};
 
 use crate::camera::{Camera, CameraController};
 use crate::image_loader::{
@@ -214,6 +214,8 @@ pub struct App {
     drag_start_cursor: PhysicalPosition<f64>,
     last_left_press: Option<Instant>,
     fullscreen: bool,
+    /// Keep the window above all others (toggled with A).
+    always_on_top: bool,
     /// True once the user manually resizes the window: the window then stops
     /// auto-following the zoom so their chosen size sticks (cleared on the next
     /// image load, which re-frames the window).
@@ -364,6 +366,7 @@ impl App {
             drag_start_cursor: PhysicalPosition::new(0.0, 0.0),
             last_left_press: None,
             fullscreen: false,
+            always_on_top: false,
             manual_window: false,
             suppress_manual_until: None,
             pending_dblclick: false,
@@ -1578,6 +1581,25 @@ impl App {
             }
             // R (no Ctrl): reset the view, same as Home / Backspace.
             (_, Some("r")) | (_, Some("R")) => self.reset_view_full(),
+            (_, Some("a")) | (_, Some("A")) => {
+                self.always_on_top = !self.always_on_top;
+                if let Some(gfx) = &self.gfx {
+                    gfx.window.set_window_level(if self.always_on_top {
+                        WindowLevel::AlwaysOnTop
+                    } else {
+                        WindowLevel::Normal
+                    });
+                }
+                self.update_window_title();
+                self.show_toast(
+                    if self.always_on_top {
+                        "Always on top"
+                    } else {
+                        "Always on top off"
+                    }
+                    .to_string(),
+                );
+            }
             (_, Some("p")) | (_, Some("P")) => {
                 let want = !self.camera.is_panorama();
                 self.camera.set_mode(want);
@@ -2026,11 +2048,14 @@ impl App {
 
     fn update_window_title(&self) {
         if let Some(gfx) = &self.gfx {
-            let title = if self.file_info.name.is_empty() {
+            let mut title = if self.file_info.name.is_empty() {
                 "imgvwr".to_string()
             } else {
                 format!("{} · imgvwr", self.file_info.name)
             };
+            if self.always_on_top {
+                title.push_str(" (always on top [A])");
+            }
             gfx.window.set_title(&title);
         }
     }

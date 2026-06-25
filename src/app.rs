@@ -744,8 +744,33 @@ impl App {
         // window-height change: uncapped this lands on ~1.0 (image fills the
         // window); capped, the target zoom > 1 so the image overflows the window
         // uniformly and can be panned into. The rendered zoom eases to this.
-        self.camera.set_zoom(scale * img_h as f32 / win_h as f32);
+        let new_zoom = scale * img_h as f32 / win_h as f32;
+        self.camera.set_zoom(new_zoom);
+        // Once the window can fit the whole image again (uncapped), re-centre it
+        // so a leftover pan from the zoomed-in view doesn't leave black canvas.
+        if new_zoom <= 1.0 + 1e-3 {
+            self.camera.set_pan_target(Vec2::ZERO);
+        }
         self.resize_window_centered(PhysicalSize::new(win_w, win_h));
+    }
+
+    /// Grow/shrink the window by `factor` about its centre (capped to
+    /// [`FILL_FRACTION`] of the monitor, min [`MIN_DIM`]), animated. Used by
+    /// Alt+scroll in panorama mode (panoramas have no 2D zoom to drive the
+    /// window-follow). No-op when maximized/fullscreen.
+    fn resize_window_by_factor(&mut self, factor: f32) {
+        if self.fullscreen {
+            return;
+        }
+        let mon = match &self.gfx {
+            Some(gfx) if gfx.window.is_maximized() => return,
+            Some(gfx) => gfx.window.current_monitor(),
+            None => return,
+        };
+        let (vw, vh) = self.viewport();
+        let (w, h) = fit_to_monitor(vw * factor, vh * factor, mon.as_ref());
+        self.manual_window = false;
+        self.resize_window_centered(PhysicalSize::new(w, h));
     }
 
     /// Resize the window to `target` inner size, keeping it centred on its current
@@ -919,6 +944,13 @@ impl App {
                 data.path.display()
             );
         }
+        // The progress/loading HUD reads `pending_name`; set it to the image
+        // actually being adopted (a comparator recall doesn't go through
+        // load_path, so it would otherwise show a stale name).
+        self.pending_name = data
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned());
         if let Some(gfx) = &mut self.gfx {
             gfx.renderer.start_upload(data.as_ref());
         }
@@ -1426,6 +1458,14 @@ impl App {
             return;
         }
 
+        // Alt + scroll in panorama mode grows/shrinks the window (panoramas have
+        // no 2D zoom to drive the window-follow, so this is the equivalent).
+        if self.camera.is_panorama() && self.modifiers.alt_key() {
+            self.resize_window_by_factor(1.21_f32.powf(steps));
+            self.request_redraw();
+            return;
+        }
+
         let z0 = self.camera.target_zoom();
         match self.camera.camera {
             Camera::Pano { fov_deg, .. } => {
@@ -1533,6 +1573,8 @@ impl App {
                 self.gamma = 1.0;
                 self.show_toast(format!("{}   Gamma {:.1}", fmt_ev(0.0), 1.0));
             }
+            // R (no Ctrl): reset the view, same as Home / Backspace.
+            (_, Some("r")) | (_, Some("R")) => self.reset_view_full(),
             (_, Some("p")) | (_, Some("P")) => {
                 let want = !self.camera.is_panorama();
                 self.camera.set_mode(want);
@@ -2108,6 +2150,8 @@ impl App {
                 },
             ),
             ("View".into(), view),
+            ("Exposure".into(), fmt_ev(self.exposure)),
+            ("Gamma".into(), format!("{:.2}", self.gamma)),
         ]
     }
 

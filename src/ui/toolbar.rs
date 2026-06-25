@@ -59,18 +59,8 @@ pub fn build_toolbar(
                 state.confirm_default = false;
             }
 
-            // Image dimensions / channels / depth live in the F2 metadata box;
-            // the sidebar only shows the current tone adjustments.
-            if inputs.has_image {
-                ui.separator();
-                ui.label(
-                    egui::RichText::new(format!(
-                        "EV {:+.2}   Gamma {:.2}",
-                        inputs.exposure, inputs.gamma
-                    ))
-                    .color(egui::Color32::from_gray(180)),
-                );
-            }
+            // Image stats and the current EV / Gamma now live in the F2
+            // metadata box, so the sidebar has no status line.
         });
 
     // View-transform submenu (second column).

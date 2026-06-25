@@ -671,6 +671,8 @@ impl App {
         // Crisp multi-resolution title-bar + taskbar icon. Position was set at
         // creation (restored or centred), so no post-creation move here.
         set_window_icons(&window);
+        // Round the borderless window's corners per the saved preference.
+        apply_window_corners(&window, self.prefs.corner_radius);
 
         Ok(Gfx {
             gl,
@@ -2124,6 +2126,7 @@ impl App {
             icon: self.titlebar_icon.clone(),
             monitors: self.monitor_list(),
             startup_display: self.prefs.startup_monitor.clone(),
+            corner_radius: self.prefs.corner_radius,
             is_maximized: self.gfx.as_ref().is_some_and(|g| g.window.is_maximized()),
             resize_cursor: if self.dragging || self.window_drag_armed {
                 None
@@ -2318,6 +2321,15 @@ impl App {
                     }
                     .to_string(),
                 );
+            }
+            UiAction::SetCornerRadius(radius) => {
+                self.prefs.corner_radius = radius;
+                self.prefs.save();
+                // Apply live (unless fullscreen/maximized, which stay square).
+                if let Some(gfx) = &self.gfx {
+                    let rounded = !self.fullscreen && !gfx.window.is_maximized();
+                    apply_window_corners(&gfx.window, if rounded { radius } else { 0 });
+                }
             }
             // Borderless titlebar controls.
             UiAction::DragWindow => {
@@ -2574,6 +2586,13 @@ impl ApplicationHandler<UserEvent> for App {
                     {
                         gfx.gl_surface.resize(&gfx.gl_context, w, h);
                     }
+                    // The window region is in window-local pixels, so re-round
+                    // the corners at the new size. Fullscreen/maximized windows
+                    // fill their area with square corners (radius 0 clears the
+                    // region), so the old rounded region can't clip them.
+                    let rounded = !self.fullscreen && !gfx.window.is_maximized();
+                    let radius = if rounded { self.prefs.corner_radius } else { 0 };
+                    apply_window_corners(&gfx.window, radius);
                 }
                 // Redraw synchronously so the new surface size is presented this
                 // frame (otherwise the previous frame shows stretched). Pass
@@ -3086,6 +3105,47 @@ fn set_window_outer_rect(window: &Window, x: i32, y: i32, w: u32, h: u32) -> boo
     let _ = window.request_inner_size(PhysicalSize::new(w, h));
     true
 }
+
+/// Clip the window to a rounded rectangle of `radius` physical pixels (0 = square)
+/// via a Win32 window region. Must be re-applied whenever the window size changes
+/// (the region is in window-local pixels). DWM corner presets only offer fixed
+/// sizes, so an explicit region is used to honour an arbitrary radius.
+#[cfg(windows)]
+fn apply_window_corners(window: &Window, radius: u32) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
+    let size = window.outer_size();
+    let (w, h) = (size.width as i32, size.height as i32);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    // SAFETY: `hwnd` is a live top-level window owned by `window`. SetWindowRgn
+    // takes ownership of the new region (freeing any previous one); a null region
+    // clears it back to a plain rectangle.
+    unsafe {
+        let rgn = if radius > 0 {
+            // Right/bottom are exclusive, so +1 to include the last column/row.
+            CreateRoundRectRgn(0, 0, w + 1, h + 1, radius as i32 * 2, radius as i32 * 2)
+        } else {
+            std::ptr::null_mut()
+        };
+        // bRedraw = 0: the GL scene is presented via swap_buffers every frame, so
+        // the new clip shows on the next swap without forcing an extra repaint
+        // (which would fight the geometry animation).
+        SetWindowRgn(hwnd, rgn, 0);
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_window_corners(_window: &Window, _radius: u32) {}
 
 /// Set the window's title-bar (small) and taskbar (big) icons from the bundled
 /// multi-resolution `app_icon.ico`, picking the exact native pixel sizes so they

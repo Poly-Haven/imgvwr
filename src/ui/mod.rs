@@ -71,6 +71,8 @@ pub struct UiInputs {
     pub monitors: Vec<(String, String)>,
     /// The configured startup monitor name (`None` = remember last position).
     pub startup_display: Option<String>,
+    /// Window corner radius in pixels (0 = square), for the settings spinner.
+    pub corner_radius: u32,
     /// Whether the window is maximized (drives the maximize/restore glyph).
     pub is_maximized: bool,
     /// Resize cursor for a borderless edge under the pointer (set via egui so it
@@ -133,6 +135,8 @@ pub enum UiAction {
     SetDefaultApp,
     /// Set the monitor to open on by default (`None` = remember last position).
     SetStartupDisplay(Option<String>),
+    /// Set the window corner radius (pixels) and re-apply it live.
+    SetCornerRadius(u32),
     // Borderless titlebar controls.
     /// Start an OS window move (titlebar drag).
     DragWindow,

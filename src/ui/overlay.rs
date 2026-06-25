@@ -115,6 +115,21 @@ fn settings_dialog(
                 });
                 ui.add_space(14.0);
 
+                // Window corner radius (live).
+                ui.horizontal(|ui| {
+                    ui.label("Window corner radius:");
+                    let mut radius = inputs.corner_radius;
+                    let resp = ui.add(
+                        egui::DragValue::new(&mut radius)
+                            .range(0..=40)
+                            .suffix(" px"),
+                    );
+                    if resp.changed() {
+                        actions.push(UiAction::SetCornerRadius(radius));
+                    }
+                });
+                ui.add_space(14.0);
+
                 // Set as default viewer, with a confirmation step.
                 if state.confirm_default {
                     ui.label("Make imgvwr the default viewer for all supported image types?");

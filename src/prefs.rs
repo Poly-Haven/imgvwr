@@ -40,6 +40,13 @@ pub struct AppPreferences {
     /// last-used position (restore `window`).
     #[serde(default)]
     pub startup_monitor: Option<String>,
+    /// Window corner radius in physical pixels (0 = square corners).
+    #[serde(default = "default_corner_radius")]
+    pub corner_radius: u32,
+}
+
+fn default_corner_radius() -> u32 {
+    4
 }
 
 impl Default for AppPreferences {
@@ -49,6 +56,7 @@ impl Default for AppPreferences {
             preferred_view_by_filetype: HashMap::new(),
             window: None,
             startup_monitor: None,
+            corner_radius: default_corner_radius(),
         }
     }
 }

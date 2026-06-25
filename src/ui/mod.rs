@@ -42,6 +42,8 @@ pub struct UiInputs {
     /// Clarity (local-contrast) strength and radius for the bottom-panel sliders.
     pub clarity_amount: f32,
     pub clarity_radius: f32,
+    /// Image↔screen mapping for the pixel rulers (2D only; `None` hides them).
+    pub ruler: Option<RulerInfo>,
 
     // Overlays (Commit 9).
     pub loading: bool,
@@ -109,6 +111,22 @@ impl UiInputs {
     }
 }
 
+/// The 2D image↔screen mapping the rulers need. Screen UV (`v_uv`, GL y-up) maps
+/// to image uv as `uv = 0.5 + pan + (v_uv - 0.5) * s` (y negated); image pixel =
+/// `uv * size`. Resolution-independent, so the UI applies it against the egui
+/// `screen_rect` (points).
+#[derive(Clone, Copy)]
+pub struct RulerInfo {
+    pub sx: f32,
+    pub sy: f32,
+    pub pan_u: f32,
+    pub pan_v: f32,
+    pub img_w: f32,
+    pub img_h: f32,
+    /// Reveal progress (shared with the bottom panel).
+    pub slide: f32,
+}
+
 /// Transient UI state that persists across frames.
 #[derive(Default)]
 pub struct UiState {
@@ -153,6 +171,11 @@ pub enum UiAction {
     SetClarity(f32),
     /// Set the Clarity blur radius (viewport px) from the bottom-panel slider.
     SetClarityRadius(f32),
+    /// Add a guide line dragged from a ruler: image uv coord, horizontal?
+    AddGuide {
+        coord: f32,
+        horizontal: bool,
+    },
     /// Open the settings dialog (titlebar gear button).
     OpenSettings,
     // Borderless titlebar controls.

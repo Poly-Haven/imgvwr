@@ -51,11 +51,139 @@ pub fn build_overlays(
 
     settings_dialog(ctx, inputs, state, actions);
 
+    // Pixel rulers along the left/bottom edges (drag from them to add a guide).
+    rulers(ctx, inputs, actions);
+
     // Auto-hiding bottom panel with the tone (and, later, more) sliders.
     bottom_panel(ctx, inputs, state, actions);
 
     // Auto-hiding borderless titlebar, drawn last so its controls sit on top.
     titlebar(ctx, inputs, actions);
+}
+
+/// Pixel rulers on the left and bottom edges (2D only). Ticks land on real image
+/// pixels: 20px @100, 12px @50, 7px @10, 4px @5 (a level is skipped once its ticks
+/// would be closer than ~3px on screen). Dragging from a ruler into the image adds
+/// a guide. Reveals/slides with the bottom panel.
+fn rulers(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
+    let Some(r) = inputs.ruler else {
+        return;
+    };
+    let slide = r.slide.clamp(0.0, 1.0);
+    if slide <= 0.001 {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    let (vw, vh) = (screen.width(), screen.height());
+    // image pixel -> screen position (egui points), mirroring the 2D shader.
+    let ex = |px: f32| screen.left() + vw * (0.5 + (px / r.img_w - 0.5 - r.pan_u) / r.sx);
+    let ey = |py: f32| screen.top() + vh * (0.5 - (0.5 + r.pan_v - py / r.img_h) / r.sy);
+    // screen position -> image uv (0..1).
+    let uv_x = |sx: f32| 0.5 + r.pan_u + ((sx - screen.left()) / vw - 0.5) * r.sx;
+    let uv_y = |sy: f32| 0.5 + r.pan_v - ((1.0 - (sy - screen.top()) / vh) - 0.5) * r.sy;
+
+    let ppx_x = (vw / (r.img_w * r.sx)).abs();
+    let ppx_y = (vh / (r.img_h * r.sy)).abs();
+    const LEVELS: [(f32, f32, f32); 4] = [
+        (100.0, 20.0, 0.0),
+        (50.0, 12.0, 100.0),
+        (10.0, 7.0, 50.0),
+        (5.0, 4.0, 10.0),
+    ];
+    const RW: f32 = 24.0; // ruler strip thickness
+    const PANEL_H: f32 = 52.0; // keep the bottom ruler above the slider panel
+    let tick_col = egui::Color32::from_gray(210);
+    let stroke = egui::Stroke::new(1.0, tick_col);
+
+    // --- Bottom ruler (x-axis): a strip above the panel, ticks pointing up. ---
+    let base_y = screen.bottom() - PANEL_H + (1.0 - slide) * (PANEL_H + RW + 12.0);
+    let bottom_rect = egui::Rect::from_min_max(
+        egui::pos2(screen.left(), base_y - RW),
+        egui::pos2(screen.right(), base_y),
+    );
+    let bottom = egui::Area::new(egui::Id::new("imgvwr_ruler_bottom"))
+        .fixed_pos(bottom_rect.min)
+        .order(egui::Order::Middle)
+        .constrain(false)
+        .show(ctx, |ui| {
+            let (_, resp) = ui.allocate_exact_size(bottom_rect.size(), egui::Sense::drag());
+            let p = ui.painter();
+            p.rect_filled(bottom_rect, 0.0, panel_bg());
+            let (px0, px1) = (
+                uv_x(screen.left()) * r.img_w,
+                uv_x(screen.right()) * r.img_w,
+            );
+            for (interval, len, coarser) in LEVELS {
+                if interval * ppx_x < 3.0 {
+                    continue;
+                }
+                for k in (px0.min(px1) / interval).floor() as i64
+                    ..=(px0.max(px1) / interval).ceil() as i64
+                {
+                    let pos = k as f32 * interval;
+                    if pos < 0.0 || pos > r.img_w || (coarser > 0.0 && (pos % coarser).abs() < 0.5)
+                    {
+                        continue;
+                    }
+                    let x = ex(pos);
+                    p.line_segment([egui::pos2(x, base_y), egui::pos2(x, base_y - len)], stroke);
+                }
+            }
+            resp
+        });
+    if bottom.inner.drag_stopped() {
+        if let Some(pt) = ctx.pointer_interact_pos() {
+            actions.push(UiAction::AddGuide {
+                coord: uv_x(pt.x),
+                horizontal: false,
+            });
+        }
+    }
+
+    // --- Left ruler (y-axis): a strip on the left edge, ticks pointing right. ---
+    let base_x = screen.left() - (1.0 - slide) * (RW + 12.0);
+    let left_rect = egui::Rect::from_min_max(
+        egui::pos2(base_x, screen.top() + TITLEBAR_H),
+        egui::pos2(base_x + RW, screen.bottom() - PANEL_H),
+    );
+    let left = egui::Area::new(egui::Id::new("imgvwr_ruler_left"))
+        .fixed_pos(left_rect.min)
+        .order(egui::Order::Middle)
+        .constrain(false)
+        .show(ctx, |ui| {
+            let (_, resp) = ui.allocate_exact_size(left_rect.size(), egui::Sense::drag());
+            let p = ui.painter();
+            p.rect_filled(left_rect, 0.0, panel_bg());
+            let (py0, py1) = (
+                uv_y(left_rect.top()) * r.img_h,
+                uv_y(left_rect.bottom()) * r.img_h,
+            );
+            for (interval, len, coarser) in LEVELS {
+                if interval * ppx_y < 3.0 {
+                    continue;
+                }
+                for k in (py0.min(py1) / interval).floor() as i64
+                    ..=(py0.max(py1) / interval).ceil() as i64
+                {
+                    let pos = k as f32 * interval;
+                    if pos < 0.0 || pos > r.img_h || (coarser > 0.0 && (pos % coarser).abs() < 0.5)
+                    {
+                        continue;
+                    }
+                    let y = ey(pos);
+                    p.line_segment([egui::pos2(base_x, y), egui::pos2(base_x + len, y)], stroke);
+                }
+            }
+            resp
+        });
+    if left.inner.drag_stopped() {
+        if let Some(pt) = ctx.pointer_interact_pos() {
+            actions.push(UiAction::AddGuide {
+                coord: uv_y(pt.y),
+                horizontal: true,
+            });
+        }
+    }
 }
 
 /// Auto-hiding bottom panel of image-adjustment sliders (revealed by the cursor

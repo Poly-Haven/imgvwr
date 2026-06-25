@@ -1941,6 +1941,29 @@ impl App {
         self.cursor_pos.y <= 56.0 * scale
     }
 
+    /// The image↔screen mapping the pixel rulers need (2D only). Mirrors the
+    /// shader's 2D UV mapping so ticks land on real image pixels.
+    fn ruler_info(&self) -> Option<crate::ui::RulerInfo> {
+        if self.camera.is_panorama() || self.file_info.width == 0 || self.bottom_slide <= 0.001 {
+            return None;
+        }
+        let (vw, vh) = self.viewport();
+        let cam = &self.camera.camera;
+        let img_w = self.file_info.width as f32;
+        let img_h = self.file_info.height as f32;
+        let image_aspect = (img_w / img_h).max(1e-4);
+        let inv_zoom = cam.tan_half_fov();
+        Some(crate::ui::RulerInfo {
+            sx: inv_zoom * (vw / vh) / image_aspect / self.image_stretch.x,
+            sy: inv_zoom / self.image_stretch.y,
+            pan_u: cam.yaw() / std::f32::consts::TAU,
+            pan_v: -cam.pitch() / std::f32::consts::PI,
+            img_w,
+            img_h,
+            slide: self.bottom_slide,
+        })
+    }
+
     /// Whether the F2 metadata box should be revealed: toggled on (F2), the
     /// cursor near the top-right on a large-enough window, or hovering the box.
     fn metadata_should_show(&self) -> bool {
@@ -2349,6 +2372,7 @@ impl App {
             gamma: self.gamma_target,
             clarity_amount: self.clarity_amount,
             clarity_radius: self.clarity_radius,
+            ruler: self.ruler_info(),
             loading,
             progress,
             loading_name: self.pending_name.clone(),
@@ -2591,6 +2615,7 @@ impl App {
                 self.clarity_radius = v.clamp(8.0, 256.0);
                 self.request_redraw();
             }
+            UiAction::AddGuide { coord, horizontal } => self.add_guide(coord, horizontal),
             UiAction::OpenSettings => {
                 self.ui_state.show_settings = true;
                 self.ui_state.confirm_default = false;

@@ -19,6 +19,12 @@ pub fn build(
 ) {
     toolbar::build_toolbar(ctx, inputs, state, actions);
     overlay::build_overlays(ctx, inputs, state, actions);
+    // Borderless edge resize cursor, applied last so it overrides widget cursors
+    // at the very border. Routing it through egui (rather than winit directly)
+    // means egui-winit resets it when the pointer leaves the edge.
+    if let Some(c) = inputs.resize_cursor {
+        ctx.set_cursor_icon(c);
+    }
 }
 
 /// Immutable per-frame inputs handed to the UI (gathered from `App` before the
@@ -59,6 +65,9 @@ pub struct UiInputs {
     pub title: String,
     /// Whether the window is maximized (drives the maximize/restore glyph).
     pub is_maximized: bool,
+    /// Resize cursor for a borderless edge under the pointer (set via egui so it
+    /// resets correctly when the pointer leaves the edge).
+    pub resize_cursor: Option<egui::CursorIcon>,
 }
 
 impl UiInputs {

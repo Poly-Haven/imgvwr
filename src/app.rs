@@ -50,7 +50,7 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::monitor::MonitorHandle;
-use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, ResizeDirection, Window, WindowId};
+use winit::window::{CursorGrabMode, Fullscreen, ResizeDirection, Window, WindowId};
 
 use crate::camera::{Camera, CameraController};
 use crate::image_loader::{
@@ -205,6 +205,9 @@ pub struct App {
     modifiers: ModifiersState,
     dragging: bool,
     cursor_pos: PhysicalPosition<f64>,
+    /// Cursor position when a pan/look drag began, restored on release (a
+    /// confined/locked grab otherwise drops the cursor at the window centre).
+    drag_start_cursor: PhysicalPosition<f64>,
     last_left_press: Option<Instant>,
     fullscreen: bool,
     /// True once the user manually resizes the window: the window then stops
@@ -339,6 +342,7 @@ impl App {
             // Start far from the left edge so the toolbar stays hidden until the
             // cursor actually moves there (and so headless captures are clean).
             cursor_pos: PhysicalPosition::new(1.0e6, 1.0e6),
+            drag_start_cursor: PhysicalPosition::new(0.0, 0.0),
             last_left_press: None,
             fullscreen: false,
             manual_window: false,
@@ -666,10 +670,12 @@ impl App {
     /// image overflows (panned into). The target zoom is re-derived from the
     /// (capped) window height so the dialled-in pixel scale is kept, and the
     /// rendered zoom then *eases* toward it within the (already-resized) window —
-    /// the window is never resized per animation frame. No-op in panorama mode,
-    /// when maximized/fullscreen, or after a manual resize.
+    /// the window is never resized per animation frame. No-op in panorama mode or
+    /// when maximized/fullscreen. A zoom re-asserts the follow even after a manual
+    /// resize (the manual size persists only until the next zoom), so the window
+    /// re-hugs the image and no black canvas is left around it.
     fn follow_zoom_with_window(&mut self) {
-        if self.manual_window || self.fullscreen {
+        if self.fullscreen {
             return;
         }
         let Some(zoom) = self.camera.target_zoom() else {
@@ -684,6 +690,8 @@ impl App {
             Some(gfx) => gfx.window.current_monitor(),
             None => return,
         };
+        // A zoom overrides any earlier manual resize.
+        self.manual_window = false;
         let (_, vh) = self.viewport();
         // Target on-screen scale: device pixels per image pixel (100% == 1.0).
         let scale = zoom * vh / img_h as f32;
@@ -1225,6 +1233,7 @@ impl App {
 
     fn start_drag(&mut self) {
         self.dragging = true;
+        self.drag_start_cursor = self.cursor_pos;
         if let Some(gfx) = &self.gfx {
             // Confine (fallback to lock) so look-around/pan is unbounded; hide
             // the cursor for the duration of the gesture.
@@ -1246,6 +1255,9 @@ impl App {
         self.dragging = false;
         if let Some(gfx) = &self.gfx {
             let _ = gfx.window.set_cursor_grab(CursorGrabMode::None);
+            // Put the cursor back where the drag began (a confined/locked grab
+            // leaves it at the window centre otherwise).
+            let _ = gfx.window.set_cursor_position(self.drag_start_cursor);
             gfx.window.set_cursor_visible(true);
         }
     }
@@ -1485,7 +1497,10 @@ impl App {
     /// doesn't overflow the viewport — a body left-drag then moves the window
     /// rather than panning. Always false in panorama mode.
     fn image_fits_viewport(&self) -> bool {
-        let Camera::Flat { zoom, .. } = self.camera.camera else {
+        // Use the zoom *target*, not the in-flight eased value, so a press that
+        // lands mid-animation is decided by the destination (consistently a
+        // window-move once zoomed out, not a pan).
+        let Camera::Flat { zoom, .. } = self.camera.target() else {
             return false;
         };
         let (vw, vh) = self.viewport();
@@ -1722,6 +1737,24 @@ impl App {
             },
             title: self.file_info.name.clone(),
             is_maximized: self.gfx.as_ref().is_some_and(|g| g.window.is_maximized()),
+            resize_cursor: if self.dragging || self.window_drag_armed {
+                None
+            } else {
+                self.resize_edge_at_cursor().map(|d| match d {
+                    ResizeDirection::East | ResizeDirection::West => {
+                        egui::CursorIcon::ResizeHorizontal
+                    }
+                    ResizeDirection::North | ResizeDirection::South => {
+                        egui::CursorIcon::ResizeVertical
+                    }
+                    ResizeDirection::NorthEast | ResizeDirection::SouthWest => {
+                        egui::CursorIcon::ResizeNeSw
+                    }
+                    ResizeDirection::NorthWest | ResizeDirection::SouthEast => {
+                        egui::CursorIcon::ResizeNwSe
+                    }
+                })
+            },
         }
     }
 
@@ -1970,13 +2003,6 @@ impl App {
         self.tick_toolbar();
         self.tick_metadata();
 
-        // Resize cursor for the borderless edges (applied after egui paints, so
-        // it overrides egui's own cursor at the very border).
-        let resize_cursor = (!self.dragging && !self.window_drag_armed)
-            .then(|| self.resize_edge_at_cursor())
-            .flatten()
-            .map(resize_cursor_icon);
-
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();
         let cam = self.camera.camera;
@@ -2019,10 +2045,6 @@ impl App {
                 ui::build(ctx, &inputs, ui_state, &mut actions);
             });
             gfx.egui.paint(&gfx.window);
-            // Override egui's cursor with the resize cursor on the window edges.
-            if let Some(icon) = resize_cursor {
-                gfx.window.set_cursor(icon);
-            }
 
             if capture_ready {
                 let mut buf = vec![0u8; (w * h * 4) as usize];
@@ -2571,16 +2593,6 @@ fn toprow_digit(key: &PhysicalKey) -> Option<u32> {
         KeyCode::Digit9 => 9,
         _ => return None,
     })
-}
-
-/// The cursor icon for a window-resize direction.
-fn resize_cursor_icon(dir: ResizeDirection) -> CursorIcon {
-    match dir {
-        ResizeDirection::East | ResizeDirection::West => CursorIcon::EwResize,
-        ResizeDirection::North | ResizeDirection::South => CursorIcon::NsResize,
-        ResizeDirection::NorthEast | ResizeDirection::SouthWest => CursorIcon::NeswResize,
-        ResizeDirection::NorthWest | ResizeDirection::SouthEast => CursorIcon::NwseResize,
-    }
 }
 
 /// Atomically move and resize the window to the given OUTER rect (physical px)

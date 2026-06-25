@@ -213,6 +213,10 @@ pub struct App {
     /// Clarity (local-contrast) strength (0 = off) and blur radius (viewport px).
     clarity_amount: f32,
     clarity_radius: f32,
+    /// Per-axis image squash/stretch (Alt+middle-drag); 1,1 = none.
+    image_stretch: Vec2,
+    /// Active Alt+middle-drag squash/stretch gesture.
+    stretching: bool,
     show_metadata: bool,
 
     // Colour management.
@@ -381,6 +385,8 @@ impl App {
             isolate_channel: None,
             clarity_amount: 0.0,
             clarity_radius: 64.0,
+            image_stretch: Vec2::ONE,
+            stretching: false,
             show_metadata: false,
             ocio,
             last_view: None,
@@ -1140,6 +1146,7 @@ impl App {
             self.exposure_target = self.exposure;
             self.gamma_target = self.gamma;
             self.isolate_channel = None;
+            self.image_stretch = Vec2::ONE;
         }
         self.load_state = LoadState::Loaded;
         self.update_window_title();
@@ -1331,6 +1338,8 @@ impl App {
             self.camera.set_zoom(1.0);
             self.camera.set_pan_target(Vec2::ZERO);
         }
+        // Reset the geometric squash/stretch too.
+        self.image_stretch = Vec2::ONE;
         // Re-frame the window to the image's default (framed) size for both 2D
         // and panorama (panoramas frame to their 2:1 aspect, capped to 90%).
         self.resize_window_to_image(self.file_info.width, self.file_info.height);
@@ -2132,7 +2141,15 @@ impl App {
                     self.dblclick_motion = 0.0;
                 }
             }
-            (ElementState::Pressed, MouseButton::Middle) => self.start_drag(),
+            (ElementState::Pressed, MouseButton::Middle) => {
+                // Alt + middle-drag squashes/stretches the image within the same
+                // window (to inspect line straightness); otherwise pan/look.
+                if self.modifiers.alt_key() {
+                    self.stretching = true;
+                } else {
+                    self.start_drag();
+                }
+            }
             (ElementState::Released, MouseButton::Left) => {
                 let was_window_drag = self.window_drag_armed;
                 self.window_drag_armed = false;
@@ -2154,7 +2171,13 @@ impl App {
                     }
                 }
             }
-            (ElementState::Released, MouseButton::Middle) => self.end_drag(),
+            (ElementState::Released, MouseButton::Middle) => {
+                if self.stretching {
+                    self.stretching = false;
+                } else {
+                    self.end_drag();
+                }
+            }
             _ => {}
         }
     }
@@ -2185,6 +2208,9 @@ impl App {
         }
         if let Some(v) = f("IMGVWR_DEBUG_CLARITY_RADIUS") {
             self.clarity_radius = v;
+        }
+        if let Some(v) = f("IMGVWR_DEBUG_STRETCH_X") {
+            self.image_stretch.x = v;
         }
         if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
             self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
@@ -2649,6 +2675,7 @@ impl App {
             nearest: self.nearest_filter,
             background: srgb_u8_to_f32(self.prefs.background_color),
             isolate_channel: self.isolate_channel.map(|c| c as i32).unwrap_or(-1),
+            stretch: [self.image_stretch.x, self.image_stretch.y],
             clarity_amount: self.clarity_amount,
             clarity_radius: self.clarity_radius,
         };
@@ -2910,7 +2937,15 @@ impl ApplicationHandler<UserEvent> for App {
         if let DeviceEvent::MouseMotion { delta } = event {
             // (Alt-resize is driven by CursorMoved, which tracks the visible
             // cursor 1:1 — not raw device motion.)
-            if self.dragging {
+            if self.stretching {
+                // Alt+middle-drag: right→wider, up→taller (multiplicative).
+                const SENS: f32 = 0.004;
+                self.image_stretch.x =
+                    (self.image_stretch.x * (1.0 + delta.0 as f32 * SENS)).clamp(0.2, 5.0);
+                self.image_stretch.y =
+                    (self.image_stretch.y * (1.0 - delta.1 as f32 * SENS)).clamp(0.2, 5.0);
+                self.request_redraw();
+            } else if self.dragging {
                 self.on_drag_motion(delta.0 as f32, delta.1 as f32);
             } else if self.window_drag_armed {
                 // Past the click threshold, hand off to the OS move loop (so

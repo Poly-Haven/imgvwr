@@ -47,6 +47,8 @@ pub struct RenderParams {
     pub background: [f32; 3],
     /// Channel to isolate as greyscale: -1 = all, 0=R 1=G 2=B 3=A.
     pub isolate_channel: i32,
+    /// Per-axis image squash/stretch (1,1 = none).
+    pub stretch: [f32; 2],
     /// Clarity (local-contrast) strength; 0 bypasses the whole post chain.
     pub clarity_amount: f32,
     /// Clarity unsharp-mask blur radius, in viewport pixels.
@@ -69,6 +71,7 @@ impl Default for RenderParams {
             nearest: false,
             background: [0.02, 0.02, 0.02],
             isolate_channel: -1,
+            stretch: [1.0, 1.0],
             clarity_amount: 0.0,
             clarity_radius: 64.0,
         }
@@ -88,6 +91,7 @@ struct Uniforms {
     input_is_encoded_srgb: Option<glow::UniformLocation>,
     wrap_2d: Option<glow::UniformLocation>,
     isolate_channel: Option<glow::UniformLocation>,
+    stretch: Option<glow::UniformLocation>,
     // Single-texture sampler.
     image: Option<glow::UniformLocation>,
     // Tiled-texture sampler + grid.
@@ -116,6 +120,7 @@ impl Uniforms {
             input_is_encoded_srgb: u("u_input_is_encoded_srgb"),
             wrap_2d: u("u_wrap_2d"),
             isolate_channel: u("u_isolate_channel"),
+            stretch: u("u_stretch"),
             image: u("u_image"),
             tiles: u("u_tiles"),
             tile_cols: u("u_tile_cols"),
@@ -407,6 +412,7 @@ impl Renderer {
             );
             gl.uniform_1_i32(u.wrap_2d.as_ref(), params.wrap_2d as i32);
             gl.uniform_1_i32(u.isolate_channel.as_ref(), params.isolate_channel);
+            gl.uniform_2_f32(u.stretch.as_ref(), params.stretch[0], params.stretch[1]);
 
             // Min/mag filters for the active interpolation mode (I key).
             let (min_f, mag_f) = if params.nearest {

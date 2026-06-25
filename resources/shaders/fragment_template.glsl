@@ -15,6 +15,7 @@ uniform float u_image_aspect;
 uniform bool  u_input_is_encoded_srgb;  // true when source pixels are sRGB-encoded (JPEG / LDR PNG)
 uniform bool  u_wrap_2d;             // 2D mode: repeat the image instead of clamping
 uniform int   u_isolate_channel;     // -1 = all channels; 0=R 1=G 2=B 3=A shown as greyscale
+uniform vec2  u_stretch;             // per-axis image squash/stretch (1,1 = none)
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -61,8 +62,10 @@ void main() {
         vec2 centered = v_uv - vec2(0.5);
         float pan_u = u_yaw  / (2.0 * PI);
         float pan_v = -u_pitch / PI;
-        float sx = inv_zoom * (u_aspect / max(u_image_aspect, 0.0001));
-        float sy = inv_zoom;
+        // Dividing the screen->image scale by u_stretch makes the image appear
+        // wider/taller (squash/stretch for inspecting line straightness).
+        float sx = inv_zoom * (u_aspect / max(u_image_aspect, 0.0001)) / u_stretch.x;
+        float sy = inv_zoom / u_stretch.y;
         vec2 raw_uv = vec2(0.5 + pan_u + centered.x * sx,
                            0.5 + pan_v - centered.y * sy);
         if (!u_wrap_2d &&
@@ -80,7 +83,7 @@ void main() {
         texel = sample_image(uv);
     } else {
         // -- Rectilinear equirectangular projection ----------------------
-        vec2 ndc = v_uv * 2.0 - 1.0;
+        vec2 ndc = (v_uv * 2.0 - 1.0) / u_stretch;
         vec3 ray = normalize(vec3(ndc.x * u_aspect * u_tan_half_fov,
                                   ndc.y * u_tan_half_fov,
                                   1.0));

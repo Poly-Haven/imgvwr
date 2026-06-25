@@ -1009,7 +1009,7 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
                 ("Ctrl + , / .", "Gamma −/+"),
                 ("[ / ]", "Clarity radius −/+"),
                 ("; / '", "Clarity strength −/+"),
-                ("Ctrl + R", "Reset exposure & gamma"),
+                ("Ctrl + R", "Reset all adjustments"),
                 ("T", "Standard / last view transform"),
                 ("O", "Open file…"),
                 ("← / →", "Previous / next image"),
@@ -1029,10 +1029,21 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
             ],
         ),
         (
+            "Inspect",
+            &[
+                ("S", "Sharpness (original res)"),
+                ("Alt + middle-drag", "Squash / stretch image"),
+                ("G", "Guide at the horizon"),
+                ("Drag from a ruler", "Add a guide line"),
+                ("Channel boxes (F2)", "Isolate R/G/B/A"),
+            ],
+        ),
+        (
             "Compare",
             &[
                 ("Ctrl + 1–9", "Save to comparator slot"),
                 ("1–9 (top row)", "Recall slot (again = back)"),
+                ("Alt + 1–9", "Difference vs that slot"),
                 ("L", "Lock zoom/pan across images"),
                 ("H", "This help"),
             ],

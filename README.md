@@ -42,11 +42,21 @@ for Windows.
 | `Ctrl + ,` / `Ctrl + .` | Gamma −/+ 0.1 |
 | `[` / `]` | Clarity (local contrast) radius −/+ |
 | `;` / `'` | Clarity strength −/+ (0 = off; crank high to make issues pop) |
-| `Ctrl + R` | Reset exposure & gamma |
+| `Ctrl + R` | Reset all adjustments (exposure, gamma, clarity, channel, sharpness, diff) |
 | `T` | Toggle Standard ↔ last-used view transform |
 | `O` | Open file… |
 | `←` / `→` | Previous / next image in the folder (alphabetical) |
 | `F2` | Toggle metadata overlay (also appears on top-right hover) |
+
+### Inspect / review
+
+| Input | Action |
+|---|---|
+| `S` | Sharpness checker — high-pass of the **original** resolution |
+| `G` | Add a horizontal guide at the horizon (50% image height) |
+| Drag from a ruler | Add a guide line (rulers reveal with the bottom panel, 2D) |
+| `Alt` + middle-drag | Squash / stretch the image non-uniformly (line straightness) |
+| Channel boxes (`F2`) | Click to isolate R / G / B / A as greyscale |
 
 ### Window (borderless)
 
@@ -68,6 +78,7 @@ for Windows.
 |---|---|
 | `Ctrl` + `1`–`9` | Save the current image to a comparator slot |
 | `1`–`9` (top row) | Recall a saved slot; press again to toggle back |
+| `Alt` + `1`–`9` | Show the difference vs that slot's image (processing applies to the diff) |
 | `L` | Lock zoom/pan across images |
 | `H` | Show keyboard / mouse help |
 

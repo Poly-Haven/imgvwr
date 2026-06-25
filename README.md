@@ -26,13 +26,16 @@ for Windows.
 | `Ctrl + ,` / `Ctrl + .` | Gamma −/+ 0.1 |
 | `Ctrl + R` | Reset exposure & gamma |
 | Numpad `1`–`9` | Zoom in `2^(N-1)×` (1=100%, 2=200%, 3=400%…); with `Ctrl`, zoom out |
+| Shift / Ctrl + drag | Lock pan/look to the horizontal / vertical axis |
 | `←` / `→` | Previous / next image in the folder (alphabetical) |
+| `Ctrl` + `1`–`9` | Save the current image to a comparator slot |
+| `1`–`9` (top row) | Recall a saved slot; press again to toggle back |
 | `L` | Lock zoom/pan across images |
 | `P` | Toggle 2D ↔ panorama mode |
 | `W` | Toggle tiled wrap (2D) |
 | `T` | Toggle Standard ↔ last-used view transform |
 | `O` | Open file… |
-| `F2` | Toggle metadata overlay |
+| `F2` | Toggle metadata overlay (also appears on top-right hover) |
 | `H` | Show keyboard / mouse help |
 | `Home` | Reset view (fit) |
 | Move cursor to left edge | Show toolbar overlay |
@@ -41,9 +44,14 @@ for Windows.
 
 Arrow-key navigation pre-decodes the next image in the background so stepping
 through a folder is instant. **L** locks the current zoom/pan (and exposure) so
-they carry across images of the same kind for side-by-side comparison. For 2D
-images, numpad zoom is exact (100 % = 1 image pixel per monitor pixel); for
-panoramas it maps to an equivalent field of view.
+they carry across images of the same kind for side-by-side comparison.
+
+**Comparator:** `Ctrl`+`1`…`9` pins the current image in a numbered slot (kept
+in memory across navigation). Pressing the bare number recalls it for an instant
+A/B comparison — preserving the view and showing each image at its native
+resolution (different-sized images are not scaled to match). Pressing the same
+number again flips back to what you were viewing. Saved slots appear as small
+numbered flags at the top-right; the active one is highlighted.
 
 ## Supported formats
 

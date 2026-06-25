@@ -54,16 +54,10 @@ pub fn build_toolbar(
                 }
             }
 
-            ui.separator();
-            ui.label(
-                egui::RichText::new(if inputs.file_info.is_empty() {
-                    "No image".to_string()
-                } else {
-                    inputs.file_info.clone()
-                })
-                .color(egui::Color32::from_gray(180)),
-            );
+            // Image dimensions / channels / depth live in the F2 metadata box;
+            // the sidebar only shows the current tone adjustments.
             if inputs.has_image {
+                ui.separator();
                 ui.label(
                     egui::RichText::new(format!(
                         "EV {:+.2}   Gamma {:.2}",

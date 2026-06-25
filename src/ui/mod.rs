@@ -12,7 +12,7 @@ pub fn build(
     actions: &mut Vec<UiAction>,
 ) {
     toolbar::build_toolbar(ctx, inputs, state, actions);
-    overlay::build_overlays(ctx, inputs, actions);
+    overlay::build_overlays(ctx, inputs, state, actions);
 }
 
 /// Immutable per-frame inputs handed to the UI (gathered from `App` before the
@@ -20,7 +20,6 @@ pub fn build(
 pub struct UiInputs {
     pub toolbar_visible: bool,
     pub has_image: bool,
-    pub file_info: String,
     /// All `(display, view)` pairs from the active OCIO config.
     pub display_views: Vec<(String, String)>,
     pub active: Option<(String, String)>,
@@ -39,6 +38,10 @@ pub struct UiInputs {
     pub show_help: bool,
     /// Transient bottom-right toast: `(text, alpha)`, drawn while alpha > 0.
     pub toast: Option<(String, f32)>,
+    /// Which comparator slots (1..=9 → index 0..=8) currently hold an image.
+    pub slots_saved: [bool; 9],
+    /// The slot whose image is currently displayed (for flag highlighting).
+    pub active_slot: Option<usize>,
 }
 
 impl UiInputs {
@@ -70,6 +73,8 @@ pub struct UiState {
     pub browse_display: Option<String>,
     /// Updated after each egui pass: is the pointer over toolbar chrome?
     pub pointer_over_panel: bool,
+    /// Updated after each egui pass: is the pointer over the metadata box?
+    pub pointer_over_metadata: bool,
     /// Whether the H help dialog is open.
     pub show_help: bool,
 }

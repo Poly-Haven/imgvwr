@@ -53,7 +53,9 @@ void main() {
 
     if (u_projection_mode == 1) {
         // -- 2D pan / zoom ----------------------------------------------
-        float inv_zoom = max(u_tan_half_fov, 0.02);
+        // Floor only guards against division by zero; keep it tiny so deep
+        // zoom-in (well past 100%) is not silently capped.
+        float inv_zoom = max(u_tan_half_fov, 1e-6);
         vec2 centered = v_uv - vec2(0.5);
         float pan_u = u_yaw  / (2.0 * PI);
         float pan_v = -u_pitch / PI;

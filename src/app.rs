@@ -21,6 +21,7 @@
 //!   * `IMGVWR_DEBUG_ZOOM` (2D)
 //!   * `IMGVWR_DEBUG_PROJECTION` = `pano` | `flat`
 //!   * `IMGVWR_DEBUG_WRAP` = `1`
+//!   * `IMGVWR_DEBUG_SLOT` = `1` (pin the loaded image into comparator slot 1)
 
 use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
@@ -68,18 +69,6 @@ struct FileInfo {
     dtype: String,
     compression: String,
     panorama: bool,
-}
-
-impl FileInfo {
-    fn summary(&self) -> String {
-        if self.width == 0 {
-            return String::new();
-        }
-        format!(
-            "{}×{} ch:{} {}",
-            self.width, self.height, self.channels, self.dtype
-        )
-    }
 }
 
 /// Hard cap on how long a capture run waits for a load before grabbing anyway.
@@ -219,11 +208,26 @@ pub struct App {
     preload_gen: u64,
     /// Recently-seen decoded images (current + previous + next look-ahead), most-
     /// recent first, so back-and-forth navigation is instant. Capped at
-    /// [`IMAGE_CACHE_CAP`]; for very large images this holds several GB.
-    image_cache: Vec<ImageData>,
+    /// [`IMAGE_CACHE_CAP`]; for very large images this holds several GB. Shared
+    /// (`Arc`) so comparator slots can pin an image without copying it.
+    image_cache: Vec<Arc<ImageData>>,
 
     /// Transient bottom-right status toast.
     toast: Option<Toast>,
+
+    // Image comparator.
+    /// The currently-displayed decoded image (shared so a slot can pin it).
+    current_image: Option<Arc<ImageData>>,
+    /// Comparator slots (Ctrl+1..=9 → index 0..=8); each pins a decoded image.
+    slots: [Option<Arc<ImageData>>; 9],
+    /// The image shown before the last slot recall, for the A/B toggle-back.
+    compare_prev: Option<Arc<ImageData>>,
+    /// Slot whose image is currently displayed (drives the active flag).
+    active_slot: Option<usize>,
+
+    // F2 metadata box hover-reveal (near the top-right corner).
+    metadata_hover: bool,
+    metadata_hide_deadline: Option<Instant>,
 }
 
 impl App {
@@ -300,6 +304,12 @@ impl App {
             preload_gen: 0,
             image_cache: Vec::new(),
             toast: None,
+            current_image: None,
+            slots: std::array::from_fn(|_| None),
+            compare_prev: None,
+            active_slot: None,
+            metadata_hover: false,
+            metadata_hide_deadline: None,
         }
     }
 
@@ -583,7 +593,7 @@ impl App {
         // immediately, skipping the loading state and the decode thread.
         if let Some(data) = self.cache_take(&path) {
             log::info!("adopting cached {}", path.display());
-            self.adopt_loaded(data);
+            self.adopt_loaded(data, false);
             self.request_redraw();
             return;
         }
@@ -617,7 +627,7 @@ impl App {
             }
             match msg.result {
                 Ok(data) => {
-                    self.adopt_loaded(data);
+                    self.adopt_loaded(Arc::new(data), false);
                     adopted = true;
                 }
                 Err(e) => {
@@ -634,9 +644,10 @@ impl App {
         }
     }
 
-    /// Adopt a freshly-decoded image as the active one (from a background load or
-    /// a preload-cache hit), applying the view lock and arming the next preload.
-    fn adopt_loaded(&mut self, data: ImageData) {
+    /// Adopt a decoded image as the active one (from a background load, a cache
+    /// hit, or a comparator slot recall). `for_compare` preserves the current
+    /// view (like the lock) and skips folder preload + window auto-resize.
+    fn adopt_loaded(&mut self, data: Arc<ImageData>, for_compare: bool) {
         let equirect = data.is_equirectangular();
         log::info!(
             "loaded {}x{} ({} ch, {}) {} from {}",
@@ -648,7 +659,7 @@ impl App {
             data.path.display()
         );
         if let Some(gfx) = &mut self.gfx {
-            gfx.renderer.set_image(&data);
+            gfx.renderer.set_image(data.as_ref());
         }
         log::info!(
             "load-to-ready: {:.2}s for {}",
@@ -656,11 +667,12 @@ impl App {
             data.path.display()
         );
 
-        // L lock: keep the current zoom/pan/exposure when the projection mode
-        // matches the previous image; a 2D <-> panorama change resets to the
-        // per-image default.
-        let keep_view =
-            self.locked && self.loaded_path.is_some() && self.camera.is_panorama() == equirect;
+        // Keep the current zoom/pan/exposure when the projection mode matches —
+        // for the L lock, and always for a comparator recall (to compare the
+        // same region). A 2D <-> panorama change resets to the per-image default.
+        let keep_view = (self.locked || for_compare)
+            && self.loaded_path.is_some()
+            && self.camera.is_panorama() == equirect;
 
         self.file_info = FileInfo {
             name: data
@@ -685,29 +697,37 @@ impl App {
         self.load_state = LoadState::Loaded;
         self.update_window_title();
         // Choose the OCIO view: panoramas restore the saved view for their
-        // extension; 2D images always default to Standard.
+        // extension; HDRIs default to Filmic, everything else to Standard.
         self.select_view_for_load(equirect, &data.path);
-        // Size the window to the first 2D image (panoramas, locked views, and
-        // subsequent images keep the current window).
-        if !equirect && !self.locked {
+        // Size the window to the first 2D image (panoramas, locked/compared
+        // views, and subsequent images keep the current window).
+        if !equirect && !self.locked && !for_compare {
             self.maybe_autosize(data.width, data.height);
         }
         self.apply_debug_overrides();
 
         // Look-ahead: once arrow-navigating, decode the next neighbour in the
-        // background so the following arrow press is instant.
-        if self.preload_armed {
+        // background so the following arrow press is instant. Not for a recall.
+        if self.preload_armed && !for_compare {
             if let Some(next) = sibling_path(&data.path, self.nav_dir) {
                 self.start_preload(next);
             }
         }
 
+        self.current_image = Some(data.clone());
+        // Dev-only: IMGVWR_DEBUG_SLOT pins the loaded image into slot 1 so the
+        // comparator flag can be verified headlessly.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("IMGVWR_DEBUG_SLOT").is_some() && self.slots[0].is_none() {
+            self.slots[0] = self.current_image.clone();
+        }
+        self.recompute_active_slot();
         // Retain the decoded image so navigating back to it is instant.
         self.cache_insert(data);
     }
 
     /// Take the cached decoded image for `path`, removing it from the cache.
-    fn cache_take(&mut self, path: &Path) -> Option<ImageData> {
+    fn cache_take(&mut self, path: &Path) -> Option<Arc<ImageData>> {
         self.image_cache
             .iter()
             .position(|d| d.path == path)
@@ -716,10 +736,73 @@ impl App {
 
     /// Insert `data` at the front (most-recent), de-duplicating by path and
     /// evicting the oldest beyond [`IMAGE_CACHE_CAP`].
-    fn cache_insert(&mut self, data: ImageData) {
+    fn cache_insert(&mut self, data: Arc<ImageData>) {
         self.image_cache.retain(|d| d.path != data.path);
         self.image_cache.insert(0, data);
         self.image_cache.truncate(IMAGE_CACHE_CAP);
+    }
+
+    /// The active flag follows whichever slot (if any) holds the current image.
+    fn recompute_active_slot(&mut self) {
+        self.active_slot = match &self.current_image {
+            Some(cur) => self
+                .slots
+                .iter()
+                .position(|s| s.as_ref().is_some_and(|d| Arc::ptr_eq(d, cur))),
+            None => None,
+        };
+    }
+
+    /// Ctrl+N: pin the current image into comparator slot `n` (1..=9).
+    fn save_slot(&mut self, n: usize) {
+        let Some(cur) = self.current_image.clone() else {
+            return;
+        };
+        self.slots[n - 1] = Some(cur);
+        self.recompute_active_slot();
+        self.show_toast(format!("Saved slot {n}"));
+        self.request_redraw();
+    }
+
+    /// N: recall comparator slot `n`. Pressing it again while already viewing
+    /// that slot toggles back to the previously-shown image (A/B compare).
+    fn recall_slot(&mut self, n: usize) {
+        let idx = n - 1;
+        let Some(target) = self.slots[idx].clone() else {
+            return;
+        };
+        let old_scale = self.flat_scale_ref();
+        if self.active_slot == Some(idx) {
+            // Toggle back to the previously-viewed image (swap so a third press
+            // returns to the slot).
+            if let Some(prev) = self.compare_prev.take() {
+                self.compare_prev = self.current_image.clone();
+                self.adopt_loaded(prev, true);
+                self.preserve_native_scale(old_scale);
+            }
+        } else {
+            self.compare_prev = self.current_image.clone();
+            self.adopt_loaded(target, true);
+            self.preserve_native_scale(old_scale);
+        }
+    }
+
+    /// `(zoom, image_height)` of the current 2D view, for native-scale matching.
+    fn flat_scale_ref(&self) -> Option<(f32, f32)> {
+        match self.camera.camera {
+            Camera::Flat { zoom, .. } => Some((zoom, self.file_info.height.max(1) as f32)),
+            Camera::Pano { .. } => None,
+        }
+    }
+
+    /// After a comparator swap between 2D images of different resolutions, adjust
+    /// the (fit-relative) zoom so the on-screen pixel scale is unchanged — each
+    /// image is shown at its native resolution rather than scaled to match.
+    fn preserve_native_scale(&mut self, old: Option<(f32, f32)>) {
+        if let (Some((old_zoom, old_h)), Camera::Flat { .. }) = (old, self.camera.camera) {
+            let new_h = self.file_info.height.max(1) as f32;
+            self.camera.set_zoom(old_zoom * new_h / old_h);
+        }
     }
 
     /// Decode `path` in the background and stash it in the image cache.
@@ -759,7 +842,7 @@ impl App {
             match msg.result {
                 Ok(data) => {
                     log::debug!("preloaded {}", data.path.display());
-                    self.cache_insert(data);
+                    self.cache_insert(Arc::new(data));
                 }
                 Err(e) => log::debug!("preload failed: {e}"),
             }
@@ -948,6 +1031,13 @@ impl App {
         if self.pending_dblclick {
             self.dblclick_motion += (dx * dx + dy * dy).sqrt();
         }
+        // Axis lock while dragging: Shift = horizontal only, Ctrl = vertical only.
+        let dx = if self.modifiers.control_key() {
+            0.0
+        } else {
+            dx
+        };
+        let dy = if self.modifiers.shift_key() { 0.0 } else { dy };
         let (vw, vh) = self.viewport();
         match self.camera.camera {
             Camera::Pano { pitch_rad, .. } => {
@@ -1152,6 +1242,11 @@ impl App {
     }
 
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
+        // Don't begin a pan/look gesture when pressing inside the metadata box,
+        // so its text stays selectable.
+        if state == ElementState::Pressed && self.ui_state.pointer_over_metadata {
+            return;
+        }
         match (state, button) {
             (ElementState::Pressed, MouseButton::Left) => {
                 let now = Instant::now();
@@ -1282,7 +1377,6 @@ impl App {
         UiInputs {
             toolbar_visible: self.toolbar_visible,
             has_image,
-            file_info: self.file_info.summary(),
             display_views,
             active,
             ocio_available: !self.ocio.display_views().is_empty(),
@@ -1292,10 +1386,15 @@ impl App {
             loading_name: self.pending_name.clone(),
             error,
             show_hint,
-            show_metadata: self.show_metadata || forced == Some("metadata"),
+            show_metadata: self.show_metadata
+                || self.metadata_hover
+                || self.ui_state.pointer_over_metadata
+                || forced == Some("metadata"),
             metadata: self.metadata_lines(),
             show_help: self.ui_state.show_help,
             toast: self.toast_render(),
+            slots_saved: std::array::from_fn(|i| self.slots[i].is_some()),
+            active_slot: self.active_slot,
         }
     }
 
@@ -1359,6 +1458,34 @@ impl App {
         }
     }
 
+    /// Temporarily reveal the F2 metadata box when the cursor is near the
+    /// top-right corner (or hovering the box itself).
+    fn tick_metadata(&mut self) {
+        let scale = self
+            .gfx
+            .as_ref()
+            .map(|g| g.window.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let (vw, _) = self.viewport();
+        let near_corner = self.cursor_pos.x >= (vw - 240.0 * scale) as f64
+            && self.cursor_pos.y <= (140.0 * scale) as f64;
+        if near_corner || self.ui_state.pointer_over_metadata {
+            self.metadata_hover = true;
+            self.metadata_hide_deadline = None;
+        } else if self.metadata_hover {
+            match self.metadata_hide_deadline {
+                None => {
+                    self.metadata_hide_deadline = Some(Instant::now() + Duration::from_millis(120));
+                }
+                Some(t) if Instant::now() >= t => {
+                    self.metadata_hover = false;
+                    self.metadata_hide_deadline = None;
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
     fn handle_ui_action(&mut self, action: UiAction) {
         match action {
             UiAction::OpenFile => self.open_file_dialog(),
@@ -1397,9 +1524,11 @@ impl App {
             .add_filter("Images", &supported_extensions())
             .pick_file();
         if let Some(path) = file {
-            // A manual open ends any arrow-nav preload chain.
+            // A manual open ends any arrow-nav preload chain (saved comparator
+            // slots persist; only the A/B scratch is dropped).
             self.preload_armed = false;
             self.image_cache.clear();
+            self.compare_prev = None;
             self.load_path(path);
         }
     }
@@ -1425,6 +1554,7 @@ impl App {
 
     fn render(&mut self) -> RenderOutcome {
         self.tick_toolbar();
+        self.tick_metadata();
 
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();
@@ -1593,6 +1723,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = position;
                 self.tick_toolbar();
+                self.tick_metadata();
                 self.request_redraw();
             }
             // egui-consumed pointer/wheel/key events fall through to `_ => {}`.
@@ -1605,14 +1736,22 @@ impl ApplicationHandler<UserEvent> for App {
                 // A manually-dropped file ends any arrow-nav preload chain.
                 self.preload_armed = false;
                 self.image_cache.clear();
+                self.compare_prev = None;
                 self.load_path(path);
             }
             WindowEvent::KeyboardInput { event, .. }
                 if !egui_consumed && event.state == ElementState::Pressed =>
             {
-                // Numpad / digit keys set an exact zoom level.
-                if let Some(digit) = digit_from_physical(&event.physical_key) {
+                // Numpad digits = exact zoom; top-row digits = comparator slots
+                // (Ctrl+N saves, N recalls).
+                if let Some(digit) = numpad_digit(&event.physical_key) {
                     self.set_exact_zoom(digit, self.ctrl());
+                } else if let Some(slot) = toprow_digit(&event.physical_key) {
+                    if self.ctrl() {
+                        self.save_slot(slot as usize);
+                    } else {
+                        self.recall_slot(slot as usize);
+                    }
                 } else {
                     let text = match &event.logical_key {
                         Key::Character(s) => Some(s.as_str().to_string()),
@@ -1654,8 +1793,12 @@ impl ApplicationHandler<UserEvent> for App {
             let next = Instant::now() + Duration::from_millis(16);
             event_loop.set_control_flow(ControlFlow::WaitUntil(next));
             self.request_redraw();
-        } else if let Some(deadline) = self.toolbar_hide_deadline {
-            // Wake at the deadline to evaluate hiding the toolbar.
+        } else if let Some(deadline) = [self.toolbar_hide_deadline, self.metadata_hide_deadline]
+            .into_iter()
+            .flatten()
+            .min()
+        {
+            // Wake at the earliest hide deadline (toolbar / metadata box).
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
             if Instant::now() >= deadline {
                 self.request_redraw();
@@ -1745,21 +1888,40 @@ fn fmt_ev(ev: f32) -> String {
     }
 }
 
-/// Map a physical key to a zoom digit 1..=9 (numpad or top row), else `None`.
-fn digit_from_physical(key: &PhysicalKey) -> Option<u32> {
+/// Map a numpad key to a zoom digit 1..=9, else `None`.
+fn numpad_digit(key: &PhysicalKey) -> Option<u32> {
     let PhysicalKey::Code(code) = key else {
         return None;
     };
     Some(match code {
-        KeyCode::Numpad1 | KeyCode::Digit1 => 1,
-        KeyCode::Numpad2 | KeyCode::Digit2 => 2,
-        KeyCode::Numpad3 | KeyCode::Digit3 => 3,
-        KeyCode::Numpad4 | KeyCode::Digit4 => 4,
-        KeyCode::Numpad5 | KeyCode::Digit5 => 5,
-        KeyCode::Numpad6 | KeyCode::Digit6 => 6,
-        KeyCode::Numpad7 | KeyCode::Digit7 => 7,
-        KeyCode::Numpad8 | KeyCode::Digit8 => 8,
-        KeyCode::Numpad9 | KeyCode::Digit9 => 9,
+        KeyCode::Numpad1 => 1,
+        KeyCode::Numpad2 => 2,
+        KeyCode::Numpad3 => 3,
+        KeyCode::Numpad4 => 4,
+        KeyCode::Numpad5 => 5,
+        KeyCode::Numpad6 => 6,
+        KeyCode::Numpad7 => 7,
+        KeyCode::Numpad8 => 8,
+        KeyCode::Numpad9 => 9,
+        _ => return None,
+    })
+}
+
+/// Map a top-row digit key to a comparator slot 1..=9, else `None`.
+fn toprow_digit(key: &PhysicalKey) -> Option<u32> {
+    let PhysicalKey::Code(code) = key else {
+        return None;
+    };
+    Some(match code {
+        KeyCode::Digit1 => 1,
+        KeyCode::Digit2 => 2,
+        KeyCode::Digit3 => 3,
+        KeyCode::Digit4 => 4,
+        KeyCode::Digit5 => 5,
+        KeyCode::Digit6 => 6,
+        KeyCode::Digit7 => 7,
+        KeyCode::Digit8 => 8,
+        KeyCode::Digit9 => 9,
         _ => return None,
     })
 }

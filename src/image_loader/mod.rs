@@ -36,6 +36,37 @@ impl ImageData {
     pub fn is_equirectangular(&self) -> bool {
         is_equirectangular(self.width, self.height)
     }
+
+    /// Mean linear luminance (Rec.709) of the image, estimated from a subsample
+    /// for speed (~1M pixels, so even a 24k panorama stays fast). `None` for
+    /// 8-bit images, whose pixels are sRGB-encoded rather than scene-linear.
+    /// Used to auto-expose HDR panoramas on load.
+    pub fn average_linear_luminance(&self) -> Option<f32> {
+        let PixelBuffer::F32(v) = &self.pixels else {
+            return None;
+        };
+        let px = (self.width as usize) * (self.height as usize);
+        if px == 0 || v.len() < px * 4 {
+            return None;
+        }
+        let stride = (px / 1_000_000).max(1);
+        let (mut sr, mut sg, mut sb) = (0.0f64, 0.0f64, 0.0f64);
+        let mut n = 0u64;
+        let mut i = 0;
+        while i < px {
+            let o = i * 4;
+            sr += v[o] as f64;
+            sg += v[o + 1] as f64;
+            sb += v[o + 2] as f64;
+            n += 1;
+            i += stride;
+        }
+        if n == 0 {
+            return None;
+        }
+        let (r, g, b) = (sr / n as f64, sg / n as f64, sb / n as f64);
+        Some((0.2126 * r + 0.7152 * g + 0.0722 * b) as f32)
+    }
 }
 
 /// Interleaved HxWx4 RGBA pixel data, either 8-bit or 32-bit float.

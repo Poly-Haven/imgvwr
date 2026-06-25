@@ -97,6 +97,9 @@ const IMAGE_CACHE_CAP: usize = 4;
 /// of the monitor in either dimension (the rest is breathing room / taskbar).
 const FILL_FRACTION: f32 = 0.9;
 
+/// Target average linear value for HDR-panorama auto-exposure on load.
+const AUTO_EXPOSURE_TARGET: f32 = 0.732;
+
 /// Smallest window dimension (physical px); matches `with_min_inner_size`.
 const MIN_DIM: u32 = 170;
 
@@ -1062,6 +1065,20 @@ impl App {
             self.exposure = 0.0;
             self.gamma = 1.0;
             self.wrap_2d = false;
+            // Auto-expose HDR panoramas: pick the starting exposure so the
+            // average linear value lands on AUTO_EXPOSURE_TARGET. (No-op for
+            // 8-bit images, where average_linear_luminance returns None.)
+            if equirect {
+                if let Some(luma) = data.average_linear_luminance() {
+                    if luma > 1e-6 {
+                        self.exposure = (AUTO_EXPOSURE_TARGET / luma).log2().clamp(-16.0, 16.0);
+                        log::info!(
+                            "auto-exposure: avg luma {luma:.4} -> EV {:+.2}",
+                            self.exposure
+                        );
+                    }
+                }
+            }
         }
         self.load_state = LoadState::Loaded;
         self.update_window_title();

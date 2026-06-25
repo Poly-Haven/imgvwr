@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use imgvwr::image_loader::{load_image, ImageData, PixelBuffer};
+use imgvwr::image_loader::{load_image, probe_dimensions, ImageData, PixelBuffer};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -78,6 +78,37 @@ fn exr_single_channel_replicates_to_rgb() {
         }
         _ => panic!("expected F32 buffer"),
     }
+}
+
+#[test]
+fn probe_matches_decoded_dimensions() {
+    // The cheap header probe (used to pre-size the window before decoding) must
+    // agree with the dimensions the full decode produces, across formats.
+    for name in [
+        "tiny_rgb.png",
+        "tiny.jpg",
+        "tiny_gray16.png",
+        "tiny_rgba.exr",
+        "tiny_gray.exr",
+        "tiny.hdr",
+    ] {
+        let probed = probe_dimensions(&fixture(name))
+            .unwrap_or_else(|| panic!("probe returned None for {name}"));
+        let decoded = load(name);
+        assert_eq!(
+            probed,
+            (decoded.width, decoded.height),
+            "probe disagrees with decode for {name}"
+        );
+    }
+}
+
+#[test]
+fn probe_is_none_for_unprobeable() {
+    // Camera RAW has no cheap header probe; a missing file errors out. Both must
+    // yield None so the caller falls back to post-decode sizing.
+    assert_eq!(probe_dimensions(Path::new("nope.nef")), None);
+    assert_eq!(probe_dimensions(Path::new("missing.png")), None);
 }
 
 #[test]

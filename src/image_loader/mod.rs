@@ -82,6 +82,28 @@ pub fn supported_extensions() -> Vec<&'static str> {
     IMAGE_EXTS.iter().chain(RAW_EXTS.iter()).copied().collect()
 }
 
+/// Cheaply read an image's *displayed* pixel dimensions from its header, without
+/// decoding the pixels — so the window can be sized to the image before the
+/// (potentially multi-second) decode completes. EXIF orientation is applied, so
+/// a portrait photo stored sideways reports its upright dimensions.
+///
+/// Returns `None` for camera RAW (no cheap header probe; develop also transposes
+/// for orientation) and on any I/O or parse error — callers fall back to sizing
+/// the window once the full decode finishes.
+pub fn probe_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+    if ext == "exr" {
+        formats::probe_exr_dimensions(path)
+    } else if RAW_EXTS.contains(&ext.as_str()) {
+        None
+    } else {
+        formats::probe_image_dimensions(path)
+    }
+}
+
 /// Decode an image file into RGBA `ImageData`, dispatching on the (lower-cased)
 /// file extension. See plans/rewrite.md §8.2.
 pub fn load_image(path: &Path) -> Result<ImageData> {

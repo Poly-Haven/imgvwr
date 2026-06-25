@@ -49,10 +49,13 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::camera::{Camera, CameraController};
-use crate::image_loader::{is_supported, load_image, supported_extensions, ImageData};
+use crate::image_loader::{
+    is_equirectangular, is_supported, load_image, probe_dimensions, supported_extensions, ImageData,
+};
 use crate::ocio::OcioManager;
 use crate::prefs::{AppPreferences, PreferredView, WindowGeometry};
 use crate::renderer::{RenderParams, Renderer};
@@ -89,6 +92,13 @@ const DBLCLICK_DRAG_TOL: f32 = 6.0;
 /// previous + a next, plus one spare so back-and-forth stays cached). Each entry
 /// can be several GB for 24k+ images, so this is deliberately small.
 const IMAGE_CACHE_CAP: usize = 4;
+
+/// The window auto-sizes to frame the image but never grows past this fraction
+/// of the monitor in either dimension (the rest is breathing room / taskbar).
+const FILL_FRACTION: f32 = 0.9;
+
+/// Smallest window dimension (physical px); matches `with_min_inner_size`.
+const MIN_DIM: u32 = 170;
 
 /// Result of a background decode, tagged with its generation id.
 struct LoadResult {
@@ -197,11 +207,14 @@ pub struct App {
     cursor_pos: PhysicalPosition<f64>,
     last_left_press: Option<Instant>,
     fullscreen: bool,
-    /// True once the user resizes the window (suppresses auto-resize).
-    user_resized: bool,
-    auto_resized_done: bool,
-    /// Set when we request a programmatic resize, to ignore the resulting event.
-    auto_resize_pending: bool,
+    /// True once the user manually resizes the window: the window then stops
+    /// auto-following the zoom so their chosen size sticks (cleared on the next
+    /// image load, which re-frames the window).
+    manual_window: bool,
+    /// While `Some` and in the future, incoming `Resized` events are treated as
+    /// our own programmatic resizes (not a manual drag). Set right after every
+    /// `request_inner_size`.
+    suppress_manual_until: Option<Instant>,
     /// A double-click is pending; the fullscreen toggle fires on release unless
     /// the cursor moved more than `DBLCLICK_DRAG_TOL` (i.e. it was a drag).
     pending_dblclick: bool,
@@ -308,9 +321,8 @@ impl App {
             cursor_pos: PhysicalPosition::new(1.0e6, 1.0e6),
             last_left_press: None,
             fullscreen: false,
-            user_resized: false,
-            auto_resized_done: false,
-            auto_resize_pending: false,
+            manual_window: false,
+            suppress_manual_until: None,
             pending_dblclick: false,
             dblclick_motion: 0.0,
             locked: false,
@@ -478,24 +490,24 @@ impl App {
         // (`set_window_icons`), backed by the icon embedded in the .exe.
         let mut window_attributes = Window::default_attributes()
             .with_title("imgvwr")
-            .with_min_inner_size(LogicalSize::new(170.0, 170.0));
-        // Restore the saved geometry, or open centred at the default size — set
-        // at creation so the window never visibly jumps into position.
+            .with_min_inner_size(LogicalSize::new(MIN_DIM as f64, MIN_DIM as f64));
+        // Probe the initial image's dimensions from its header (cheap, no decode)
+        // so the window opens already framing it — eliminating the size/position
+        // jump that a post-decode resize would cause. RAW and equirectangular
+        // images aren't pre-sized (no cheap probe / panoramas keep the window).
         let monitor = event_loop.primary_monitor();
-        if let Some(g) = self.prefs.window {
-            window_attributes = window_attributes
-                .with_inner_size(PhysicalSize::new(g.width.max(170), g.height.max(170)))
-                .with_position(PhysicalPosition::new(g.x, g.y));
-        } else {
-            let scale = monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
-            let (w, h) = ((1280.0 * scale) as u32, (720.0 * scale) as u32);
-            window_attributes = window_attributes.with_inner_size(PhysicalSize::new(w, h));
-            if let Some(m) = &monitor {
-                let (ms, mp) = (m.size(), m.position());
-                let x = mp.x + ((ms.width as i32 - w as i32) / 2).max(0);
-                let y = mp.y + ((ms.height as i32 - h as i32) / 2).max(0);
-                window_attributes = window_attributes.with_position(PhysicalPosition::new(x, y));
-            }
+        let scale = monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
+        let probed = self
+            .initial_path
+            .as_ref()
+            .and_then(|p| probe_dimensions(p))
+            .filter(|(w, h)| !is_equirectangular(*w, *h));
+        // Set both size and position at creation so the window never visibly
+        // jumps into place.
+        let (size, position) = startup_geometry(self.prefs.window, probed, monitor.as_ref(), scale);
+        window_attributes = window_attributes.with_inner_size(size);
+        if let Some(pos) = position {
+            window_attributes = window_attributes.with_position(pos);
         }
 
         let template = ConfigTemplateBuilder::new()
@@ -593,31 +605,100 @@ impl App {
         }
     }
 
-    /// On the first successful 2D load, size the window to the image (clamped to
-    /// the monitor) unless the user has already resized it (§16 Commit 10).
-    fn maybe_autosize(&mut self, width: u32, height: u32) {
-        if self.user_resized || self.auto_resized_done {
+    /// Size the window to frame a freshly-loaded `width`×`height` 2D image,
+    /// scaled down uniformly to fit within [`FILL_FRACTION`] of the monitor (never
+    /// upscaled past native), keeping the window centred on its current centre and
+    /// on-screen. A fresh load re-frames even after a manual resize (so navigation
+    /// recomputes the size as usual). Skipped while maximized or fullscreen.
+    fn resize_window_to_image(&mut self, width: u32, height: u32) {
+        if self.fullscreen || width == 0 || height == 0 {
             return;
         }
-        let Some(gfx) = &self.gfx else { return };
-        let (max_w, max_h) = gfx
-            .window
-            .current_monitor()
-            .map(|m| {
-                let s = m.size();
-                (s.width as f32 * 0.92, s.height as f32 * 0.92)
-            })
-            .unwrap_or((width as f32, height as f32));
-        // Scale the image down uniformly to fit the monitor so the window keeps
-        // the image's aspect ratio (independent w/h clamping would letterbox a
-        // down-scaled oversized image). Never upscale past the native size.
-        let fit = (max_w / width as f32).min(max_h / height as f32).min(1.0);
-        let w = ((width as f32 * fit) as u32).max(170);
-        let h = ((height as f32 * fit) as u32).max(170);
-        self.auto_resized_done = true;
-        self.auto_resize_pending = true;
-        let _ = gfx.window.request_inner_size(PhysicalSize::new(w, h));
-        log::debug!("auto-resized window to {w}x{h} for image {width}x{height}");
+        let mon = match &self.gfx {
+            Some(gfx) if gfx.window.is_maximized() => return,
+            Some(gfx) => gfx.window.current_monitor(),
+            None => return,
+        };
+        let (w, h) = fit_to_monitor(width as f32, height as f32, mon.as_ref());
+        // A new image re-frames the window, overriding any earlier manual size.
+        self.manual_window = false;
+        self.resize_window_centered(PhysicalSize::new(w, h));
+    }
+
+    /// While zooming a 2D image, grow/shrink the window so it keeps framing the
+    /// image at the current on-screen scale — until it would exceed
+    /// [`FILL_FRACTION`] of the monitor, after which the window caps there and the
+    /// image overflows (panned into). The zoom is re-derived from the (capped)
+    /// window height so the on-screen pixel scale the user dialled in is kept.
+    /// No-op in panorama mode, when maximized/fullscreen, or after a manual resize.
+    fn follow_zoom_with_window(&mut self) {
+        if self.manual_window || self.fullscreen {
+            return;
+        }
+        let Camera::Flat { zoom, .. } = self.camera.camera else {
+            return;
+        };
+        let (img_w, img_h) = (self.file_info.width, self.file_info.height);
+        if img_w == 0 || img_h == 0 {
+            return;
+        }
+        let mon = match &self.gfx {
+            Some(gfx) if gfx.window.is_maximized() => return,
+            Some(gfx) => gfx.window.current_monitor(),
+            None => return,
+        };
+        let (_, vh) = self.viewport();
+        // On-screen scale: device pixels per image pixel (100% == 1.0).
+        let scale = zoom * vh / img_h as f32;
+        // Frame the image at `scale`, scaled down uniformly (keeping the image's
+        // aspect) so it never exceeds FILL_FRACTION of the monitor in any axis.
+        let (win_w, win_h) =
+            fit_to_monitor(img_w as f32 * scale, img_h as f32 * scale, mon.as_ref());
+        // Preserve the on-screen scale after the window-height change: uncapped
+        // this lands on ~1.0 (image fills the window); capped, zoom > 1 so the
+        // image overflows the window uniformly and can be panned into.
+        self.camera.set_zoom(scale * img_h as f32 / win_h as f32);
+        self.resize_window_centered(PhysicalSize::new(win_w, win_h));
+    }
+
+    /// Resize the window to `target` inner size, keeping it centred on its current
+    /// centre and clamped on-screen. Redundant resizes (within 2 px) are skipped
+    /// so per-notch zooming doesn't thrash once the window is capped. Records the
+    /// resize so the resulting `Resized` event isn't mistaken for a manual drag.
+    fn resize_window_centered(&mut self, target: PhysicalSize<u32>) {
+        let mut did = false;
+        if let Some(gfx) = &self.gfx {
+            let cur = gfx.window.inner_size();
+            let close = (cur.width as i32 - target.width as i32).abs() <= 2
+                && (cur.height as i32 - target.height as i32).abs() <= 2;
+            if !close {
+                if let Ok(op) = gfx.window.outer_position() {
+                    let outer = gfx.window.outer_size();
+                    // Carry the decoration delta so the centre is computed in
+                    // outer-frame coordinates.
+                    let dx = outer.width.saturating_sub(cur.width);
+                    let dy = outer.height.saturating_sub(cur.height);
+                    let new_outer_w = target.width + dx;
+                    let new_outer_h = target.height + dy;
+                    let cx = op.x + outer.width as i32 / 2;
+                    let cy = op.y + outer.height as i32 / 2;
+                    let mut x = cx - new_outer_w as i32 / 2;
+                    let mut y = cy - new_outer_h as i32 / 2;
+                    if let Some(m) = gfx.window.current_monitor() {
+                        let (mp, ms) = (m.position(), m.size());
+                        x = x.clamp(mp.x, mp.x + (ms.width as i32 - new_outer_w as i32).max(0));
+                        y = y.clamp(mp.y, mp.y + (ms.height as i32 - new_outer_h as i32).max(0));
+                    }
+                    gfx.window.set_outer_position(PhysicalPosition::new(x, y));
+                    let _ = gfx.window.request_inner_size(target);
+                    did = true;
+                }
+            }
+        }
+        if did {
+            // Cover both the move and resize events the OS will deliver.
+            self.suppress_manual_until = Some(Instant::now() + Duration::from_millis(250));
+        }
     }
 
     fn load_path(&mut self, path: PathBuf) {
@@ -788,10 +869,12 @@ impl App {
         // Choose the OCIO view: panoramas restore the saved view for their
         // extension; HDRIs default to Filmic, everything else to Standard.
         self.select_view_for_load(equirect, &data.path);
-        // Size the window to the first 2D image (panoramas, locked/compared
-        // views, and subsequent images keep the current window).
+        // Frame the window to the loaded 2D image (panoramas keep the window;
+        // locked/compared views keep the current size for side-by-side compare).
+        // The window was pre-sized at creation for the initial image, so this is
+        // a no-op resize there; for navigation it re-frames and re-centres.
         if !equirect && !self.locked && !for_compare {
-            self.maybe_autosize(data.width, data.height);
+            self.resize_window_to_image(data.width, data.height);
         }
         self.apply_debug_overrides();
 
@@ -1065,6 +1148,7 @@ impl App {
             }
         }
         self.show_zoom_toast();
+        self.follow_zoom_with_window();
         self.request_redraw();
     }
 
@@ -1200,6 +1284,7 @@ impl App {
             }
         }
         self.show_zoom_toast();
+        self.follow_zoom_with_window();
         self.request_redraw();
     }
 
@@ -1857,16 +1942,16 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     gfx.window.request_redraw();
                 }
-                // Distinguish a user resize from our own auto-resize so the
-                // latter doesn't suppress future auto-sizing semantics.
-                if self.auto_resize_pending {
-                    self.auto_resize_pending = false;
-                    // Re-centre after the (async) auto-resize to the image size.
-                    if let Some(gfx) = &self.gfx {
-                        center_window(&gfx.window);
-                    }
-                } else if self.loaded_path.is_some() {
-                    self.user_resized = true;
+                // A resize we didn't initiate (outside the suppression window),
+                // and not a maximize/fullscreen, is the user dragging the border:
+                // stop auto-following on zoom so their chosen size sticks.
+                let programmatic = self
+                    .suppress_manual_until
+                    .is_some_and(|t| Instant::now() < t);
+                let special =
+                    self.fullscreen || self.gfx.as_ref().is_some_and(|g| g.window.is_maximized());
+                if !programmatic && !special && self.loaded_path.is_some() {
+                    self.manual_window = true;
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -1989,17 +2074,69 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-/// Position `window` centred on its current monitor.
-fn center_window(window: &Window) {
-    let Some(monitor) = window.current_monitor() else {
-        return;
+/// Uniformly scale `iw`×`ih` down to fit within [`FILL_FRACTION`] of `monitor`
+/// (never upscaling past native), returning the framed window inner size in
+/// physical pixels (each dimension at least [`MIN_DIM`]).
+fn fit_to_monitor(iw: f32, ih: f32, monitor: Option<&MonitorHandle>) -> (u32, u32) {
+    let (cap_w, cap_h) = monitor
+        .map(|m| {
+            let s = m.size();
+            (
+                s.width as f32 * FILL_FRACTION,
+                s.height as f32 * FILL_FRACTION,
+            )
+        })
+        .unwrap_or((iw, ih));
+    let fit = (cap_w / iw).min(cap_h / ih).min(1.0);
+    let w = ((iw * fit) as u32).max(MIN_DIM);
+    let h = ((ih * fit) as u32).max(MIN_DIM);
+    (w, h)
+}
+
+/// Compute the window's inner size and outer position at creation, so it opens
+/// already in the right place (no post-load jump):
+///
+/// * With a probed initial image → frame it (capped to the monitor), centred on
+///   the saved window's centre if there is one, else on the screen (first launch).
+/// * No image but saved geometry → restore the saved window exactly.
+/// * Neither → a centred default.
+fn startup_geometry(
+    saved: Option<WindowGeometry>,
+    probed: Option<(u32, u32)>,
+    monitor: Option<&MonitorHandle>,
+    scale: f64,
+) -> (PhysicalSize<u32>, Option<PhysicalPosition<i32>>) {
+    let size = if let Some((iw, ih)) = probed {
+        let (w, h) = fit_to_monitor(iw as f32, ih as f32, monitor);
+        PhysicalSize::new(w, h)
+    } else if let Some(g) = saved {
+        PhysicalSize::new(g.width.max(MIN_DIM), g.height.max(MIN_DIM))
+    } else {
+        PhysicalSize::new((1280.0 * scale) as u32, (720.0 * scale) as u32)
     };
-    let ms = monitor.size();
-    let mp = monitor.position();
-    let ws = window.outer_size();
-    let x = mp.x + ((ms.width as i32 - ws.width as i32) / 2).max(0);
-    let y = mp.y + ((ms.height as i32 - ws.height as i32) / 2).max(0);
-    window.set_outer_position(PhysicalPosition::new(x, y));
+
+    // No image to size to but a saved window → restore it verbatim.
+    if probed.is_none() {
+        if let Some(g) = saved {
+            return (size, Some(PhysicalPosition::new(g.x, g.y)));
+        }
+    }
+
+    // Otherwise centre: on the saved window's centre (returning user) or the
+    // screen (first launch), clamped on-screen.
+    let position = monitor.map(|m| {
+        let (mp, ms) = (m.position(), m.size());
+        let (cx, cy) = match saved {
+            Some(g) => (g.x + g.width as i32 / 2, g.y + g.height as i32 / 2),
+            None => (mp.x + ms.width as i32 / 2, mp.y + ms.height as i32 / 2),
+        };
+        let x = (cx - size.width as i32 / 2)
+            .clamp(mp.x, mp.x + (ms.width as i32 - size.width as i32).max(0));
+        let y = (cy - size.height as i32 / 2)
+            .clamp(mp.y, mp.y + (ms.height as i32 - size.height as i32).max(0));
+        PhysicalPosition::new(x, y)
+    });
+    (size, position)
 }
 
 /// Replace egui's thin default proportional font with the native Segoe UI for

@@ -41,6 +41,41 @@ pub fn load_via_image(path: &Path) -> Result<ImageData> {
     Ok(data)
 }
 
+/// Read pixel dimensions from an `image`-crate format header (PNG/JPEG/TIFF/…)
+/// without decoding the pixels, applying EXIF orientation so the reported size
+/// matches what will be displayed. `None` on any error.
+pub fn probe_image_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let mut reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    reader.no_limits();
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let (w, h) = decoder.dimensions();
+    Some(orient_dims(w, h, orientation))
+}
+
+/// Read an OpenEXR image's dimensions from its metadata only (no pixel decode).
+/// Works even for DWAA/DWAB EXRs the pure-Rust decoder can't fully decode, since
+/// only the header is parsed. `None` on any error.
+pub fn probe_exr_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let meta = exr::prelude::MetaData::read_from_file(path, false).ok()?;
+    let size = meta.headers.first()?.layer_size;
+    Some((size.0 as u32, size.1 as u32))
+}
+
+/// Swap width/height for the EXIF orientations that transpose the image.
+fn orient_dims(w: u32, h: u32, orientation: image::metadata::Orientation) -> (u32, u32) {
+    use image::metadata::Orientation as O;
+    match orientation {
+        O::Rotate90 | O::Rotate270 | O::Rotate90FlipH | O::Rotate270FlipH => (h, w),
+        _ => (w, h),
+    }
+}
+
 #[cfg(feature = "icc")]
 fn extract_icc(decoder: &mut impl image::ImageDecoder) -> Option<Vec<u8>> {
     decoder.icc_profile().ok().flatten()

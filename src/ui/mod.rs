@@ -3,7 +3,6 @@
 
 mod colors;
 mod overlay;
-mod toolbar;
 
 /// Give a clickable widget's response the pointing-hand cursor on hover (egui
 /// only does this for hyperlinks by default).
@@ -18,7 +17,6 @@ pub fn build(
     state: &mut UiState,
     actions: &mut Vec<UiAction>,
 ) {
-    toolbar::build_toolbar(ctx, inputs, state, actions);
     overlay::build_overlays(ctx, inputs, state, actions);
     // Borderless edge resize cursor, applied last so it overrides widget cursors
     // at the very border. Routing it through egui (rather than winit directly)
@@ -31,13 +29,14 @@ pub fn build(
 /// Immutable per-frame inputs handed to the UI (gathered from `App` before the
 /// mutable egui borrow, to avoid borrow conflicts).
 pub struct UiInputs {
-    pub toolbar_visible: bool,
+    /// Whether the auto-hiding bottom panel is currently revealed.
+    pub bottom_visible: bool,
     pub has_image: bool,
     /// All `(display, view)` pairs from the active OCIO config.
     pub display_views: Vec<(String, String)>,
     pub active: Option<(String, String)>,
     pub ocio_available: bool,
-    /// Current tone adjustments, shown in the sidebar.
+    /// Current tone adjustments (eased target values), shown in the bottom panel.
     pub exposure: f32,
     pub gamma: f32,
 
@@ -109,11 +108,7 @@ impl UiInputs {
 /// Transient UI state that persists across frames.
 #[derive(Default)]
 pub struct UiState {
-    pub show_view_submenu: bool,
-    pub show_display_submenu: bool,
-    /// Display currently being browsed in the submenu (defaults to active).
-    pub browse_display: Option<String>,
-    /// Updated after each egui pass: is the pointer over toolbar chrome?
+    /// Updated after each egui pass: is the pointer over the bottom panel?
     pub pointer_over_panel: bool,
     /// Updated after each egui pass: is the pointer over the metadata box?
     pub pointer_over_metadata: bool,
@@ -128,7 +123,6 @@ pub struct UiState {
 /// Actions emitted by the UI, processed by `App` after the egui pass.
 pub enum UiAction {
     OpenFile,
-    Reload,
     SetView {
         display: String,
         view: String,
@@ -147,6 +141,12 @@ pub enum UiAction {
     SetBackgroundColor([u8; 3]),
     /// Isolate a single channel as greyscale (`None` = show all channels).
     SetChannelIsolate(Option<u8>),
+    /// Set the exposure target (EV) from the bottom-panel slider / buttons.
+    SetExposure(f32),
+    /// Set the gamma target from the bottom-panel slider / buttons.
+    SetGamma(f32),
+    /// Open the settings dialog (titlebar gear button).
+    OpenSettings,
     // Borderless titlebar controls.
     /// Start an OS window move (titlebar drag).
     DragWindow,

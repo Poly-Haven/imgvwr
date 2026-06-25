@@ -51,8 +51,88 @@ pub fn build_overlays(
 
     settings_dialog(ctx, inputs, state, actions);
 
+    // Auto-hiding bottom panel with the tone (and, later, more) sliders.
+    bottom_panel(ctx, inputs, state, actions);
+
     // Auto-hiding borderless titlebar, drawn last so its controls sit on top.
     titlebar(ctx, inputs, actions);
+}
+
+/// Auto-hiding bottom panel of image-adjustment sliders (revealed by the cursor
+/// near the bottom edge). Sets `state.pointer_over_panel` so the app keeps it up
+/// while hovered. Currently holds the Exposure and Gamma sliders.
+fn bottom_panel(
+    ctx: &egui::Context,
+    inputs: &UiInputs,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+) {
+    if !inputs.bottom_visible || !inputs.has_image {
+        state.pointer_over_panel = false;
+        return;
+    }
+    let frame = egui::Frame {
+        fill: panel_bg(),
+        inner_margin: egui::Margin::symmetric(12, 7),
+        ..Default::default()
+    };
+    let resp = egui::TopBottomPanel::bottom("imgvwr_bottom")
+        .show_separator_line(false)
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                tone_slider(
+                    ui,
+                    "Exposure",
+                    inputs.exposure,
+                    -16.0..=16.0,
+                    0.5,
+                    UiAction::SetExposure,
+                    actions,
+                );
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(16.0);
+                tone_slider(
+                    ui,
+                    "Gamma",
+                    inputs.gamma,
+                    0.1..=4.0,
+                    0.1,
+                    UiAction::SetGamma,
+                    actions,
+                );
+            });
+        });
+    state.pointer_over_panel = resp.response.contains_pointer();
+}
+
+/// A labelled slider with `−` / `+` step buttons, emitting `make(value)` on any
+/// change. Used for the bottom-panel tone (and future) adjustments.
+fn tone_slider(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: f32,
+    range: std::ops::RangeInclusive<f32>,
+    step: f32,
+    make: fn(f32) -> UiAction,
+    actions: &mut Vec<UiAction>,
+) {
+    let (lo, hi) = (*range.start(), *range.end());
+    ui.label(egui::RichText::new(label).color(egui::Color32::from_gray(190)));
+    if clickable(ui.small_button("−")).clicked() {
+        actions.push(make((value - step).clamp(lo, hi)));
+    }
+    let mut v = value;
+    if ui
+        .add(egui::Slider::new(&mut v, range).fixed_decimals(2))
+        .changed()
+    {
+        actions.push(make(v));
+    }
+    if clickable(ui.small_button("+")).clicked() {
+        actions.push(make((value + step).clamp(lo, hi)));
+    }
 }
 
 /// The settings dialog (opened from the toolbar): startup-display picker and the
@@ -188,9 +268,9 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
         .frame(egui::Frame::NONE.fill(bg))
         .show(ctx, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Window controls (laid out right-to-left): close, maximize, min.
-                // The "×" glyph is smaller than the box/dash, so size it up to
-                // keep the three controls visually consistent.
+                // Window controls (laid out right-to-left): close, maximize, min,
+                // then settings. The "×" glyph is smaller than the box/dash, so
+                // size it up to keep the controls visually consistent.
                 if titlebar_button(ui, "×", 21.0, a, true).clicked() {
                     actions.push(UiAction::Close);
                 }
@@ -201,48 +281,62 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
                 if titlebar_button(ui, "—", 15.0, a, false).clicked() {
                     actions.push(UiAction::Minimize);
                 }
-                // The remaining strip is the drag region (move / double-click
-                // fullscreen) and carries the filename.
-                let rect = ui.available_rect_before_wrap();
-                let drag = ui.interact(
-                    rect,
-                    ui.id().with("titlebar_drag"),
-                    egui::Sense::click_and_drag(),
-                );
-                if drag.drag_started() {
-                    actions.push(UiAction::DragWindow);
+                if titlebar_button(ui, "⚙", 15.0, a, false).clicked() {
+                    actions.push(UiAction::OpenSettings);
                 }
-                if drag.double_clicked() {
-                    actions.push(UiAction::ToggleFullscreen);
-                }
-                // App icon at the far left, then the filename.
-                let mut text_x = 10.0;
-                if let Some(icon) = &inputs.icon {
-                    let sz = 18.0;
-                    let icon_rect = egui::Rect::from_min_size(
-                        rect.left_center() + egui::vec2(8.0, -sz / 2.0),
-                        egui::vec2(sz, sz),
+                // The remaining strip, laid out left-to-right: app icon, an
+                // icon-only Open button, then the filename over a drag region
+                // (move / double-click fullscreen).
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if let Some(icon) = &inputs.icon {
+                        let (icon_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(26.0, TITLEBAR_H),
+                            egui::Sense::hover(),
+                        );
+                        let sz = 18.0;
+                        let img_rect = egui::Rect::from_center_size(
+                            icon_rect.center() + egui::vec2(2.0, 0.0),
+                            egui::vec2(sz, sz),
+                        );
+                        ui.painter().image(
+                            icon.id(),
+                            img_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::from_white_alpha(alpha(255)),
+                        );
+                    }
+                    if titlebar_button(ui, "📂", 14.0, a, false)
+                        .on_hover_text("Open file…")
+                        .clicked()
+                    {
+                        actions.push(UiAction::OpenFile);
+                    }
+                    // Filename over the remaining drag strip.
+                    let rect = ui.available_rect_before_wrap();
+                    let drag = ui.interact(
+                        rect,
+                        ui.id().with("titlebar_drag"),
+                        egui::Sense::click_and_drag(),
                     );
-                    ui.painter().image(
-                        icon.id(),
-                        icon_rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::from_white_alpha(alpha(255)),
+                    if drag.drag_started() {
+                        actions.push(UiAction::DragWindow);
+                    }
+                    if drag.double_clicked() {
+                        actions.push(UiAction::ToggleFullscreen);
+                    }
+                    let name = if inputs.title.is_empty() {
+                        "imgvwr"
+                    } else {
+                        inputs.title.as_str()
+                    };
+                    ui.painter().text(
+                        rect.left_center() + egui::vec2(6.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        name,
+                        egui::FontId::proportional(13.0),
+                        fg,
                     );
-                    text_x = 8.0 + sz + 8.0;
-                }
-                let name = if inputs.title.is_empty() {
-                    "imgvwr"
-                } else {
-                    inputs.title.as_str()
-                };
-                ui.painter().text(
-                    rect.left_center() + egui::vec2(text_x, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    name,
-                    egui::FontId::proportional(13.0),
-                    fg,
-                );
+                });
             });
         });
 }
@@ -489,6 +583,19 @@ fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActi
                             );
                             ui.end_row();
                         }
+                        // View transform: a dropdown of views, with a Display
+                        // sub-sub-menu, when OCIO is available.
+                        if inputs.has_image {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("View")
+                                        .color(egui::Color32::from_gray(150)),
+                                )
+                                .selectable(false),
+                            );
+                            view_dropdown(ui, inputs, actions);
+                            ui.end_row();
+                        }
                         // Channels: a clickable colour box per channel that
                         // isolates it as greyscale (click again to show all).
                         if inputs.channel_count > 0 {
@@ -560,6 +667,57 @@ fn channel_box(
         let next = if active { None } else { Some(idx) };
         actions.push(UiAction::SetChannelIsolate(next));
     }
+}
+
+/// The View-transform dropdown for the metadata box: the current display's views
+/// inline, plus a `Display ▸` sub-menu whose entries open each display's views.
+fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
+    let current = inputs
+        .active
+        .as_ref()
+        .map(|(d, v)| format!("{d}/{v}"))
+        .unwrap_or_else(|| "gamma 2.2".to_string());
+    if !inputs.ocio_available {
+        ui.label(egui::RichText::new(current).color(egui::Color32::WHITE));
+        return;
+    }
+    let active_display = inputs
+        .active
+        .as_ref()
+        .map(|(d, _)| d.clone())
+        .or_else(|| inputs.displays().first().cloned())
+        .unwrap_or_default();
+    ui.menu_button(format!("{current}  ⏷"), |ui| {
+        for view in inputs.views_for(&active_display) {
+            let is_active = inputs
+                .active
+                .as_ref()
+                .is_some_and(|(d, v)| d == &active_display && v == &view);
+            if ui.selectable_label(is_active, &view).clicked() {
+                actions.push(UiAction::SetView {
+                    display: active_display.clone(),
+                    view: view.clone(),
+                });
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        ui.menu_button("Display  ▸", |ui| {
+            for display in inputs.displays() {
+                ui.menu_button(&display, |ui| {
+                    for view in inputs.views_for(&display) {
+                        if ui.selectable_label(false, &view).clicked() {
+                            actions.push(UiAction::SetView {
+                                display: display.clone(),
+                                view: view.clone(),
+                            });
+                            ui.close_menu();
+                        }
+                    }
+                });
+            }
+        });
+    });
 }
 
 /// Transient bottom-right HUD; `alpha` fades it out (see `App::toast_render`).

@@ -206,14 +206,14 @@ pub struct App {
 
     // UI.
     ui_state: UiState,
-    toolbar_visible: bool,
-    toolbar_hide_deadline: Option<Instant>,
+    bottom_visible: bool,
+    bottom_hide_deadline: Option<Instant>,
     file_info: FileInfo,
     loaded_path: Option<PathBuf>,
     /// File name of the in-flight / last-attempted load (for overlays).
     pending_name: Option<String>,
-    /// Headless-test override: force the toolbar visible (IMGVWR_DEBUG_TOOLBAR).
-    force_toolbar: bool,
+    /// Headless-test override: force the bottom panel visible (IMGVWR_DEBUG_BOTTOM).
+    force_bottom: bool,
     /// Headless-test override: force an overlay ("loading"/"error"/"hint").
     force_overlay: Option<String>,
 
@@ -359,15 +359,15 @@ impl App {
             last_view: None,
             prefs,
             ui_state: UiState::default(),
-            toolbar_visible: false,
-            toolbar_hide_deadline: None,
+            bottom_visible: false,
+            bottom_hide_deadline: None,
             file_info: FileInfo::default(),
             loaded_path: None,
             pending_name: None,
             // The IMGVWR_DEBUG_* overrides force internal state for headless
             // testing; they are dev-only and ignored in release builds.
-            force_toolbar: cfg!(debug_assertions)
-                && std::env::var_os("IMGVWR_DEBUG_TOOLBAR").is_some(),
+            force_bottom: cfg!(debug_assertions)
+                && std::env::var_os("IMGVWR_DEBUG_BOTTOM").is_some(),
             force_overlay: if cfg!(debug_assertions) {
                 std::env::var("IMGVWR_DEBUG_OVERLAY").ok()
             } else {
@@ -2176,13 +2176,14 @@ impl App {
         let show_hint = (!has_image && !loading && error.is_none()) || forced == Some("hint");
 
         UiInputs {
-            toolbar_visible: self.toolbar_visible,
+            bottom_visible: self.bottom_visible,
             has_image,
             display_views,
             active,
             ocio_available: !self.ocio.display_views().is_empty(),
-            exposure: self.exposure,
-            gamma: self.gamma,
+            // The bottom-panel sliders show/control the dialed targets.
+            exposure: self.exposure_target,
+            gamma: self.gamma_target,
             loading,
             progress,
             loading_name: self.pending_name.clone(),
@@ -2273,11 +2274,6 @@ impl App {
         if fi.width == 0 {
             return Vec::new();
         }
-        let view = self
-            .ocio
-            .active()
-            .map(|dv| format!("{}/{}", dv.display, dv.view))
-            .unwrap_or_else(|| "gamma 2.2".to_string());
         vec![
             ("File".into(), fi.name.clone()),
             ("Size".into(), format!("{}×{}", fi.width, fi.height)),
@@ -2293,37 +2289,40 @@ impl App {
                     "2D".into()
                 },
             ),
-            ("View".into(), view),
-            ("Exposure".into(), fmt_ev(self.exposure)),
-            ("Gamma".into(), format!("{:.2}", self.gamma)),
         ]
+        // ("View" is a dropdown and "Channels" are boxes — both rendered
+        // directly in the metadata HUD, not as plain key/value text.)
     }
 
-    /// Update toolbar show/hide from the cursor position and panel hover (§12.1).
-    fn tick_toolbar(&mut self) {
-        if self.force_toolbar {
-            self.toolbar_visible = true;
-            self.ui_state.show_view_submenu = true;
-            self.ui_state.show_display_submenu = true;
+    /// Reveal the bottom panel when the cursor is near the window's bottom edge
+    /// (or hovering the panel itself); hide it shortly after the cursor leaves.
+    fn tick_bottom_panel(&mut self) {
+        if self.force_bottom {
+            self.bottom_visible = true;
             return;
         }
-        let scale = self
+        let (scale, vh) = self
             .gfx
             .as_ref()
-            .map(|g| g.window.scale_factor() as f32)
-            .unwrap_or(1.0);
-        let near_left = self.cursor_pos.x <= (28.0 * scale) as f64;
-        if near_left || self.ui_state.pointer_over_panel {
-            self.toolbar_visible = true;
-            self.toolbar_hide_deadline = None;
-        } else if self.toolbar_visible {
-            match self.toolbar_hide_deadline {
+            .map(|g| {
+                (
+                    g.window.scale_factor() as f32,
+                    g.window.inner_size().height as f64,
+                )
+            })
+            .unwrap_or((1.0, 0.0));
+        let near_bottom = self.cursor_in_window && self.cursor_pos.y >= vh - (44.0 * scale) as f64;
+        if near_bottom || self.ui_state.pointer_over_panel {
+            self.bottom_visible = true;
+            self.bottom_hide_deadline = None;
+        } else if self.bottom_visible {
+            match self.bottom_hide_deadline {
                 None => {
-                    self.toolbar_hide_deadline = Some(Instant::now() + Duration::from_millis(100));
+                    self.bottom_hide_deadline = Some(Instant::now() + Duration::from_millis(100));
                 }
                 Some(t) if Instant::now() >= t => {
-                    self.toolbar_visible = false;
-                    self.toolbar_hide_deadline = None;
+                    self.bottom_visible = false;
+                    self.bottom_hide_deadline = None;
                 }
                 Some(_) => {}
             }
@@ -2361,13 +2360,6 @@ impl App {
     fn handle_ui_action(&mut self, action: UiAction) {
         match action {
             UiAction::OpenFile => self.open_file_dialog(),
-            UiAction::Reload => {
-                if let Some(path) = self.loaded_path.clone() {
-                    self.ocio.reload();
-                    self.rebuild_ocio();
-                    self.load_path(path);
-                }
-            }
             UiAction::SetView { display, view } => {
                 if self.ocio.set_active(&display, &view) {
                     log::info!("view transform -> {display}/{view}");
@@ -2425,6 +2417,18 @@ impl App {
             UiAction::SetChannelIsolate(channel) => {
                 self.isolate_channel = channel;
                 self.request_redraw();
+            }
+            UiAction::SetExposure(v) => {
+                self.exposure_target = v.clamp(-16.0, 16.0);
+                self.request_redraw();
+            }
+            UiAction::SetGamma(v) => {
+                self.gamma_target = v.clamp(0.1, 4.0);
+                self.request_redraw();
+            }
+            UiAction::OpenSettings => {
+                self.ui_state.show_settings = true;
+                self.ui_state.confirm_default = false;
             }
             // Borderless titlebar controls.
             UiAction::DragWindow => {
@@ -2534,7 +2538,7 @@ impl App {
         if self.force_overlay.as_deref() == Some("settings") {
             self.ui_state.show_settings = true;
         }
-        self.tick_toolbar();
+        self.tick_bottom_panel();
         self.tick_metadata();
 
         // Gather everything the frame needs before the mutable gfx/ui borrows.
@@ -2729,7 +2733,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.alt_resize.is_some() {
                     self.update_alt_resize();
                 }
-                self.tick_toolbar();
+                self.tick_bottom_panel();
                 self.tick_metadata();
                 self.request_redraw();
             }
@@ -2765,7 +2769,8 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            // Block wheel input when the toolbar is hovered (§11.3).
+            // egui consumes the wheel when a panel (e.g. the bottom sliders) is
+            // hovered, so it doesn't also zoom the image (§11.3).
             WindowEvent::MouseWheel { delta, .. } if !egui_consumed => self.on_wheel(delta),
             WindowEvent::DroppedFile(path) => {
                 // A manually-dropped file ends any arrow-nav preload chain.
@@ -2848,7 +2853,7 @@ impl ApplicationHandler<UserEvent> for App {
             let next = Instant::now() + Duration::from_millis(16);
             event_loop.set_control_flow(ControlFlow::WaitUntil(next));
             self.request_redraw();
-        } else if let Some(deadline) = [self.toolbar_hide_deadline, self.metadata_hide_deadline]
+        } else if let Some(deadline) = [self.bottom_hide_deadline, self.metadata_hide_deadline]
             .into_iter()
             .flatten()
             .min()

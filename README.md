@@ -10,9 +10,10 @@ for Windows.
   uploaded at full bit depth, tiled across multiple GPU textures when they exceed
   `GL_MAX_TEXTURE_SIZE`.
 - **OCIO v2 colour management:** bundled Blender/AgX config, with AgX/Filmic and
-  other view transforms selectable from the toolbar.
-- **Minimal UI:** the viewer fills the window; a semi-transparent toolbar hovers
-  at the left edge.
+  other view transforms selectable from the metadata box's View dropdown.
+- **Minimal UI:** the image *is* the window; a borderless titlebar (Open,
+  Settings, window controls) reveals at the top edge, an adjustment-slider panel
+  at the bottom edge, and the metadata box at the top-right — all auto-hiding.
 
 ## Controls
 
@@ -53,7 +54,8 @@ for Windows.
 | `A` | Toggle always-on-top |
 | `F` / `F11` / double-click | Toggle fullscreen |
 | `Escape` / `Q` | Exit fullscreen or close |
-| Move cursor to left edge | Show toolbar overlay |
+| Move cursor to top edge | Show the titlebar (Open, Settings, window controls) |
+| Move cursor to bottom edge | Show the adjustment sliders panel (Exposure, Gamma) |
 
 ### Comparator & help
 
@@ -86,8 +88,8 @@ JPEG, PNG, BMP, TIFF, WebP, GIF, ICO, TGA, PNM, Radiance HDR, OpenEXR, and
 imgvwr [path-to-image]
 ```
 
-Open an image from the command line, by dragging it onto the window, or via the
-toolbar's **Open file…** button.
+Open an image from the command line, by dragging it onto the window, the `O`
+key, or the **📂** button in the titlebar (revealed at the top edge).
 
 ## Building from source
 

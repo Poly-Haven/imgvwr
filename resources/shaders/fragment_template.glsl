@@ -14,6 +14,7 @@ uniform int   u_projection_mode;     // 0 = equirectangular panorama, 1 = 2D pan
 uniform float u_image_aspect;
 uniform bool  u_input_is_encoded_srgb;  // true when source pixels are sRGB-encoded (JPEG / LDR PNG)
 uniform bool  u_wrap_2d;             // 2D mode: repeat the image instead of clamping
+uniform int   u_isolate_channel;     // -1 = all channels; 0=R 1=G 2=B 3=A shown as greyscale
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -50,6 +51,7 @@ vec3 srgb_to_linear(vec3 c) {
 void main() {
     vec2 uv;
     vec3 color;
+    vec4 texel;
 
     if (u_projection_mode == 1) {
         // -- 2D pan / zoom ----------------------------------------------
@@ -66,14 +68,16 @@ void main() {
         if (!u_wrap_2d &&
             (raw_uv.x < 0.0 || raw_uv.x > 1.0 ||
              raw_uv.y < 0.0 || raw_uv.y > 1.0)) {
-            frag_color = vec4(0.02, 0.02, 0.02, 1.0);
+            // Outside the image: stay transparent so the cleared background
+            // colour shows through (the letterbox uses the chosen background).
+            frag_color = vec4(0.0);
             return;
         }
         // When wrapping, GL_REPEAT on both axes tiles the image seamlessly.
         // The 2D coordinate is screen-space-continuous, so implicit-derivative
         // sampling (and its mip LOD) is correct here.
         uv = raw_uv;
-        color = sample_image(uv);
+        texel = sample_image(uv);
     } else {
         // -- Rectilinear equirectangular projection ----------------------
         vec2 ndc = v_uv * 2.0 - 1.0;
@@ -91,7 +95,16 @@ void main() {
         vec2 ddy = dFdy(uv);
         if (abs(ddx.x) > 0.5) ddx.x -= sign(ddx.x);
         if (abs(ddy.x) > 0.5) ddy.x -= sign(ddy.x);
-        color = sample_image_grad(uv, ddx, ddy);
+        texel = sample_image_grad(uv, ddx, ddy);
+    }
+
+    color = texel.rgb;
+    float out_alpha = texel.a;
+    // Channel isolation (F2 metadata box): show one channel as greyscale, fully
+    // opaque, processed through the normal exposure/view pipeline below.
+    if (u_isolate_channel >= 0) {
+        color = vec3(texel[u_isolate_channel]);
+        out_alpha = 1.0;
     }
 
     // 1. Source pixel is now in `color`; bring it to scene-linear.
@@ -111,5 +124,5 @@ void main() {
     //    post-display tweak applied exactly ONCE in both the OCIO and fallback
     //    paths (do not also fold gamma into __OCIO_APPLY__).
     color = pow(max(color, vec3(0.0)), vec3(1.0 / max(u_gamma, 1e-6)));
-    frag_color = vec4(color, 1.0);
+    frag_color = vec4(color, out_alpha);
 }

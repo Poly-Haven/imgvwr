@@ -20,9 +20,9 @@ use crate::image_loader::{ImageData, PixelBuffer};
 /// for the equirectangular path (see the pano branch in the fragment template).
 pub const SINGLE_TEXTURE_SAMPLER: &str = "\
 uniform sampler2D u_image;
-vec3 sample_image(vec2 uv) { return texture(u_image, uv).rgb; }
-vec3 sample_image_grad(vec2 uv, vec2 ddx, vec2 ddy) {
-    return textureGrad(u_image, uv, ddx, ddy).rgb;
+vec4 sample_image(vec2 uv) { return texture(u_image, uv); }
+vec4 sample_image_grad(vec2 uv, vec2 ddx, vec2 ddy) {
+    return textureGrad(u_image, uv, ddx, ddy);
 }";
 
 /// `__IMAGE_SAMPLER__` for the tiled path.
@@ -41,24 +41,24 @@ uniform float u_tile_size;
 uniform float u_layer_size;
 uniform float u_tile_border;
 
-vec3 sample_tiles(vec2 px, vec2 ddx, vec2 ddy) {
+vec4 sample_tiles(vec2 px, vec2 ddx, vec2 ddy) {
     vec2 cpx = clamp(px, vec2(0.0), u_tiled_image_size - vec2(0.5));
     float fcol = clamp(floor(cpx.x / u_tile_size), 0.0, float(u_tile_cols - 1));
     float frow = clamp(floor(cpx.y / u_tile_size), 0.0, float(u_tile_rows - 1));
     vec2 in_tile = cpx - vec2(fcol, frow) * u_tile_size;
     vec2 tile_uv = (in_tile + vec2(u_tile_border)) / u_layer_size;
     float layer = frow * float(u_tile_cols) + fcol;
-    return textureGrad(u_tiles, vec3(tile_uv, layer), ddx, ddy).rgb;
+    return textureGrad(u_tiles, vec3(tile_uv, layer), ddx, ddy);
 }
 
-vec3 sample_image(vec2 uv) {
+vec4 sample_image(vec2 uv) {
     // Gradients from the continuous pixel coordinate (no jump across tile seams).
     vec2 px = uv * u_tiled_image_size;
     return sample_tiles(px, dFdx(px) / u_layer_size, dFdy(px) / u_layer_size);
 }
 
 // Equirect path: caller supplies seam-corrected UV-space derivatives.
-vec3 sample_image_grad(vec2 uv, vec2 duvdx, vec2 duvdy) {
+vec4 sample_image_grad(vec2 uv, vec2 duvdx, vec2 duvdy) {
     vec2 px = uv * u_tiled_image_size;
     return sample_tiles(px, (duvdx * u_tiled_image_size) / u_layer_size,
                             (duvdy * u_tiled_image_size) / u_layer_size);

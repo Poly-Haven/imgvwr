@@ -44,6 +44,8 @@ pub struct RenderParams {
     pub nearest: bool,
     /// Background colour (sRGB 0–1) cleared behind the alpha-blended image.
     pub background: [f32; 3],
+    /// Channel to isolate as greyscale: -1 = all, 0=R 1=G 2=B 3=A.
+    pub isolate_channel: i32,
 }
 
 impl Default for RenderParams {
@@ -61,6 +63,7 @@ impl Default for RenderParams {
             wrap_2d: false,
             nearest: false,
             background: [0.02, 0.02, 0.02],
+            isolate_channel: -1,
         }
     }
 }
@@ -77,6 +80,7 @@ struct Uniforms {
     image_aspect: Option<glow::UniformLocation>,
     input_is_encoded_srgb: Option<glow::UniformLocation>,
     wrap_2d: Option<glow::UniformLocation>,
+    isolate_channel: Option<glow::UniformLocation>,
     // Single-texture sampler.
     image: Option<glow::UniformLocation>,
     // Tiled-texture sampler + grid.
@@ -104,6 +108,7 @@ impl Uniforms {
             image_aspect: u("u_image_aspect"),
             input_is_encoded_srgb: u("u_input_is_encoded_srgb"),
             wrap_2d: u("u_wrap_2d"),
+            isolate_channel: u("u_isolate_channel"),
             image: u("u_image"),
             tiles: u("u_tiles"),
             tile_cols: u("u_tile_cols"),
@@ -363,6 +368,7 @@ impl Renderer {
                 image.is_encoded_srgb as i32,
             );
             gl.uniform_1_i32(u.wrap_2d.as_ref(), params.wrap_2d as i32);
+            gl.uniform_1_i32(u.isolate_channel.as_ref(), params.isolate_channel);
 
             // Min/mag filters for the active interpolation mode (I key).
             let (min_f, mag_f) = if params.nearest {

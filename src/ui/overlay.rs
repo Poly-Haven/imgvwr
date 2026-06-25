@@ -36,7 +36,7 @@ pub fn build_overlays(
     slot_flags(ctx, inputs, actions);
 
     state.pointer_over_metadata = if inputs.show_metadata && !inputs.metadata.is_empty() {
-        metadata_hud(ctx, inputs)
+        metadata_hud(ctx, inputs, actions)
     } else {
         false
     };
@@ -455,7 +455,7 @@ fn hint(ctx: &egui::Context) {
 /// Draw the F2 metadata box (top-right, below the slot flags). Returns whether
 /// the pointer is over it, so the caller can keep it visible while hovered and
 /// suppress image panning over it (the values are selectable text).
-fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs) -> bool {
+fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) -> bool {
     // To the left of the right-edge slot-flag column so the two never overlap.
     let resp = egui::Area::new(egui::Id::new("imgvwr_metadata"))
         .anchor(
@@ -489,10 +489,77 @@ fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs) -> bool {
                             );
                             ui.end_row();
                         }
+                        // Channels: a clickable colour box per channel that
+                        // isolates it as greyscale (click again to show all).
+                        if inputs.channel_count > 0 {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("Channels")
+                                        .color(egui::Color32::from_gray(150)),
+                                )
+                                .selectable(false),
+                            );
+                            ui.horizontal(|ui| {
+                                for (label, color, idx) in channel_boxes(inputs.channel_count) {
+                                    channel_box(ui, label, color, idx, inputs, actions);
+                                }
+                            });
+                            ui.end_row();
+                        }
                     });
             });
         });
     resp.response.contains_pointer()
+}
+
+/// The `(label, colour, channel-index)` boxes to show for a channel count.
+fn channel_boxes(count: u8) -> Vec<(&'static str, egui::Color32, u8)> {
+    let r = egui::Color32::from_rgb(220, 80, 80);
+    let g = egui::Color32::from_rgb(90, 195, 90);
+    let b = egui::Color32::from_rgb(95, 145, 240);
+    let a = egui::Color32::from_gray(190);
+    match count {
+        1 => vec![("L", a, 0)],
+        2 => vec![("L", a, 0), ("A", a, 3)],
+        3 => vec![("R", r, 0), ("G", g, 1), ("B", b, 2)],
+        _ => vec![("R", r, 0), ("G", g, 1), ("B", b, 2), ("A", a, 3)],
+    }
+}
+
+/// One channel-isolation box. Accent border when active; click toggles.
+fn channel_box(
+    ui: &mut egui::Ui,
+    label: &str,
+    color: egui::Color32,
+    idx: u8,
+    inputs: &UiInputs,
+    actions: &mut Vec<UiAction>,
+) {
+    let active = inputs.isolate_channel == Some(idx);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+    let painter = ui.painter();
+    let radius = egui::CornerRadius::same(3);
+    painter.rect_filled(rect, radius, color);
+    if active {
+        painter.rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(2.0, ACCENT),
+            egui::StrokeKind::Outside,
+        );
+    }
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(11.0),
+        egui::Color32::from_gray(20),
+    );
+    let resp = clickable(resp).on_hover_text(format!("Isolate {label} channel"));
+    if resp.clicked() {
+        let next = if active { None } else { Some(idx) };
+        actions.push(UiAction::SetChannelIsolate(next));
+    }
 }
 
 /// Transient bottom-right HUD; `alpha` fades it out (see `App::toast_render`).

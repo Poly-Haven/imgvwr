@@ -194,6 +194,8 @@ pub struct App {
     wrap_2d: bool,
     /// Nearest-neighbour filtering instead of bilinear (I key).
     nearest_filter: bool,
+    /// Isolated channel shown as greyscale (0=R 1=G 2=B 3=A); `None` = all.
+    isolate_channel: Option<u8>,
     show_metadata: bool,
 
     // Colour management.
@@ -351,6 +353,7 @@ impl App {
             gamma_target: 1.0,
             wrap_2d: false,
             nearest_filter: false,
+            isolate_channel: None,
             show_metadata: false,
             ocio,
             last_view: None,
@@ -1091,6 +1094,7 @@ impl App {
             // A fresh image applies its default tone instantly (no animation).
             self.exposure_target = self.exposure;
             self.gamma_target = self.gamma;
+            self.isolate_channel = None;
         }
         self.load_state = LoadState::Loaded;
         self.update_window_title();
@@ -2080,6 +2084,11 @@ impl App {
             self.gamma = v;
             self.gamma_target = v;
         }
+        if let Ok(v) = std::env::var("IMGVWR_DEBUG_ISOLATE") {
+            if let Ok(c) = v.parse::<i32>() {
+                self.isolate_channel = (c >= 0).then_some(c as u8);
+            }
+        }
         if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
             self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
         }
@@ -2186,6 +2195,8 @@ impl App {
                 || self.ui_state.pointer_over_metadata
                 || forced == Some("metadata"),
             metadata: self.metadata_lines(),
+            channel_count: self.file_info.channels,
+            isolate_channel: self.isolate_channel,
             show_help: self.ui_state.show_help || forced == Some("help"),
             toast: self.toast_render(),
             slot_labels: self.slot_labels(),
@@ -2270,7 +2281,6 @@ impl App {
         vec![
             ("File".into(), fi.name.clone()),
             ("Size".into(), format!("{}×{}", fi.width, fi.height)),
-            ("Channels".into(), fi.channels.to_string()),
             ("Type".into(), fi.dtype.clone()),
             ("Compression".into(), fi.compression.clone()),
             (
@@ -2412,6 +2422,10 @@ impl App {
                 self.prefs.save();
                 self.request_redraw();
             }
+            UiAction::SetChannelIsolate(channel) => {
+                self.isolate_channel = channel;
+                self.request_redraw();
+            }
             // Borderless titlebar controls.
             UiAction::DragWindow => {
                 self.freeze_animations();
@@ -2538,6 +2552,7 @@ impl App {
             wrap_2d: self.wrap_2d,
             nearest: self.nearest_filter,
             background: srgb_u8_to_f32(self.prefs.background_color),
+            isolate_channel: self.isolate_channel.map(|c| c as i32).unwrap_or(-1),
         };
         let capture_ready = self.capture_ready();
 

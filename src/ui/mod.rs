@@ -50,6 +50,10 @@ pub struct UiInputs {
     pub show_hint: bool,
     pub show_metadata: bool,
     pub metadata: Vec<(String, String)>,
+    /// Original channel count (1/3/4), for the metadata-box channel boxes.
+    pub channel_count: u8,
+    /// Currently isolated channel (0=R 1=G 2=B 3=A), `None` = all.
+    pub isolate_channel: Option<u8>,
     pub show_help: bool,
     /// Transient bottom-right toast: `(text, alpha)`, drawn while alpha > 0.
     pub toast: Option<(String, f32)>,
@@ -141,6 +145,8 @@ pub enum UiAction {
     SetCornerRadius(u32),
     /// Set the background colour (sRGB 0–255) behind transparent images.
     SetBackgroundColor([u8; 3]),
+    /// Isolate a single channel as greyscale (`None` = show all channels).
+    SetChannelIsolate(Option<u8>),
     // Borderless titlebar controls.
     /// Start an OS window move (titlebar drag).
     DragWindow,

@@ -735,6 +735,9 @@ impl App {
         set_window_icons(&window);
         // Round the borderless window's corners per the saved preference.
         apply_window_corners(&window, self.prefs.corner_radius);
+        // Stop DWM drawing the legacy non-client frame (it flashes the old-style
+        // caption/border on focus change for an undecorated window).
+        disable_dwm_decorations(&window);
 
         Ok(Gfx {
             gl,
@@ -3518,6 +3521,36 @@ fn apply_window_corners(window: &Window, radius: u32) {
 
 #[cfg(not(windows))]
 fn apply_window_corners(_window: &Window, _radius: u32) {}
+
+/// Disable DWM non-client rendering for the borderless window so the legacy
+/// caption/border doesn't flash on focus changes. (DWMNCRP_DISABLED.)
+#[cfg(windows)]
+fn disable_dwm_decorations(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_NCRENDERING_POLICY};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
+    // SAFETY: `hwnd` is a live top-level window; we pass a 4-byte DWORD = 1
+    // (DWMNCRP_DISABLED) for the non-client rendering policy.
+    let policy: u32 = 1;
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY as u32,
+            &policy as *const u32 as *const core::ffi::c_void,
+            4,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn disable_dwm_decorations(_window: &Window) {}
 
 /// Set the window's title-bar (small) and taskbar (big) icons from the bundled
 /// multi-resolution `app_icon.ico`, picking the exact native pixel sizes so they

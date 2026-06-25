@@ -64,6 +64,8 @@ pub struct UiInputs {
     pub titlebar_alpha: f32,
     /// Filename shown in the titlebar (empty when no image is loaded).
     pub title: String,
+    /// App icon texture shown at the left of the titlebar.
+    pub icon: Option<egui::TextureHandle>,
     /// Whether the window is maximized (drives the maximize/restore glyph).
     pub is_maximized: bool,
     /// Resize cursor for a borderless edge under the pointer (set via egui so it

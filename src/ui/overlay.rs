@@ -100,13 +100,29 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
                 if drag.double_clicked() {
                     actions.push(UiAction::ToggleFullscreen);
                 }
+                // App icon at the far left, then the filename.
+                let mut text_x = 10.0;
+                if let Some(icon) = &inputs.icon {
+                    let sz = 18.0;
+                    let icon_rect = egui::Rect::from_min_size(
+                        rect.left_center() + egui::vec2(8.0, -sz / 2.0),
+                        egui::vec2(sz, sz),
+                    );
+                    ui.painter().image(
+                        icon.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::from_white_alpha(alpha(255)),
+                    );
+                    text_x = 8.0 + sz + 8.0;
+                }
                 let name = if inputs.title.is_empty() {
                     "imgvwr"
                 } else {
                     inputs.title.as_str()
                 };
                 ui.painter().text(
-                    rect.left_center() + egui::vec2(10.0, 0.0),
+                    rect.left_center() + egui::vec2(text_x, 0.0),
                     egui::Align2::LEFT_CENTER,
                     name,
                     egui::FontId::proportional(13.0),

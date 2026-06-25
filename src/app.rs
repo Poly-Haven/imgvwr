@@ -235,6 +235,8 @@ pub struct App {
     window_drag_motion: f32,
     /// Set by the titlebar Close button; honoured in `about_to_wait`.
     should_exit: bool,
+    /// The app icon as an egui texture, shown in the titlebar (loaded once).
+    titlebar_icon: Option<egui::TextureHandle>,
 
     // Folder navigation, look-ahead preload, and view lock.
     /// L lock: carry zoom/pan/exposure to the next image and skip auto-resize.
@@ -372,6 +374,7 @@ impl App {
             window_drag_armed: false,
             window_drag_motion: 0.0,
             should_exit: false,
+            titlebar_icon: None,
         }
     }
 
@@ -620,6 +623,7 @@ impl App {
         let renderer = Renderer::new(gl.clone()).context("failed to create renderer")?;
         let egui = egui_glow::EguiGlow::new(event_loop, gl.clone(), None, None, false);
         install_ui_font(&egui.egui_ctx);
+        self.titlebar_icon = load_titlebar_icon(&egui.egui_ctx);
 
         // Crisp multi-resolution title-bar + taskbar icon. Position was set at
         // creation (restored or centred), so no post-creation move here.
@@ -1834,6 +1838,7 @@ impl App {
                 self.titlebar_alpha
             },
             title: self.file_info.name.clone(),
+            icon: self.titlebar_icon.clone(),
             is_maximized: self.gfx.as_ref().is_some_and(|g| g.window.is_maximized()),
             resize_cursor: if self.dragging || self.window_drag_armed {
                 None
@@ -2795,6 +2800,23 @@ fn set_window_icons(window: &Window) {
 
 #[cfg(not(windows))]
 fn set_window_icons(_window: &Window) {}
+
+/// Load the bundled app icon as an egui texture (≈36 px, drawn smaller) for the
+/// custom titlebar. `None` if it can't be read/decoded.
+fn load_titlebar_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let path = resolve_resources_dir().join("icons").join("app_icon.png");
+    let img = image::ImageReader::open(&path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?
+        .resize_exact(36, 36, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+    Some(ctx.load_texture("titlebar_icon", color, egui::TextureOptions::LINEAR))
+}
 
 /// Locate the bundled `resources/` directory: next to the exe (packaged), the
 /// current working dir (dev), or the compile-time manifest dir (fallback).

@@ -1822,7 +1822,7 @@ impl App {
                 || self.ui_state.pointer_over_metadata
                 || forced == Some("metadata"),
             metadata: self.metadata_lines(),
-            show_help: self.ui_state.show_help,
+            show_help: self.ui_state.show_help || forced == Some("help"),
             toast: self.toast_render(),
             slot_labels: self.slot_labels(),
             active_slot: self.active_slot,

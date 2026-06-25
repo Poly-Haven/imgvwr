@@ -405,39 +405,60 @@ fn toast(ctx: &egui::Context, text: &str, alpha: f32) {
         });
 }
 
-/// Centred hotkey reference (toggled with H, dismissed with H/Esc/Close).
+/// Centred hotkey reference (toggled with H, dismissed with H/Esc/Close), laid
+/// out as side-by-side sections to keep it short vertically.
 fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
-    const KEYS: &[(&str, &str)] = &[
-        ("Drag (L/M mouse)", "Pan (2D) / look around (pano)"),
-        ("Alt + drag", "Move window (also titlebar / 2D-fit body)"),
-        ("Window edges", "Drag to resize"),
-        ("Mouse wheel", "Zoom (2D) / FOV (pano)"),
-        ("Shift + wheel", "Pan horizontally"),
-        ("Ctrl + wheel", "Pan vertically"),
-        (", / .", "Exposure −/+"),
-        ("Ctrl + , / .", "Gamma −/+"),
-        ("Ctrl + R", "Reset exposure & gamma"),
-        ("Numpad 1–9", "Zoom in 2^(N-1)× (Ctrl = zoom out)"),
-        ("← / →", "Previous / next image in folder"),
-        ("Ctrl + 1–9", "Save to comparator slot"),
-        ("1–9 (top row)", "Recall slot (again = toggle back)"),
-        ("L", "Lock zoom/pan across images"),
-        ("P", "Toggle 2D / panorama"),
-        ("W", "Toggle 2D tiled wrap"),
-        ("I", "Toggle nearest / bilinear filtering"),
-        ("T", "Toggle Standard / last view transform"),
-        ("O", "Open file…"),
-        ("F2", "Metadata overlay"),
-        ("Home / Backspace", "Reset view (fit)"),
-        ("F / F11 / dbl-click", "Toggle fullscreen"),
-        ("H", "This help"),
-        ("Esc / Q", "Exit fullscreen / quit"),
+    type Section = (&'static str, &'static [(&'static str, &'static str)]);
+    const SECTIONS: &[Section] = &[
+        (
+            "View & zoom",
+            &[
+                ("Drag (L/M)", "Pan / look around"),
+                ("Wheel", "Zoom (2D) / FOV (pano)"),
+                ("Shift / Ctrl + wheel", "Pan horizontally / vertically"),
+                ("Numpad 1–9", "Zoom 2^(N-1)× (Ctrl = out)"),
+                ("Home / Backspace", "Reset view (fit)"),
+                ("P", "Toggle 2D / panorama"),
+                ("W", "Toggle 2D tiled wrap"),
+                ("I", "Nearest / bilinear filtering"),
+            ],
+        ),
+        (
+            "Tone & files",
+            &[
+                (", / .", "Exposure −/+"),
+                ("Ctrl + , / .", "Gamma −/+"),
+                ("Ctrl + R", "Reset exposure & gamma"),
+                ("T", "Standard / last view transform"),
+                ("O", "Open file…"),
+                ("← / →", "Previous / next image"),
+                ("F2", "Metadata overlay"),
+            ],
+        ),
+        (
+            "Window",
+            &[
+                ("Alt + drag · titlebar", "Move window"),
+                ("Window edges", "Drag to resize"),
+                ("Alt + right-drag", "Resize (by third)"),
+                ("F / F11 / dbl-click", "Toggle fullscreen"),
+                ("Esc / Q", "Exit fullscreen / quit"),
+            ],
+        ),
+        (
+            "Compare",
+            &[
+                ("Ctrl + 1–9", "Save to comparator slot"),
+                ("1–9 (top row)", "Recall slot (again = back)"),
+                ("L", "Lock zoom/pan across images"),
+                ("H", "This help"),
+            ],
+        ),
     ];
     egui::Area::new(egui::Id::new("imgvwr_help"))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             overlay_frame().show(ui, |ui| {
-                ui.set_max_width(420.0);
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("Keyboard & mouse")
@@ -446,23 +467,35 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
                             .size(18.0),
                     );
                 });
-                ui.add_space(8.0);
-                egui::Grid::new("imgvwr_help_grid")
-                    .num_columns(2)
-                    .spacing([18.0, 4.0])
-                    .show(ui, |ui| {
-                        for (key, action) in KEYS {
-                            ui.label(
-                                egui::RichText::new(*key)
-                                    .color(egui::Color32::from_rgb(180, 200, 255)),
-                            );
-                            ui.label(
-                                egui::RichText::new(*action).color(egui::Color32::from_gray(220)),
-                            );
-                            ui.end_row();
-                        }
-                    });
                 ui.add_space(10.0);
+                ui.horizontal_top(|ui| {
+                    for (i, (title, keys)) in SECTIONS.iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(22.0);
+                        }
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(*title).strong().color(ACCENT));
+                            ui.add_space(4.0);
+                            egui::Grid::new(("imgvwr_help", *title))
+                                .num_columns(2)
+                                .spacing([10.0, 3.0])
+                                .show(ui, |ui| {
+                                    for (key, action) in *keys {
+                                        ui.label(
+                                            egui::RichText::new(*key)
+                                                .color(egui::Color32::from_rgb(180, 200, 255)),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(*action)
+                                                .color(egui::Color32::from_gray(220)),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                    }
+                });
+                ui.add_space(12.0);
                 ui.vertical_centered(|ui| {
                     if clickable(ui.button("Close")).clicked() {
                         actions.push(UiAction::CloseHelp);

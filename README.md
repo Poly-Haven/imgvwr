@@ -16,34 +16,51 @@ for Windows.
 
 ## Controls
 
+### View & zoom
+
 | Input | Action |
 |---|---|
 | Left / middle mouse drag | Pan (2D) or look around (panorama) |
-| `Alt` + drag · titlebar drag · 2D-fit body drag | Move the (borderless) window |
-| Drag a window edge / corner | Resize |
-| Mouse wheel | Zoom (2D) or FOV (panorama) |
-| `Shift` + wheel | Pan horizontally |
-| `Ctrl` + wheel | Pan vertically |
-| `,` / `.` | Exposure −/+ 0.5 stops |
-| `Ctrl + ,` / `Ctrl + .` | Gamma −/+ 0.1 |
-| `Ctrl + R` | Reset exposure & gamma |
-| Numpad `1`–`9` | Zoom in `2^(N-1)×` (1=100%, 2=200%, 3=400%…); with `Ctrl`, zoom out |
+| Mouse wheel | Zoom (2D, toward the cursor) or FOV (panorama) |
+| `Shift` / `Ctrl` + wheel | Pan horizontally / vertically |
 | Shift / Ctrl + drag | Lock pan/look to the horizontal / vertical axis |
-| `←` / `→` | Previous / next image in the folder (alphabetical) |
-| `Ctrl` + `1`–`9` | Save the current image to a comparator slot |
-| `1`–`9` (top row) | Recall a saved slot; press again to toggle back |
-| `L` | Lock zoom/pan across images |
+| Numpad `1`–`9` | Zoom in `2^(N-1)×` (1=100%, 2=200%, 3=400%…); with `Ctrl`, zoom out |
+| `Home` / `Backspace` | Reset view (fit) |
 | `P` | Toggle 2D ↔ panorama mode |
 | `W` | Toggle tiled wrap (2D) |
 | `I` | Toggle nearest ↔ bilinear filtering |
+
+### Tone & files
+
+| Input | Action |
+|---|---|
+| `,` / `.` | Exposure −/+ 0.5 stops |
+| `Ctrl + ,` / `Ctrl + .` | Gamma −/+ 0.1 |
+| `Ctrl + R` | Reset exposure & gamma |
 | `T` | Toggle Standard ↔ last-used view transform |
 | `O` | Open file… |
+| `←` / `→` | Previous / next image in the folder (alphabetical) |
 | `F2` | Toggle metadata overlay (also appears on top-right hover) |
-| `H` | Show keyboard / mouse help |
-| `Home` / `Backspace` | Reset view (fit) |
-| Move cursor to left edge | Show toolbar overlay |
+
+### Window (borderless)
+
+| Input | Action |
+|---|---|
+| `Alt` + drag · titlebar drag · 2D-fit body drag | Move the window |
+| Drag a window edge / corner | Resize |
+| `Alt` + right-drag | Resize; edge(s) chosen by the cursor's third of the window |
 | `F` / `F11` / double-click | Toggle fullscreen |
 | `Escape` / `Q` | Exit fullscreen or close |
+| Move cursor to left edge | Show toolbar overlay |
+
+### Comparator & help
+
+| Input | Action |
+|---|---|
+| `Ctrl` + `1`–`9` | Save the current image to a comparator slot |
+| `1`–`9` (top row) | Recall a saved slot; press again to toggle back |
+| `L` | Lock zoom/pan across images |
+| `H` | Show keyboard / mouse help |
 
 Arrow-key navigation pre-decodes the next image in the background so stepping
 through a folder is instant. **L** locks the current zoom/pan (and exposure) so

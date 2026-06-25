@@ -75,6 +75,18 @@ alongside it at `resources/fonts/OFL.txt`.
 
 ---
 
+## Bundled icons (`resources/icons/ui/`)
+
+### Bootstrap Icons — MIT License
+Copyright (c) 2019–2024 The Bootstrap Authors
+(<https://github.com/twbs/icons>).
+
+A handful of Bootstrap Icons SVGs (gear, folder, window controls, chevron) are
+bundled and rasterised at runtime for the titlebar / menu controls. Bootstrap
+Icons is released under the MIT License.
+
+---
+
 ## Rust crates
 
 All Rust crate dependencies are licensed under MIT and/or Apache-2.0. Run

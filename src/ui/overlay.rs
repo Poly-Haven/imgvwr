@@ -444,20 +444,47 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
                     egui::vec2(screen.width(), TITLEBAR_H),
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
-                        // Window controls (laid out right-to-left): close, maximize, min,
-                        // then settings. The "×" glyph is smaller than the box/dash, so
-                        // size it up to keep the controls visually consistent.
-                        if titlebar_button(ui, "×", 21.0, a, true).clicked() {
+                        // Window controls (laid out right-to-left): close, maximize,
+                        // min, then settings — Bootstrap SVG icons.
+                        if titlebar_button(
+                            ui,
+                            egui::include_image!("../../resources/icons/ui/x-lg.svg"),
+                            14.0,
+                            a,
+                            true,
+                        )
+                        .clicked()
+                        {
                             actions.push(UiAction::Close);
                         }
-                        let max_glyph = if inputs.is_maximized { "❐" } else { "□" };
-                        if titlebar_button(ui, max_glyph, 15.0, a, false).clicked() {
+                        let max_icon = if inputs.is_maximized {
+                            egui::include_image!("../../resources/icons/ui/window-stack.svg")
+                        } else {
+                            egui::include_image!("../../resources/icons/ui/square.svg")
+                        };
+                        if titlebar_button(ui, max_icon, 13.0, a, false).clicked() {
                             actions.push(UiAction::ToggleMaximize);
                         }
-                        if titlebar_button(ui, "—", 15.0, a, false).clicked() {
+                        if titlebar_button(
+                            ui,
+                            egui::include_image!("../../resources/icons/ui/dash-lg.svg"),
+                            16.0,
+                            a,
+                            false,
+                        )
+                        .clicked()
+                        {
                             actions.push(UiAction::Minimize);
                         }
-                        if titlebar_button(ui, "⚙", 15.0, a, false).clicked() {
+                        if titlebar_button(
+                            ui,
+                            egui::include_image!("../../resources/icons/ui/gear.svg"),
+                            15.0,
+                            a,
+                            false,
+                        )
+                        .clicked()
+                        {
                             actions.push(UiAction::OpenSettings);
                         }
                         // The remaining strip, laid out left-to-right: app icon, an
@@ -484,9 +511,15 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
                                     egui::Color32::from_white_alpha(alpha(255)),
                                 );
                             }
-                            if titlebar_button(ui, "📂", 14.0, a, false)
-                                .on_hover_text("Open file…")
-                                .clicked()
+                            if titlebar_button(
+                                ui,
+                                egui::include_image!("../../resources/icons/ui/folder2-open.svg"),
+                                15.0,
+                                a,
+                                false,
+                            )
+                            .on_hover_text("Open file…")
+                            .clicked()
                             {
                                 actions.push(UiAction::OpenFile);
                             }
@@ -522,12 +555,12 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
         });
 }
 
-/// A single titlebar control glyph (`size` px) with a hover highlight (red for
-/// Close).
+/// A single titlebar control with a Bootstrap SVG icon (`icon_px` square) and a
+/// hover highlight (red for Close).
 fn titlebar_button(
     ui: &mut egui::Ui,
-    glyph: &str,
-    size: f32,
+    icon: egui::ImageSource<'static>,
+    icon_px: f32,
     a: f32,
     danger: bool,
 ) -> egui::Response {
@@ -542,13 +575,8 @@ fn titlebar_button(
         ui.painter().rect_filled(rect, 0.0, hover);
     }
     let fg = egui::Color32::from_rgba_unmultiplied(230, 230, 230, (255.0 * a) as u8);
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        glyph,
-        egui::FontId::proportional(size),
-        fg,
-    );
+    let icon_rect = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(icon_px));
+    egui::Image::new(icon).tint(fg).paint_at(ui, icon_rect);
     super::clickable(resp)
 }
 

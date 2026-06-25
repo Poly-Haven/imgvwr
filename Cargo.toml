@@ -21,6 +21,8 @@ glow = "0.16"
 egui = "0.31"
 egui_glow = { version = "0.31", features = ["winit"] }
 egui-winit = "0.31"
+# SVG icon loading (Bootstrap Icons, MIT) for the titlebar controls.
+egui_extras = { version = "0.31", features = ["svg"] }
 # Standard images
 image = { version = "0.25", default-features = false, features = [
     "jpeg", "png", "bmp", "tiff", "webp", "hdr", "gif", "ico", "tga", "pnm",

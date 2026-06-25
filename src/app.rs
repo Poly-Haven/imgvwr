@@ -726,6 +726,8 @@ impl App {
         let renderer = Renderer::new(gl.clone()).context("failed to create renderer")?;
         let egui = egui_glow::EguiGlow::new(event_loop, gl.clone(), None, None, false);
         install_ui_font(&egui.egui_ctx);
+        // SVG loader for the Bootstrap titlebar icons (egui::include_image!).
+        egui_extras::install_image_loaders(&egui.egui_ctx);
         self.titlebar_icon = load_titlebar_icon(&egui.egui_ctx);
 
         // Crisp multi-resolution title-bar + taskbar icon. Position was set at

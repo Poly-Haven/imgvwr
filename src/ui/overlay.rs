@@ -252,19 +252,23 @@ fn titlebar_button(
     super::clickable(resp)
 }
 
-/// Small numbered flags hanging from the top-right edge for saved comparator
-/// slots; the active (currently-viewed) slot is filled with the accent colour.
-/// Each flag is clickable (recall the slot) and shows its filename on hover.
+/// Small numbered flags hanging from the right edge for saved comparator slots,
+/// stacked top to bottom; the active (currently-viewed) slot is filled with the
+/// accent colour. Each flag is clickable (recall the slot) and shows its filename
+/// on hover.
 fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
     if inputs.slot_labels.iter().all(|s| s.is_none()) {
         return;
     }
     egui::Area::new(egui::Id::new("imgvwr_slots"))
-        // Hang from just below the reserved titlebar strip.
-        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-10.0, TITLEBAR_H))
+        // Flush against the right edge, below the reserved titlebar strip.
+        .anchor(
+            egui::Align2::RIGHT_TOP,
+            egui::Vec2::new(0.0, TITLEBAR_H + 4.0),
+        )
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
                 for (i, label) in inputs.slot_labels.iter().enumerate() {
                     let Some(label) = label else {
                         continue;
@@ -275,15 +279,16 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction
                     } else {
                         (panel_bg(), egui::Color32::from_gray(200))
                     };
-                    // Square top corners so the flag reads as hanging from the edge.
+                    // Square right corners so the flag reads as hanging from the
+                    // right edge.
                     let inner = egui::Frame {
                         fill,
                         inner_margin: egui::Margin::symmetric(7, 3),
                         corner_radius: egui::CornerRadius {
-                            nw: 0,
+                            nw: 3,
                             ne: 0,
                             sw: 3,
-                            se: 3,
+                            se: 0,
                         },
                         ..Default::default()
                     }
@@ -426,11 +431,11 @@ fn hint(ctx: &egui::Context) {
 /// the pointer is over it, so the caller can keep it visible while hovered and
 /// suppress image panning over it (the values are selectable text).
 fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs) -> bool {
-    // Below the slot-flag row so the two never overlap.
+    // To the left of the right-edge slot-flag column so the two never overlap.
     let resp = egui::Area::new(egui::Id::new("imgvwr_metadata"))
         .anchor(
             egui::Align2::RIGHT_TOP,
-            egui::Vec2::new(-10.0, 40.0 + TITLEBAR_H),
+            egui::Vec2::new(-34.0, TITLEBAR_H + 4.0),
         )
         .show(ctx, |ui| {
             let frame = egui::Frame {

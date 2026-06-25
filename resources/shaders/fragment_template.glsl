@@ -17,6 +17,8 @@ uniform bool  u_wrap_2d;             // 2D mode: repeat the image instead of cla
 uniform int   u_isolate_channel;     // -1 = all channels; 0=R 1=G 2=B 3=A shown as greyscale
 uniform vec2  u_stretch;             // per-axis image squash/stretch (1,1 = none)
 uniform int   u_sharpness;           // 1 = show the original-resolution high-pass
+uniform int   u_diff;                // 1 = show |image - slot| (the slot diff checker)
+uniform sampler2D u_diff_image;      // the comparator slot's image (for u_diff)
 // Guide lines, each .x = image coordinate (0..1), .y = 0 vertical / 1 horizontal.
 uniform int   u_guide_count;
 uniform vec2  u_guides[32];
@@ -103,6 +105,13 @@ void main() {
         if (abs(ddx.x) > 0.5) ddx.x -= sign(ddx.x);
         if (abs(ddy.x) > 0.5) ddy.x -= sign(ddy.x);
         texel = sample_image_grad(uv, ddx, ddy);
+    }
+
+    // Slot difference: the absolute difference vs the comparator slot, computed
+    // here (in source space) so the exposure / view / clarity below all act on
+    // the displayed difference itself.
+    if (u_diff != 0) {
+        texel = vec4(abs(texel.rgb - texture(u_diff_image, uv).rgb), 1.0);
     }
 
     color = texel.rgb;

@@ -27,6 +27,9 @@ const OCIO_APPLY: &str =
 /// Image texture occupies unit 0; OCIO LUTs start at unit 1.
 const OCIO_FIRST_UNIT: u32 = 1;
 
+/// Texture unit for the slot-difference image (above any plausible LUT count).
+const DIFF_UNIT: u32 = 12;
+
 /// Per-frame uniform values supplied by the application.
 #[derive(Clone, Copy, Debug)]
 pub struct RenderParams {
@@ -51,6 +54,8 @@ pub struct RenderParams {
     pub stretch: [f32; 2],
     /// Show the original-resolution sharpness high-pass instead of the image.
     pub sharpness: bool,
+    /// Show the absolute difference against the loaded comparator-slot image.
+    pub diff: bool,
     /// Guide lines: `[image_coord (0..1), orientation (0=vertical/1=horizontal)]`.
     pub guides: [[f32; 2]; 32],
     pub guide_count: i32,
@@ -78,6 +83,7 @@ impl Default for RenderParams {
             isolate_channel: -1,
             stretch: [1.0, 1.0],
             sharpness: false,
+            diff: false,
             guides: [[0.0; 2]; 32],
             guide_count: 0,
             clarity_amount: 0.0,
@@ -101,6 +107,8 @@ struct Uniforms {
     isolate_channel: Option<glow::UniformLocation>,
     stretch: Option<glow::UniformLocation>,
     sharpness: Option<glow::UniformLocation>,
+    diff: Option<glow::UniformLocation>,
+    diff_image: Option<glow::UniformLocation>,
     guide_count: Option<glow::UniformLocation>,
     guides: Option<glow::UniformLocation>,
     // Single-texture sampler.
@@ -133,6 +141,8 @@ impl Uniforms {
             isolate_channel: u("u_isolate_channel"),
             stretch: u("u_stretch"),
             sharpness: u("u_sharpness"),
+            diff: u("u_diff"),
+            diff_image: u("u_diff_image"),
             guide_count: u("u_guide_count"),
             guides: u("u_guides"),
             image: u("u_image"),
@@ -187,6 +197,8 @@ pub struct Renderer {
     ocio_apply: String,
     threshold: i32,
     max_texture_size: i32,
+    /// Uploaded comparator-slot image for the difference checker (unit DIFF_UNIT).
+    diff_texture: Option<glow::Texture>,
     /// Reusable offscreen post-process chain (Clarity, and future review tools).
     post: post::PostChain,
 }
@@ -222,6 +234,7 @@ impl Renderer {
                 ocio_apply: GAMMA_FALLBACK_APPLY.to_string(),
                 threshold,
                 max_texture_size,
+                diff_texture: None,
                 post,
             })
         }
@@ -229,6 +242,25 @@ impl Renderer {
 
     pub fn max_texture_size(&self) -> i32 {
         self.max_texture_size
+    }
+
+    /// Upload (or clear with `None`) the comparator-slot image used by the slot
+    /// difference checker. Returns false if the image is too large to upload as a
+    /// single texture (the diff sampler isn't tiled).
+    pub fn set_diff_image(&mut self, data: Option<&ImageData>) -> bool {
+        unsafe {
+            if let Some(t) = self.diff_texture.take() {
+                self.gl.delete_texture(t);
+            }
+            match data {
+                Some(d) => {
+                    self.diff_texture =
+                        texture::upload_diff_texture(&self.gl, d, self.max_texture_size);
+                    self.diff_texture.is_some()
+                }
+                None => true,
+            }
+        }
     }
 
     pub fn has_image(&self) -> bool {
@@ -428,6 +460,14 @@ impl Renderer {
             gl.uniform_1_i32(u.isolate_channel.as_ref(), params.isolate_channel);
             gl.uniform_2_f32(u.stretch.as_ref(), params.stretch[0], params.stretch[1]);
             gl.uniform_1_i32(u.sharpness.as_ref(), params.sharpness as i32);
+            // Slot-difference image on its own unit (only meaningful when u_diff).
+            let diffing = params.diff && self.diff_texture.is_some();
+            gl.uniform_1_i32(u.diff.as_ref(), diffing as i32);
+            gl.uniform_1_i32(u.diff_image.as_ref(), DIFF_UNIT as i32);
+            if diffing {
+                gl.active_texture(glow::TEXTURE0 + DIFF_UNIT);
+                gl.bind_texture(glow::TEXTURE_2D, self.diff_texture);
+            }
             let n = params.guide_count.clamp(0, 32) as usize;
             gl.uniform_1_i32(u.guide_count.as_ref(), n as i32);
             if n > 0 {

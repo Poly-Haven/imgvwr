@@ -439,6 +439,49 @@ unsafe fn set_filters(gl: &glow::Context, target: u32) {
     }
 }
 
+/// Synchronously upload `data` as a single mip-mapped 2D texture for the slot
+/// difference checker. Returns `None` if it exceeds `max_size` (would need
+/// tiling, which the diff sampler doesn't support). # Safety: GL context current.
+pub unsafe fn upload_diff_texture(
+    gl: &glow::Context,
+    data: &ImageData,
+    max_size: i32,
+) -> Option<glow::Texture> {
+    let (w, h) = (data.width as i32, data.height as i32);
+    if w <= 0 || h <= 0 || w.max(h) > max_size {
+        return None;
+    }
+    let (internal, format, ty, _bpp, bytes) = pixel_format(data);
+    let levels = (w.max(h) as f32).log2().floor() as i32 + 1;
+    let tex = gl.create_texture().ok()?;
+    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+    gl.tex_storage_2d(glow::TEXTURE_2D, levels.max(1), internal, w, h);
+    gl.tex_sub_image_2d(
+        glow::TEXTURE_2D,
+        0,
+        0,
+        0,
+        w,
+        h,
+        format,
+        ty,
+        glow::PixelUnpackData::Slice(Some(bytes)),
+    );
+    gl.generate_mipmap(glow::TEXTURE_2D);
+    let lin = glow::LINEAR as i32;
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MIN_FILTER,
+        glow::LINEAR_MIPMAP_LINEAR as i32,
+    );
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, lin);
+    let clamp = glow::CLAMP_TO_EDGE as i32;
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, clamp);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, clamp);
+    gl.bind_texture(glow::TEXTURE_2D, None);
+    Some(tex)
+}
+
 fn pixel_format(data: &ImageData) -> (u32, u32, u32, usize, &[u8]) {
     // (internal, format, type, bytes-per-pixel, raw bytes)
     match &data.pixels {

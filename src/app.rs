@@ -326,6 +326,8 @@ pub struct App {
     compare_prev: Option<Arc<ImageData>>,
     /// Slot whose image is currently displayed (drives the active flag).
     active_slot: Option<usize>,
+    /// Slot being shown as a difference against the current image (Alt+N).
+    diff_slot: Option<usize>,
 
     // F2 metadata box hover-reveal (near the top-right corner).
     metadata_hover: bool,
@@ -437,6 +439,7 @@ impl App {
             slots: std::array::from_fn(|_| None),
             compare_prev: None,
             active_slot: None,
+            diff_slot: None,
             metadata_hover: false,
             metadata_hide_deadline: None,
             pending: None,
@@ -1184,6 +1187,16 @@ impl App {
         if std::env::var_os("IMGVWR_DEBUG_SLOT").is_some() && self.slots[0].is_none() {
             self.slots[0] = self.current_image.clone();
         }
+        // Dev-only: self-diff against slot 1 to verify the diff path headlessly.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("IMGVWR_DEBUG_DIFF").is_some() {
+            if let Some(slot) = self.slots[0].clone().or_else(|| self.current_image.clone()) {
+                if let Some(gfx) = &mut self.gfx {
+                    gfx.renderer.set_diff_image(Some(slot.as_ref()));
+                }
+                self.diff_slot = Some(0);
+            }
+        }
         self.recompute_active_slot();
         // Retain the decoded image so navigating back to it is instant.
         self.cache_insert(data);
@@ -1232,6 +1245,38 @@ impl App {
         self.slots[n - 1] = Some(cur);
         self.recompute_active_slot();
         self.show_toast(format!("Saved slot {n}"));
+        self.request_redraw();
+    }
+
+    /// Alt+N: toggle showing the absolute difference between the current image
+    /// and comparator slot `n`. Uploads the slot image to the renderer's diff
+    /// texture; exposure/clarity/etc then act on the displayed difference.
+    fn toggle_slot_diff(&mut self, n: usize) {
+        let idx = n - 1;
+        if self.diff_slot == Some(idx) {
+            self.diff_slot = None;
+            if let Some(gfx) = &mut self.gfx {
+                gfx.renderer.set_diff_image(None);
+            }
+            self.show_toast("Diff off".to_string());
+            self.request_redraw();
+            return;
+        }
+        let Some(slot) = self.slots[idx].clone() else {
+            self.show_toast(format!("Slot {n} empty"));
+            return;
+        };
+        let ok = self
+            .gfx
+            .as_mut()
+            .is_some_and(|gfx| gfx.renderer.set_diff_image(Some(slot.as_ref())));
+        if ok {
+            self.diff_slot = Some(idx);
+            self.show_toast(format!("Diff vs slot {n}"));
+        } else {
+            self.diff_slot = None;
+            self.show_toast("Slot image too large to diff".to_string());
+        }
         self.request_redraw();
     }
 
@@ -1406,6 +1451,10 @@ impl App {
         self.isolate_channel = None;
         self.sharpness = false;
         self.guides.clear();
+        self.diff_slot = None;
+        if let Some(gfx) = &mut self.gfx {
+            gfx.renderer.set_diff_image(None);
+        }
         self.show_toast("Adjustments reset".to_string());
         self.request_redraw();
     }
@@ -2745,6 +2794,7 @@ impl App {
             isolate_channel: self.isolate_channel.map(|c| c as i32).unwrap_or(-1),
             stretch: [self.image_stretch.x, self.image_stretch.y],
             sharpness: self.sharpness,
+            diff: self.diff_slot.is_some(),
             guides: guide_arr,
             guide_count: guide_n as i32,
             clarity_amount: self.clarity_amount,
@@ -2982,7 +3032,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(digit) = numpad_digit(&event.physical_key) {
                     self.set_exact_zoom(digit, self.ctrl());
                 } else if let Some(slot) = toprow_digit(&event.physical_key) {
-                    if self.ctrl() {
+                    if self.modifiers.alt_key() {
+                        self.toggle_slot_diff(slot as usize);
+                    } else if self.ctrl() {
                         self.save_slot(slot as usize);
                     } else {
                         self.recall_slot(slot as usize);

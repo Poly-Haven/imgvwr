@@ -33,6 +33,7 @@ for Windows.
 | `L` | Lock zoom/pan across images |
 | `P` | Toggle 2D ↔ panorama mode |
 | `W` | Toggle tiled wrap (2D) |
+| `I` | Toggle nearest ↔ bilinear filtering |
 | `T` | Toggle Standard ↔ last-used view transform |
 | `O` | Open file… |
 | `F2` | Toggle metadata overlay (also appears on top-right hover) |

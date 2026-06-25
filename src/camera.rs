@@ -11,7 +11,7 @@ use glam::{Vec2, Vec3};
 
 pub const MIN_PITCH_RAD: f32 = -FRAC_PI_2;
 pub const MAX_PITCH_RAD: f32 = FRAC_PI_2;
-pub const MIN_FOV_DEG: f32 = 5.0;
+pub const MIN_FOV_DEG: f32 = 0.5;
 /// Rectilinear maximum, set on entering panorama mode.
 pub const PANORAMA_MAX_FOV_DEG: f32 = 140.0;
 pub const FLAT_MAX_FOV_DEG: f32 = 170.0;

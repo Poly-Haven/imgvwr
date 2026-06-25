@@ -144,26 +144,265 @@ pub fn tile_grid(width: i32, height: i32, threshold: i32) -> Option<(i32, i32, i
     Some((cols, rows, tile_size, tile_size + 2 * BORDER))
 }
 
-/// Build a single or tiled texture for `data` based on `threshold`.
-///
-/// # Safety: the GL context must be current.
-pub unsafe fn build_image_texture(
+/// Bytes uploaded per [`pump_upload`] call. Large enough that total upload time
+/// is close to a single blocking upload (performance is the priority), small
+/// enough that each frame's hitch stays short so the UI keeps responding and
+/// progress animates. ~256 MB ≈ a handful of frames even for a multi-GB texture.
+const UPLOAD_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+
+/// An in-progress, incremental GPU upload. Built by [`begin_upload`] and advanced
+/// a budget at a time by [`pump_upload`] across frames, so a multi-GB texture
+/// uploads without freezing the UI and with real progress.
+pub struct UploadJob {
+    kind: JobKind,
+    /// Next row (single) or next layer (tiled) to upload.
+    cursor: i32,
+    /// Total rows (single) or layers (tiled).
+    total: i32,
+    aspect: f32,
+    is_encoded_srgb: bool,
+}
+
+enum JobKind {
+    Single {
+        texture: glow::Texture,
+        width: i32,
+        height: i32,
+    },
+    Tiled {
+        tiled: TiledTexture,
+        /// Reused per-tile staging buffer (bordered tile pixels).
+        staging: Vec<u8>,
+    },
+}
+
+impl UploadJob {
+    /// Fraction uploaded so far, 0..=1.
+    pub fn progress(&self) -> f32 {
+        if self.total <= 0 {
+            1.0
+        } else {
+            (self.cursor as f32 / self.total as f32).clamp(0.0, 1.0)
+        }
+    }
+
+    /// Delete the partially-built texture (when an upload is abandoned).
+    /// # Safety: the GL context must be current.
+    pub unsafe fn discard(self, gl: &glow::Context) {
+        match self.kind {
+            JobKind::Single { texture, .. } => gl.delete_texture(texture),
+            JobKind::Tiled { tiled, .. } => gl.delete_texture(tiled.array),
+        }
+    }
+}
+
+/// Allocate the texture(s) for `data` and return an [`UploadJob`] to pump. No
+/// pixels are uploaded yet. # Safety: the GL context must be current.
+pub unsafe fn begin_upload(
     gl: &glow::Context,
     data: &ImageData,
     threshold: i32,
-) -> Option<ImageTexture> {
+) -> Option<UploadJob> {
     let w = data.width as i32;
     let h = data.height as i32;
-    let kind = if tile_grid(w, h, threshold).is_none() {
-        ImageTextureKind::Single(upload_single(gl, data)?)
+    let (internal, _, _, bpp, _) = pixel_format(data);
+
+    let kind = if let Some((cols, rows, tile_size, layer_size)) = tile_grid(w, h, threshold) {
+        let layers = cols * rows;
+        let levels = MIP_LEVELS.min((layer_size as f32).log2().floor() as i32 + 1);
+        log::info!(
+            "tiling {w}x{h} into {cols}x{rows} = {layers} tiles \
+             (tile {tile_size}, layer {layer_size}, border {BORDER}, {levels} mips)"
+        );
+        let array = gl.create_texture().ok()?;
+        gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(array));
+        gl.tex_storage_3d(
+            glow::TEXTURE_2D_ARRAY,
+            levels,
+            internal,
+            layer_size,
+            layer_size,
+            layers,
+        );
+        set_filters(gl, glow::TEXTURE_2D_ARRAY);
+        set_anisotropy(gl, glow::TEXTURE_2D_ARRAY);
+        gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+        let layer_w = layer_size as usize;
+        JobKind::Tiled {
+            tiled: TiledTexture {
+                array,
+                cols,
+                rows,
+                tile_size,
+                layer_size,
+                border: BORDER,
+                image_w: w,
+                image_h: h,
+            },
+            staging: vec![0u8; layer_w * layer_w * bpp],
+        }
     } else {
-        ImageTextureKind::Tiled(upload_tiled(gl, data, threshold)?)
+        let texture = gl.create_texture().ok()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        // Immutable storage (all mip levels): the fast path for the per-band
+        // tex_sub_image uploads that pump performs (a mutable tex_image_2d +
+        // sub-image path is several times slower on NVIDIA for huge textures).
+        let levels = (w.max(h) as f32).log2().floor() as i32 + 1;
+        gl.tex_storage_2d(glow::TEXTURE_2D, levels, internal, w, h);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        set_filters(gl, glow::TEXTURE_2D);
+        set_anisotropy(gl, glow::TEXTURE_2D);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        JobKind::Single {
+            texture,
+            width: w,
+            height: h,
+        }
     };
-    Some(ImageTexture {
+
+    let total = match &kind {
+        JobKind::Single { height, .. } => *height,
+        JobKind::Tiled { tiled, .. } => tiled.cols * tiled.rows,
+    };
+    Some(UploadJob {
         kind,
+        cursor: 0,
+        total,
         aspect: data.aspect(),
         is_encoded_srgb: data.is_encoded_srgb,
     })
+}
+
+/// Upload up to [`UPLOAD_BUDGET_BYTES`] of `job`. Returns `Some(ImageTexture)`
+/// once complete (mipmaps generated), else `None` — call again next frame.
+/// # Safety: GL context current; `data` must match what `begin_upload` received.
+pub unsafe fn pump_upload(
+    gl: &glow::Context,
+    job: &mut UploadJob,
+    data: &ImageData,
+) -> Option<ImageTexture> {
+    let (_, format, ty, bpp, src) = pixel_format(data);
+    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+    let (aspect, is_srgb) = (job.aspect, job.is_encoded_srgb);
+
+    match &mut job.kind {
+        JobKind::Single {
+            texture,
+            width,
+            height,
+        } => {
+            let row_bytes = (*width as usize) * bpp;
+            let band =
+                ((UPLOAD_BUDGET_BYTES / row_bytes.max(1)).max(1) as i32).min(*height - job.cursor);
+            let byte0 = job.cursor as usize * row_bytes;
+            let byte1 = (job.cursor + band) as usize * row_bytes;
+            gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                job.cursor,
+                *width,
+                band,
+                format,
+                ty,
+                glow::PixelUnpackData::Slice(Some(&src[byte0..byte1])),
+            );
+            job.cursor += band;
+            if job.cursor >= *height {
+                gl.generate_mipmap(glow::TEXTURE_2D);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                return Some(ImageTexture {
+                    kind: ImageTextureKind::Single(*texture),
+                    aspect,
+                    is_encoded_srgb: is_srgb,
+                });
+            }
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            None
+        }
+        JobKind::Tiled { tiled, staging } => {
+            let (w, h) = (tiled.image_w, tiled.image_h);
+            let (cols, tile_size, layer_size) = (tiled.cols, tiled.tile_size, tiled.layer_size);
+            let row_stride = w as usize * bpp;
+            let layer_w = layer_size as usize;
+            let tile_bytes = layer_w * layer_w * bpp;
+            let budget = (UPLOAD_BUDGET_BYTES / tile_bytes.max(1)).max(1) as i32;
+            let end = (job.cursor + budget).min(job.total);
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(tiled.array));
+            for layer in job.cursor..end {
+                let row = layer / cols;
+                let col = layer % cols;
+                for ly in 0..layer_size {
+                    let sy = (row * tile_size + ly - BORDER).clamp(0, h - 1) as usize;
+                    let src_row = sy * row_stride;
+                    let dst_row = ly as usize * layer_w * bpp;
+                    for lx in 0..layer_size {
+                        let sx = (col * tile_size + lx - BORDER).clamp(0, w - 1) as usize;
+                        let s = src_row + sx * bpp;
+                        let d = dst_row + lx as usize * bpp;
+                        staging[d..d + bpp].copy_from_slice(&src[s..s + bpp]);
+                    }
+                }
+                gl.tex_sub_image_3d(
+                    glow::TEXTURE_2D_ARRAY,
+                    0,
+                    0,
+                    0,
+                    layer,
+                    layer_size,
+                    layer_size,
+                    1,
+                    format,
+                    ty,
+                    glow::PixelUnpackData::Slice(Some(staging.as_slice())),
+                );
+            }
+            job.cursor = end;
+            if job.cursor >= job.total {
+                gl.generate_mipmap(glow::TEXTURE_2D_ARRAY);
+                gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+                let out = TiledTexture {
+                    array: tiled.array,
+                    cols: tiled.cols,
+                    rows: tiled.rows,
+                    tile_size: tiled.tile_size,
+                    layer_size: tiled.layer_size,
+                    border: tiled.border,
+                    image_w: tiled.image_w,
+                    image_h: tiled.image_h,
+                };
+                return Some(ImageTexture {
+                    kind: ImageTextureKind::Tiled(out),
+                    aspect,
+                    is_encoded_srgb: is_srgb,
+                });
+            }
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+            None
+        }
+    }
+}
+
+/// Set min/mag filters for the default bilinear mode (the I-key toggle re-sets
+/// them per frame in the renderer).
+unsafe fn set_filters(gl: &glow::Context, target: u32) {
+    gl.tex_parameter_i32(
+        target,
+        glow::TEXTURE_MIN_FILTER,
+        glow::LINEAR_MIPMAP_LINEAR as i32,
+    );
+    gl.tex_parameter_i32(target, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+    if target == glow::TEXTURE_2D_ARRAY {
+        gl.tex_parameter_i32(target, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(target, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+    }
 }
 
 fn pixel_format(data: &ImageData) -> (u32, u32, u32, usize, &[u8]) {
@@ -191,149 +430,6 @@ unsafe fn set_anisotropy(gl: &glow::Context, target: u32) {
     if max_aniso > 1.0 {
         gl.tex_parameter_f32(target, TEXTURE_MAX_ANISOTROPY, max_aniso);
     }
-}
-
-unsafe fn upload_single(gl: &glow::Context, data: &ImageData) -> Option<glow::Texture> {
-    let (internal, format, ty, _, bytes) = pixel_format(data);
-    let texture = gl.create_texture().ok()?;
-    gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-    gl.tex_image_2d(
-        glow::TEXTURE_2D,
-        0,
-        internal as i32,
-        data.width as i32,
-        data.height as i32,
-        0,
-        format,
-        ty,
-        glow::PixelUnpackData::Slice(Some(bytes)),
-    );
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
-    gl.tex_parameter_i32(
-        glow::TEXTURE_2D,
-        glow::TEXTURE_WRAP_T,
-        glow::CLAMP_TO_EDGE as i32,
-    );
-    gl.tex_parameter_i32(
-        glow::TEXTURE_2D,
-        glow::TEXTURE_MIN_FILTER,
-        glow::LINEAR_MIPMAP_LINEAR as i32,
-    );
-    gl.tex_parameter_i32(
-        glow::TEXTURE_2D,
-        glow::TEXTURE_MAG_FILTER,
-        glow::LINEAR as i32,
-    );
-    set_anisotropy(gl, glow::TEXTURE_2D);
-    gl.generate_mipmap(glow::TEXTURE_2D);
-    gl.bind_texture(glow::TEXTURE_2D, None);
-    Some(texture)
-}
-
-unsafe fn upload_tiled(
-    gl: &glow::Context,
-    data: &ImageData,
-    threshold: i32,
-) -> Option<TiledTexture> {
-    let w = data.width as i32;
-    let h = data.height as i32;
-    let (internal, format, ty, bpp, src) = pixel_format(data);
-
-    let (cols, rows, tile_size, layer_size) =
-        tile_grid(w, h, threshold).expect("upload_tiled called for a non-tiled image");
-    let layers = cols * rows;
-    // Cap the mip chain at log2(BORDER) levels so every generated mip stays
-    // within the border's seamless range.
-    let levels = MIP_LEVELS.min((layer_size as f32).log2().floor() as i32 + 1);
-
-    log::info!(
-        "tiling {w}x{h} into {cols}x{rows} = {layers} tiles \
-         (tile {tile_size}, layer {layer_size}, border {BORDER}, {levels} mips)"
-    );
-
-    let array = gl.create_texture().ok()?;
-    gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(array));
-    gl.tex_storage_3d(
-        glow::TEXTURE_2D_ARRAY,
-        levels,
-        internal,
-        layer_size,
-        layer_size,
-        layers,
-    );
-    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-
-    let row_stride = w as usize * bpp;
-    let layer_w = layer_size as usize;
-    let mut staging = vec![0u8; layer_w * layer_w * bpp];
-
-    for row in 0..rows {
-        for col in 0..cols {
-            // Fill the staging buffer for this tile, replicating image-edge
-            // pixels into the border.
-            for ly in 0..layer_size {
-                let sy = (row * tile_size + ly - BORDER).clamp(0, h - 1) as usize;
-                let src_row = sy * row_stride;
-                let dst_row = ly as usize * layer_w * bpp;
-                for lx in 0..layer_size {
-                    let sx = (col * tile_size + lx - BORDER).clamp(0, w - 1) as usize;
-                    let s = src_row + sx * bpp;
-                    let d = dst_row + lx as usize * bpp;
-                    staging[d..d + bpp].copy_from_slice(&src[s..s + bpp]);
-                }
-            }
-            let layer = row * cols + col;
-            gl.tex_sub_image_3d(
-                glow::TEXTURE_2D_ARRAY,
-                0,
-                0,
-                0,
-                layer,
-                layer_size,
-                layer_size,
-                1,
-                format,
-                ty,
-                glow::PixelUnpackData::Slice(Some(&staging)),
-            );
-        }
-    }
-
-    gl.tex_parameter_i32(
-        glow::TEXTURE_2D_ARRAY,
-        glow::TEXTURE_MIN_FILTER,
-        glow::LINEAR_MIPMAP_LINEAR as i32,
-    );
-    gl.tex_parameter_i32(
-        glow::TEXTURE_2D_ARRAY,
-        glow::TEXTURE_MAG_FILTER,
-        glow::LINEAR as i32,
-    );
-    gl.tex_parameter_i32(
-        glow::TEXTURE_2D_ARRAY,
-        glow::TEXTURE_WRAP_S,
-        glow::CLAMP_TO_EDGE as i32,
-    );
-    gl.tex_parameter_i32(
-        glow::TEXTURE_2D_ARRAY,
-        glow::TEXTURE_WRAP_T,
-        glow::CLAMP_TO_EDGE as i32,
-    );
-    set_anisotropy(gl, glow::TEXTURE_2D_ARRAY);
-    gl.generate_mipmap(glow::TEXTURE_2D_ARRAY);
-    gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
-
-    Some(TiledTexture {
-        array,
-        cols,
-        rows,
-        tile_size,
-        layer_size,
-        border: BORDER,
-        image_w: w,
-        image_h: h,
-    })
 }
 
 #[cfg(test)]

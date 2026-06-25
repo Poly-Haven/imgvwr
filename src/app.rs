@@ -54,7 +54,7 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 use crate::camera::{Camera, CameraController};
 use crate::image_loader::{is_supported, load_image, supported_extensions, ImageData};
 use crate::ocio::OcioManager;
-use crate::prefs::{AppPreferences, PreferredView};
+use crate::prefs::{AppPreferences, PreferredView, WindowGeometry};
 use crate::renderer::{RenderParams, Renderer};
 use crate::ui::{self, UiAction, UiInputs, UiState};
 use crate::UserEvent;
@@ -108,6 +108,15 @@ struct Toast {
     born: Instant,
 }
 
+/// An image whose GPU upload is in progress; the view state is applied once the
+/// incremental upload completes (`finalize_adopt`).
+struct PendingAdopt {
+    data: Arc<ImageData>,
+    for_compare: bool,
+    /// Pre-swap 2D `(zoom, height)` for native-scale matching on a slot recall.
+    old_scale: Option<(f32, f32)>,
+}
+
 /// Coarse load status (the error string is surfaced in the UI from Commit 9).
 enum LoadState {
     Idle,
@@ -159,6 +168,8 @@ pub struct App {
     exposure: f32,
     gamma: f32,
     wrap_2d: bool,
+    /// Nearest-neighbour filtering instead of bilinear (I key).
+    nearest_filter: bool,
     show_metadata: bool,
 
     // Colour management.
@@ -228,6 +239,11 @@ pub struct App {
     // F2 metadata box hover-reveal (near the top-right corner).
     metadata_hover: bool,
     metadata_hide_deadline: Option<Instant>,
+
+    /// In-progress adoption waiting on the incremental GPU upload.
+    pending: Option<PendingAdopt>,
+    /// Upload fraction (0..1) while `pending`, for the progress bar.
+    upload_progress: f32,
 }
 
 impl App {
@@ -265,6 +281,7 @@ impl App {
             exposure: 0.0,
             gamma: 1.0,
             wrap_2d: false,
+            nearest_filter: false,
             show_metadata: false,
             ocio,
             last_view: None,
@@ -310,6 +327,8 @@ impl App {
             active_slot: None,
             metadata_hover: false,
             metadata_hide_deadline: None,
+            pending: None,
+            upload_progress: 0.0,
         }
     }
 
@@ -457,10 +476,27 @@ impl App {
         // badly for both the title bar and taskbar. We instead set crisp
         // native-size icons from the multi-resolution .ico after creation
         // (`set_window_icons`), backed by the icon embedded in the .exe.
-        let window_attributes = Window::default_attributes()
+        let mut window_attributes = Window::default_attributes()
             .with_title("imgvwr")
-            .with_inner_size(LogicalSize::new(1280.0, 720.0))
             .with_min_inner_size(LogicalSize::new(170.0, 170.0));
+        // Restore the saved geometry, or open centred at the default size — set
+        // at creation so the window never visibly jumps into position.
+        let monitor = event_loop.primary_monitor();
+        if let Some(g) = self.prefs.window {
+            window_attributes = window_attributes
+                .with_inner_size(PhysicalSize::new(g.width.max(170), g.height.max(170)))
+                .with_position(PhysicalPosition::new(g.x, g.y));
+        } else {
+            let scale = monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
+            let (w, h) = ((1280.0 * scale) as u32, (720.0 * scale) as u32);
+            window_attributes = window_attributes.with_inner_size(PhysicalSize::new(w, h));
+            if let Some(m) = &monitor {
+                let (ms, mp) = (m.size(), m.position());
+                let x = mp.x + ((ms.width as i32 - w as i32) / 2).max(0);
+                let y = mp.y + ((ms.height as i32 - h as i32) / 2).max(0);
+                window_attributes = window_attributes.with_position(PhysicalPosition::new(x, y));
+            }
+        }
 
         let template = ConfigTemplateBuilder::new()
             .with_alpha_size(8)
@@ -534,9 +570,9 @@ impl App {
         let egui = egui_glow::EguiGlow::new(event_loop, gl.clone(), None, None, false);
         install_ui_font(&egui.egui_ctx);
 
-        // Crisp multi-resolution title-bar + taskbar icon, then centre.
+        // Crisp multi-resolution title-bar + taskbar icon. Position was set at
+        // creation (restored or centred), so no post-creation move here.
         set_window_icons(&window);
-        center_window(&window);
 
         Ok(Gfx {
             gl,
@@ -569,14 +605,15 @@ impl App {
             .current_monitor()
             .map(|m| {
                 let s = m.size();
-                (
-                    (s.width as f32 * 0.92) as u32,
-                    (s.height as f32 * 0.92) as u32,
-                )
+                (s.width as f32 * 0.92, s.height as f32 * 0.92)
             })
-            .unwrap_or((width, height));
-        let w = width.min(max_w).max(170);
-        let h = height.min(max_h).max(170);
+            .unwrap_or((width as f32, height as f32));
+        // Scale the image down uniformly to fit the monitor so the window keeps
+        // the image's aspect ratio (independent w/h clamping would letterbox a
+        // down-scaled oversized image). Never upscale past the native size.
+        let fit = (max_w / width as f32).min(max_h / height as f32).min(1.0);
+        let w = ((width as f32 * fit) as u32).max(170);
+        let h = ((height as f32 * fit) as u32).max(170);
         self.auto_resized_done = true;
         self.auto_resize_pending = true;
         let _ = gfx.window.request_inner_size(PhysicalSize::new(w, h));
@@ -593,8 +630,7 @@ impl App {
         // immediately, skipping the loading state and the decode thread.
         if let Some(data) = self.cache_take(&path) {
             log::info!("adopting cached {}", path.display());
-            self.adopt_loaded(data, false);
-            self.request_redraw();
+            self.begin_adopt(data, false, None);
             return;
         }
 
@@ -627,7 +663,7 @@ impl App {
             }
             match msg.result {
                 Ok(data) => {
-                    self.adopt_loaded(Arc::new(data), false);
+                    self.begin_adopt(Arc::new(data), false, None);
                     adopted = true;
                 }
                 Err(e) => {
@@ -644,10 +680,66 @@ impl App {
         }
     }
 
-    /// Adopt a decoded image as the active one (from a background load, a cache
-    /// hit, or a comparator slot recall). `for_compare` preserves the current
-    /// view (like the lock) and skips folder preload + window auto-resize.
-    fn adopt_loaded(&mut self, data: Arc<ImageData>, for_compare: bool) {
+    /// Begin adopting a decoded image (from a background load, cache hit, or slot
+    /// recall): start the incremental GPU upload and defer the view-state swap to
+    /// `finalize_adopt` so the old image stays visible (with a progress bar)
+    /// until the new one is ready.
+    fn begin_adopt(
+        &mut self,
+        data: Arc<ImageData>,
+        for_compare: bool,
+        old_scale: Option<(f32, f32)>,
+    ) {
+        if !for_compare {
+            log::info!(
+                "decoded in {:.2}s, uploading {}",
+                self.load_start.elapsed().as_secs_f32(),
+                data.path.display()
+            );
+        }
+        if let Some(gfx) = &mut self.gfx {
+            gfx.renderer.start_upload(data.as_ref());
+        }
+        // For a recall there is no decode phase, so time the upload itself.
+        if for_compare {
+            self.load_start = Instant::now();
+        }
+        self.upload_progress = 0.0;
+        self.pending = Some(PendingAdopt {
+            data,
+            for_compare,
+            old_scale,
+        });
+        self.request_redraw();
+    }
+
+    /// Advance the in-progress GPU upload by one budget; finalize when complete.
+    fn pump_upload(&mut self) {
+        let Some(data) = self.pending.as_ref().map(|p| p.data.clone()) else {
+            return;
+        };
+        let progress = match &mut self.gfx {
+            Some(gfx) => gfx.renderer.pump_upload(data.as_ref()),
+            None => return,
+        };
+        self.upload_progress = progress;
+        if progress >= 1.0 {
+            if let Some(pending) = self.pending.take() {
+                self.finalize_adopt(pending);
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Apply the view state for a freshly-uploaded image (the texture is already
+    /// installed). `for_compare` preserves the current view (like the lock) and
+    /// skips folder preload + window auto-resize.
+    fn finalize_adopt(&mut self, pending: PendingAdopt) {
+        let PendingAdopt {
+            data,
+            for_compare,
+            old_scale,
+        } = pending;
         let equirect = data.is_equirectangular();
         log::info!(
             "loaded {}x{} ({} ch, {}) {} from {}",
@@ -658,9 +750,6 @@ impl App {
             if equirect { "[panorama]" } else { "[2D]" },
             data.path.display()
         );
-        if let Some(gfx) = &mut self.gfx {
-            gfx.renderer.set_image(data.as_ref());
-        }
         log::info!(
             "load-to-ready: {:.2}s for {}",
             self.load_start.elapsed().as_secs_f32(),
@@ -724,6 +813,9 @@ impl App {
         self.recompute_active_slot();
         // Retain the decoded image so navigating back to it is instant.
         self.cache_insert(data);
+        // Match on-screen pixel scale for a comparator swap (native resolution).
+        self.preserve_native_scale(old_scale);
+        self.request_redraw();
     }
 
     /// Take the cached decoded image for `path`, removing it from the cache.
@@ -777,13 +869,11 @@ impl App {
             // returns to the slot).
             if let Some(prev) = self.compare_prev.take() {
                 self.compare_prev = self.current_image.clone();
-                self.adopt_loaded(prev, true);
-                self.preserve_native_scale(old_scale);
+                self.begin_adopt(prev, true, old_scale);
             }
         } else {
             self.compare_prev = self.current_image.clone();
-            self.adopt_loaded(target, true);
-            self.preserve_native_scale(old_scale);
+            self.begin_adopt(target, true, old_scale);
         }
     }
 
@@ -1200,6 +1290,17 @@ impl App {
                 self.ui_state.show_help = !self.ui_state.show_help;
             }
             (_, Some("f")) | (_, Some("F")) => self.toggle_fullscreen(),
+            (_, Some("i")) | (_, Some("I")) => {
+                self.nearest_filter = !self.nearest_filter;
+                self.show_toast(
+                    if self.nearest_filter {
+                        "Nearest"
+                    } else {
+                        "Bilinear"
+                    }
+                    .to_string(),
+                );
+            }
             (_, Some("q")) | (_, Some("Q")) => self.escape_or_exit(event_loop),
             (Key::Named(NamedKey::F2), _) => {
                 self.show_metadata = !self.show_metadata;
@@ -1366,7 +1467,9 @@ impl App {
 
         // Overlay state, with headless-test overrides applied.
         let forced = self.force_overlay.as_deref();
-        let loading = self.is_loading() || forced == Some("loading");
+        let loading = self.is_busy() || forced == Some("loading");
+        // Determinate during the GPU upload phase, indeterminate while decoding.
+        let progress = self.pending.as_ref().map(|_| self.upload_progress);
         let error = match &self.load_state {
             LoadState::Failed(e) => Some(e.clone()),
             _ if forced == Some("error") => Some("Example decode error: unsupported format".into()),
@@ -1383,6 +1486,7 @@ impl App {
             exposure: self.exposure,
             gamma: self.gamma,
             loading,
+            progress,
             loading_name: self.pending_name.clone(),
             error,
             show_hint,
@@ -1393,9 +1497,36 @@ impl App {
             metadata: self.metadata_lines(),
             show_help: self.ui_state.show_help,
             toast: self.toast_render(),
-            slots_saved: std::array::from_fn(|i| self.slots[i].is_some()),
+            slot_labels: self.slot_labels(),
             active_slot: self.active_slot,
         }
+    }
+
+    /// Per-slot hover labels: the filename, or — when two saved slots share a
+    /// filename — the path portion that differs (relative to the group's common
+    /// ancestor, e.g. `a/b/c.jpg` vs `x/b/c.jpg`).
+    fn slot_labels(&self) -> [Option<String>; 9] {
+        let saved: Vec<(usize, &Path)> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.as_ref().map(|d| (i, d.path.as_path())))
+            .collect();
+        std::array::from_fn(|i| {
+            let path = self.slots[i].as_ref()?.path.as_path();
+            let group: Vec<&Path> = saved
+                .iter()
+                .filter(|(_, q)| q.file_name() == path.file_name())
+                .map(|(_, q)| *q)
+                .collect();
+            Some(if group.len() > 1 {
+                disambiguated_path(path, &group)
+            } else {
+                path.file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+        })
     }
 
     /// Key/value lines for the F2 metadata HUD (§12.3).
@@ -1416,8 +1547,10 @@ impl App {
             ("Type".into(), fi.dtype.clone()),
             ("Compression".into(), fi.compression.clone()),
             (
+                // Reflect the current view mode, not the image's intrinsic type
+                // (a 2:1 panorama can be viewed in 2D via the P key).
                 "Mode".into(),
-                if fi.panorama {
+                if self.camera.is_panorama() {
                     "Panorama".into()
                 } else {
                     "2D".into()
@@ -1516,6 +1649,7 @@ impl App {
                 self.ui_state.show_help = false;
                 self.request_redraw();
             }
+            UiAction::RecallSlot(i) => self.recall_slot(i + 1),
         }
     }
 
@@ -1543,16 +1677,25 @@ impl App {
         self.capture.as_ref().is_some_and(|c| !c.done)
     }
 
+    /// Busy = decoding on a thread or uploading to the GPU.
+    fn is_busy(&self) -> bool {
+        self.is_loading() || self.pending.is_some()
+    }
+
     fn capture_ready(&self) -> bool {
         self.capture.as_ref().is_some_and(|c| {
             let elapsed = c.start.elapsed();
             !c.done
                 && elapsed >= c.delay
-                && (!self.is_loading() || elapsed >= c.delay + CAPTURE_LOAD_CAP)
+                && (!self.is_busy() || elapsed >= c.delay + CAPTURE_LOAD_CAP)
         })
     }
 
     fn render(&mut self) -> RenderOutcome {
+        // Advance any in-progress incremental upload before drawing this frame.
+        if self.pending.is_some() {
+            self.pump_upload();
+        }
         self.tick_toolbar();
         self.tick_metadata();
 
@@ -1569,6 +1712,7 @@ impl App {
             half_fov_radians: cam.half_fov_radians(),
             tan_half_fov: cam.tan_half_fov(),
             wrap_2d: self.wrap_2d,
+            nearest: self.nearest_filter,
         };
         let capture_ready = self.capture_ready();
 
@@ -1784,8 +1928,8 @@ impl ApplicationHandler<UserEvent> for App {
             if let Some(gfx) = &self.gfx {
                 gfx.window.request_redraw();
             }
-        } else if self.is_loading() {
-            // Keep the loading spinner animating while a decode is in flight.
+        } else if self.is_busy() {
+            // Drive frames while decoding (spinner) or uploading (pump + bar).
             event_loop.set_control_flow(ControlFlow::Poll);
             self.request_redraw();
         } else if self.toast_active() {
@@ -1806,6 +1950,24 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Persist the windowed (non-fullscreen) geometry for next launch.
+        if !self.fullscreen {
+            if let Some(gfx) = &self.gfx {
+                if let Ok(pos) = gfx.window.outer_position() {
+                    let size = gfx.window.inner_size();
+                    self.prefs.window = Some(WindowGeometry {
+                        x: pos.x,
+                        y: pos.y,
+                        width: size.width,
+                        height: size.height,
+                    });
+                }
+            }
+        }
+        self.prefs.save();
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -1853,6 +2015,23 @@ fn install_ui_font(ctx: &egui::Context) {
 /// The alphabetical sibling image `dir` steps from `current` in its folder
 /// (wrapping at the ends). `None` if the folder can't be read or has no
 /// supported images.
+/// The portion of `path` below the deepest directory common to all of `group`,
+/// joined with `/` (e.g. `a/b/c.jpg` vs `x/b/c.jpg`). Used to disambiguate
+/// comparator slots whose filenames collide.
+fn disambiguated_path(path: &Path, group: &[&Path]) -> String {
+    let mut anc = path.to_path_buf();
+    while !group.iter().all(|q| q.starts_with(&anc)) {
+        if !anc.pop() {
+            break;
+        }
+    }
+    let rel = path.strip_prefix(&anc).unwrap_or(path);
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn sibling_path(current: &Path, dir: i32) -> Option<PathBuf> {
     let parent = current.parent()?;
     let mut files: Vec<PathBuf> = std::fs::read_dir(parent)

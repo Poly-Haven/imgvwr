@@ -40,6 +40,8 @@ pub struct RenderParams {
     pub tan_half_fov: f32,
     /// 2D mode: repeat the image (GL_REPEAT both axes) instead of clamping.
     pub wrap_2d: bool,
+    /// Nearest-neighbour texture filtering instead of the default bilinear.
+    pub nearest: bool,
 }
 
 impl Default for RenderParams {
@@ -55,6 +57,7 @@ impl Default for RenderParams {
             half_fov_radians: half_fov,
             tan_half_fov: half_fov.tan(),
             wrap_2d: false,
+            nearest: false,
         }
     }
 }
@@ -139,6 +142,9 @@ pub struct Renderer {
     vbo: glow::Buffer,
     uniforms: Uniforms,
     image: Option<ImageTexture>,
+    /// An in-progress incremental upload (the previous image stays displayed
+    /// until it completes).
+    upload: Option<texture::UploadJob>,
     ocio: OcioGlState,
     /// Current `__IMAGE_SAMPLER__` kind (drives shader rebuilds, §9.4).
     sampler_kind: SamplerKind,
@@ -170,6 +176,7 @@ impl Renderer {
                 vbo,
                 uniforms,
                 image: None,
+                upload: None,
                 ocio: OcioGlState::empty(),
                 sampler_kind: SamplerKind::Single,
                 ocio_decls: String::new(),
@@ -196,34 +203,58 @@ impl Renderer {
         &self.ocio.signature
     }
 
-    /// Upload `data`, choosing the single or tiled path, and rebuild the program
-    /// if the sampler kind changed.
-    pub fn set_image(&mut self, data: &ImageData) {
+    /// Begin an incremental upload of `data`. The previously-displayed image
+    /// stays until [`pump_upload`](Self::pump_upload) reports completion. Any
+    /// in-progress upload is abandoned.
+    pub fn start_upload(&mut self, data: &ImageData) {
         let gl = self.gl.clone();
-        if let Some(prev) = self.image.take() {
-            unsafe { prev.delete(&gl) };
+        if let Some(job) = self.upload.take() {
+            unsafe { job.discard(&gl) };
         }
-        let tex = match unsafe { texture::build_image_texture(&gl, data, self.threshold) } {
-            Some(t) => t,
-            None => {
-                log::error!("failed to build image texture for {}", data.path.display());
-                return;
-            }
+        self.upload = unsafe { texture::begin_upload(&gl, data, self.threshold) };
+        if self.upload.is_none() {
+            log::error!("failed to begin image upload for {}", data.path.display());
+        }
+    }
+
+    /// True while an incremental upload is in progress.
+    pub fn is_uploading(&self) -> bool {
+        self.upload.is_some()
+    }
+
+    /// Advance the in-progress upload by one budget; returns the fraction done
+    /// (1.0 when complete or idle). On completion the new image is installed and
+    /// the program rebuilt if the sampler kind changed.
+    pub fn pump_upload(&mut self, data: &ImageData) -> f32 {
+        let gl = self.gl.clone();
+        let finished = match &mut self.upload {
+            Some(job) => unsafe { texture::pump_upload(&gl, job, data) },
+            None => return 1.0,
         };
-        let kind = tex.sampler_kind();
-        if kind != self.sampler_kind {
-            self.sampler_kind = kind;
-            unsafe { self.rebuild_program() };
-            log::info!("image sampler kind -> {kind:?}");
+        match finished {
+            Some(tex) => {
+                if let Some(prev) = self.image.take() {
+                    unsafe { prev.delete(&gl) };
+                }
+                let kind = tex.sampler_kind();
+                if kind != self.sampler_kind {
+                    self.sampler_kind = kind;
+                    unsafe { self.rebuild_program() };
+                    log::info!("image sampler kind -> {kind:?}");
+                }
+                self.image = Some(tex);
+                self.upload = None;
+                log::info!(
+                    "uploaded image {}x{} ({} ch, {})",
+                    data.width,
+                    data.height,
+                    data.channels,
+                    data.dtype_name
+                );
+                1.0
+            }
+            None => self.upload.as_ref().map(|j| j.progress()).unwrap_or(1.0),
         }
-        self.image = Some(tex);
-        log::info!(
-            "uploaded image {}x{} ({} ch, {})",
-            data.width,
-            data.height,
-            data.channels,
-            data.dtype_name
-        );
     }
 
     /// Rebuild the fragment program for `shader` and upload its LUTs (§9.3/§9.4).
@@ -329,6 +360,13 @@ impl Renderer {
             );
             gl.uniform_1_i32(u.wrap_2d.as_ref(), params.wrap_2d as i32);
 
+            // Min/mag filters for the active interpolation mode (I key).
+            let (min_f, mag_f) = if params.nearest {
+                (glow::NEAREST_MIPMAP_NEAREST, glow::NEAREST)
+            } else {
+                (glow::LINEAR_MIPMAP_LINEAR, glow::LINEAR)
+            };
+
             gl.active_texture(glow::TEXTURE0);
             match &image.kind {
                 ImageTextureKind::Single(tex) => {
@@ -339,10 +377,22 @@ impl Renderer {
                         glow::CLAMP_TO_EDGE
                     };
                     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, wrap_t as i32);
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, min_f as i32);
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, mag_f as i32);
                     gl.uniform_1_i32(u.image.as_ref(), 0);
                 }
                 ImageTextureKind::Tiled(t) => {
                     gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(t.array));
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D_ARRAY,
+                        glow::TEXTURE_MIN_FILTER,
+                        min_f as i32,
+                    );
+                    gl.tex_parameter_i32(
+                        glow::TEXTURE_2D_ARRAY,
+                        glow::TEXTURE_MAG_FILTER,
+                        mag_f as i32,
+                    );
                     gl.uniform_1_i32(u.tiles.as_ref(), 0);
                     gl.uniform_1_i32(u.tile_cols.as_ref(), t.cols);
                     gl.uniform_1_i32(u.tile_rows.as_ref(), t.rows);
@@ -376,6 +426,9 @@ impl Drop for Renderer {
         unsafe {
             if let Some(image) = self.image.take() {
                 image.delete(gl);
+            }
+            if let Some(job) = self.upload.take() {
+                job.discard(gl);
             }
             for t in self.ocio.textures.drain(..) {
                 gl.delete_texture(t.texture);

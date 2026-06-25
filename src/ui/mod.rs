@@ -30,6 +30,8 @@ pub struct UiInputs {
 
     // Overlays (Commit 9).
     pub loading: bool,
+    /// Upload progress (0..1) during the GPU phase; `None` = indeterminate.
+    pub progress: Option<f32>,
     pub loading_name: Option<String>,
     pub error: Option<String>,
     pub show_hint: bool,
@@ -38,8 +40,9 @@ pub struct UiInputs {
     pub show_help: bool,
     /// Transient bottom-right toast: `(text, alpha)`, drawn while alpha > 0.
     pub toast: Option<(String, f32)>,
-    /// Which comparator slots (1..=9 → index 0..=8) currently hold an image.
-    pub slots_saved: [bool; 9],
+    /// Per comparator slot (1..=9 → index 0..=8): `Some(tooltip_label)` when the
+    /// slot holds an image (label disambiguated by path when names collide).
+    pub slot_labels: [Option<String>; 9],
     /// The slot whose image is currently displayed (for flag highlighting).
     pub active_slot: Option<usize>,
 }
@@ -83,7 +86,12 @@ pub struct UiState {
 pub enum UiAction {
     OpenFile,
     Reload,
-    SetView { display: String, view: String },
+    SetView {
+        display: String,
+        view: String,
+    },
     DismissError,
     CloseHelp,
+    /// Recall the comparator slot at this index (0..=8).
+    RecallSlot(usize),
 }

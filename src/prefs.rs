@@ -16,6 +16,15 @@ pub struct PreferredView {
     pub view: String,
 }
 
+/// Saved outer position and inner size of the main window (physical pixels).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppPreferences {
     /// Schema version, for forward-compatible migrations.
@@ -24,6 +33,9 @@ pub struct AppPreferences {
     /// Keyed by lowercased file extension including the dot (e.g. ".exr").
     #[serde(default)]
     pub preferred_view_by_filetype: HashMap<String, PreferredView>,
+    /// Last window position/size, restored on launch.
+    #[serde(default)]
+    pub window: Option<WindowGeometry>,
 }
 
 impl Default for AppPreferences {
@@ -31,6 +43,7 @@ impl Default for AppPreferences {
         Self {
             version: PREFS_VERSION,
             preferred_view_by_filetype: HashMap::new(),
+            window: None,
         }
     }
 }

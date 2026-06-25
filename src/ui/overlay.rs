@@ -31,7 +31,7 @@ pub fn build_overlays(
     }
 
     // Comparator slot flags (always visible while any slot is saved).
-    slot_flags(ctx, inputs);
+    slot_flags(ctx, inputs, actions);
 
     state.pointer_over_metadata = if inputs.show_metadata && !inputs.metadata.is_empty() {
         metadata_hud(ctx, inputs)
@@ -48,21 +48,23 @@ pub fn build_overlays(
     }
 }
 
-/// Small numbered flags at the very top-right for saved comparator slots; the
-/// active (currently-viewed) slot is filled with the accent colour.
-fn slot_flags(ctx: &egui::Context, inputs: &UiInputs) {
-    if inputs.slots_saved.iter().all(|&s| !s) {
+/// Small numbered flags hanging from the top-right edge for saved comparator
+/// slots; the active (currently-viewed) slot is filled with the accent colour.
+/// Each flag is clickable (recall the slot) and shows its filename on hover.
+fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
+    if inputs.slot_labels.iter().all(|s| s.is_none()) {
         return;
     }
     egui::Area::new(egui::Id::new("imgvwr_slots"))
-        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-10.0, 10.0))
-        .interactable(false)
+        // Touch the top edge of the screen (y = 0).
+        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-10.0, 0.0))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                for (i, &saved) in inputs.slots_saved.iter().enumerate() {
-                    if !saved {
+                ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
+                for (i, label) in inputs.slot_labels.iter().enumerate() {
+                    let Some(label) = label else {
                         continue;
-                    }
+                    };
                     let active = inputs.active_slot == Some(i);
                     let (fill, fg) = if active {
                         (ACCENT, egui::Color32::WHITE)
@@ -72,10 +74,16 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs) {
                             egui::Color32::from_gray(200),
                         )
                     };
-                    egui::Frame {
+                    // Square top corners so the flag reads as hanging from the edge.
+                    let inner = egui::Frame {
                         fill,
-                        inner_margin: egui::Margin::symmetric(7, 2),
-                        corner_radius: egui::CornerRadius::same(3),
+                        inner_margin: egui::Margin::symmetric(7, 3),
+                        corner_radius: egui::CornerRadius {
+                            nw: 0,
+                            ne: 0,
+                            sw: 3,
+                            se: 3,
+                        },
                         ..Default::default()
                     }
                     .show(ui, |ui| {
@@ -86,29 +94,58 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs) {
                                 .strong(),
                         );
                     });
-                    ui.add_space(3.0);
+                    let resp = inner
+                        .response
+                        .interact(egui::Sense::click())
+                        .on_hover_text(label);
+                    if resp.clicked() {
+                        actions.push(UiAction::RecallSlot(i));
+                    }
                 }
             });
         });
 }
 
 fn loading(ctx: &egui::Context, inputs: &UiInputs) {
-    // Keep animating the spinner while a load is in flight.
+    // Keep the bar (determinate fill or indeterminate sweep) animating.
     ctx.request_repaint();
+    let determinate = inputs.progress.is_some();
+    let value = match inputs.progress {
+        Some(p) => p.clamp(0.0, 1.0),
+        // Indeterminate (decoding): a repeating left-to-right sweep.
+        None => {
+            let t = ctx.input(|i| i.time);
+            (t % 1.2) as f32 / 1.2
+        }
+    };
+    let name = inputs.loading_name.as_deref().unwrap_or("Loading");
+    let label = match inputs.progress {
+        Some(p) => format!("{name}  {}%", (p * 100.0).round() as i32),
+        None => format!("{name}…"),
+    };
     egui::Area::new(egui::Id::new("imgvwr_loading"))
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .anchor(egui::Align2::RIGHT_BOTTOM, egui::Vec2::new(-12.0, -12.0))
         .interactable(false)
         .show(ctx, |ui| {
-            overlay_frame().show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add(egui::Spinner::new().size(36.0));
-                    ui.add_space(8.0);
-                    let label = match &inputs.loading_name {
-                        Some(name) => format!("Opening {name}…"),
-                        None => "Opening file…".to_string(),
-                    };
-                    ui.label(egui::RichText::new(label).color(egui::Color32::WHITE));
-                });
+            egui::Frame {
+                fill: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 200),
+                inner_margin: egui::Margin::symmetric(10, 8),
+                corner_radius: egui::CornerRadius::same(4),
+                ..Default::default()
+            }
+            .show(ui, |ui| {
+                ui.set_width(190.0);
+                ui.label(
+                    egui::RichText::new(label)
+                        .color(egui::Color32::WHITE)
+                        .size(13.0),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::ProgressBar::new(value)
+                        .desired_width(190.0)
+                        .animate(!determinate),
+                );
             });
         });
 }
@@ -262,6 +299,7 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
         ("L", "Lock zoom/pan across images"),
         ("P", "Toggle 2D / panorama"),
         ("W", "Toggle 2D tiled wrap"),
+        ("I", "Toggle nearest / bilinear filtering"),
         ("T", "Toggle Standard / last view transform"),
         ("O", "Open file…"),
         ("F2", "Metadata overlay"),

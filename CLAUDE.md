@@ -3,13 +3,14 @@
 Minimal Windows-only GPU image viewer for HDR panoramas and standard images
 (Rust + OpenGL 4.3 + egui). The full design lives in `plans/rewrite.md` (gitignored).
 
-## Building on this machine
+## Building
 
-Native deps (OpenColorIO / OpenEXR / lcms) come from vcpkg; `bindgen` needs libclang:
+Native deps (OpenColorIO / OpenEXR / lcms) come from vcpkg; `bindgen` needs libclang.
+Set `VCPKG_ROOT` to your vcpkg checkout and have LLVM installed (or `LIBCLANG_PATH`
+pointing at a `libclang.dll`); see the README "Building from source" section for the
+full prerequisites, then:
 
 ```powershell
-$env:VCPKG_ROOT='C:\Users\gregz\vcpkg'
-$env:LIBCLANG_PATH='C:\Program Files\Side Effects Software\Houdini 20.5.584\python311\lib\site-packages-forced\shiboken2_generator'
 cargo build --release
 ```
 

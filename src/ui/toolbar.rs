@@ -61,9 +61,17 @@ pub fn build_toolbar(
                 } else {
                     inputs.file_info.clone()
                 })
-                .small()
                 .color(egui::Color32::from_gray(180)),
             );
+            if inputs.has_image {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "EV {:+.2}   Gamma {:.2}",
+                        inputs.exposure, inputs.gamma
+                    ))
+                    .color(egui::Color32::from_gray(180)),
+                );
+            }
         });
 
     // View-transform submenu (second column).

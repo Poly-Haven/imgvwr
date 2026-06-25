@@ -25,6 +25,9 @@ pub struct UiInputs {
     pub display_views: Vec<(String, String)>,
     pub active: Option<(String, String)>,
     pub ocio_available: bool,
+    /// Current tone adjustments, shown in the sidebar.
+    pub exposure: f32,
+    pub gamma: f32,
 
     // Overlays (Commit 9).
     pub loading: bool,
@@ -33,6 +36,9 @@ pub struct UiInputs {
     pub show_hint: bool,
     pub show_metadata: bool,
     pub metadata: Vec<(String, String)>,
+    pub show_help: bool,
+    /// Transient bottom-right toast: `(text, alpha)`, drawn while alpha > 0.
+    pub toast: Option<(String, f32)>,
 }
 
 impl UiInputs {
@@ -64,6 +70,8 @@ pub struct UiState {
     pub browse_display: Option<String>,
     /// Updated after each egui pass: is the pointer over toolbar chrome?
     pub pointer_over_panel: bool,
+    /// Whether the H help dialog is open.
+    pub show_help: bool,
 }
 
 /// Actions emitted by the UI, processed by `App` after the egui pass.
@@ -72,4 +80,5 @@ pub enum UiAction {
     Reload,
     SetView { display: String, view: String },
     DismissError,
+    CloseHelp,
 }

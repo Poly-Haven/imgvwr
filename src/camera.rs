@@ -147,9 +147,22 @@ impl CameraController {
     /// Multiply 2-D zoom by `factor` (clamped to the FOV range). No-op on `Pano`.
     pub fn adjust_zoom(&mut self, factor: f32) {
         if let Camera::Flat { zoom, .. } = &mut self.camera {
-            let min_zoom = fov_to_zoom(FLAT_MAX_FOV_DEG);
-            let max_zoom = fov_to_zoom(MIN_FOV_DEG);
-            *zoom = (*zoom * factor).clamp(min_zoom, max_zoom);
+            *zoom = (*zoom * factor).clamp(flat_zoom_min(), flat_zoom_max());
+        }
+    }
+
+    /// Set 2-D zoom to an absolute scale (clamped to the FOV range). No-op on
+    /// `Pano`. Used by the numpad exact-zoom keys.
+    pub fn set_zoom(&mut self, scale: f32) {
+        if let Camera::Flat { zoom, .. } = &mut self.camera {
+            *zoom = scale.clamp(flat_zoom_min(), flat_zoom_max());
+        }
+    }
+
+    /// Set panorama FOV to an absolute degrees value (clamped). No-op on `Flat`.
+    pub fn set_fov(&mut self, fov: f32) {
+        if let Camera::Pano { fov_deg, .. } = &mut self.camera {
+            *fov_deg = fov.clamp(MIN_FOV_DEG, PANORAMA_MAX_FOV_DEG);
         }
     }
 
@@ -222,6 +235,14 @@ fn zoom_to_fov_deg(zoom: f32) -> f32 {
 
 fn fov_to_zoom(fov_deg: f32) -> f32 {
     1.0 / (fov_deg.to_radians() * 0.5).tan().max(1e-4)
+}
+
+/// 2-D zoom clamp bounds (mirroring the panorama-equivalent FOV range).
+fn flat_zoom_min() -> f32 {
+    fov_to_zoom(FLAT_MAX_FOV_DEG)
+}
+fn flat_zoom_max() -> f32 {
+    fov_to_zoom(MIN_FOV_DEG)
 }
 
 #[cfg(test)]

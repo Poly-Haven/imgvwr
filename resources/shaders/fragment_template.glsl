@@ -49,6 +49,7 @@ vec3 srgb_to_linear(vec3 c) {
 
 void main() {
     vec2 uv;
+    vec3 color;
 
     if (u_projection_mode == 1) {
         // -- 2-D pan / zoom ----------------------------------------------
@@ -67,7 +68,10 @@ void main() {
             return;
         }
         // When wrapping, GL_REPEAT on both axes tiles the image seamlessly.
+        // The 2-D coordinate is screen-space-continuous, so implicit-derivative
+        // sampling (and its mip LOD) is correct here.
         uv = raw_uv;
+        color = sample_image(uv);
     } else {
         // -- Rectilinear equirectangular projection ----------------------
         vec2 ndc = v_uv * 2.0 - 1.0;
@@ -76,10 +80,19 @@ void main() {
                                   1.0));
         vec3 world_dir = normalize(rotation_yaw_pitch(u_yaw, u_pitch) * ray);
         uv = direction_to_equirect_uv(world_dir);
+        // The equirect U coordinate is discontinuous at the longitude wrap
+        // (atan2 jumps ~1→0 across one pixel column). Left to implicit
+        // derivatives, that one column's huge dFdx(u) forces the coarsest mip,
+        // producing a flickering/dashed seam. Unwrap the derivative there and
+        // sample with an explicit, seam-continuous gradient.
+        vec2 ddx = dFdx(uv);
+        vec2 ddy = dFdy(uv);
+        if (abs(ddx.x) > 0.5) ddx.x -= sign(ddx.x);
+        if (abs(ddy.x) > 0.5) ddy.x -= sign(ddy.x);
+        color = sample_image_grad(uv, ddx, ddy);
     }
 
-    // 1. Fetch source pixel and bring it to scene-linear.
-    vec3 color = sample_image(uv);
+    // 1. Source pixel is now in `color`; bring it to scene-linear.
     if (u_input_is_encoded_srgb) {
         color = srgb_to_linear(color);
     }

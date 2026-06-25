@@ -58,6 +58,30 @@ const RAW_EXTS: &[&str] = &[
     "crw", "raw",
 ];
 
+/// Non-RAW formats handled by the `image` crate plus `exr` (the EXR special
+/// case). Kept separate from [`RAW_EXTS`] so both can compose [`SUPPORTED_EXTS`].
+const IMAGE_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "ico", "tga", "pnm", "hdr", "pic",
+    "exr",
+];
+
+/// True if `path`'s (lower-cased) extension is one imgvwr can decode. The single
+/// source of truth for the open-dialog filter and folder (arrow-key) navigation.
+pub fn is_supported(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => {
+            let ext = ext.to_ascii_lowercase();
+            IMAGE_EXTS.contains(&ext.as_str()) || RAW_EXTS.contains(&ext.as_str())
+        }
+        None => false,
+    }
+}
+
+/// Every extension imgvwr accepts (for the open-file dialog filter).
+pub fn supported_extensions() -> Vec<&'static str> {
+    IMAGE_EXTS.iter().chain(RAW_EXTS.iter()).copied().collect()
+}
+
 /// Decode an image file into RGBA `ImageData`, dispatching on the (lower-cased)
 /// file extension. See plans/rewrite.md §8.2.
 pub fn load_image(path: &Path) -> Result<ImageData> {

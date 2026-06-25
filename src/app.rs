@@ -47,11 +47,11 @@ use winit::event::{
     DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::camera::{Camera, CameraController};
-use crate::image_loader::{load_image, ImageData};
+use crate::image_loader::{is_supported, load_image, supported_extensions, ImageData};
 use crate::ocio::OcioManager;
 use crate::prefs::{AppPreferences, PreferredView};
 use crate::renderer::{RenderParams, Renderer};
@@ -88,10 +88,30 @@ const CAPTURE_LOAD_CAP: Duration = Duration::from_secs(120);
 /// Max interval between two left-clicks to count as a double-click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(350);
 
+/// Toast: full opacity for `TOAST_HOLD`, then fades over `TOAST_FADE`.
+const TOAST_HOLD: Duration = Duration::from_millis(1400);
+const TOAST_FADE: Duration = Duration::from_millis(600);
+
+/// Cursor travel (device px) during a double-click that suppresses the
+/// fullscreen toggle (so a double-click-and-drag is treated as a drag).
+const DBLCLICK_DRAG_TOL: f32 = 6.0;
+
 /// Result of a background decode, tagged with its generation id.
 struct LoadResult {
     gen: u64,
     result: Result<ImageData, String>,
+}
+
+/// Result of a background preload (arrow-key look-ahead).
+struct PreloadResult {
+    gen: u64,
+    result: Result<ImageData, String>,
+}
+
+/// A transient bottom-right HUD message.
+struct Toast {
+    text: String,
+    born: Instant,
 }
 
 /// Coarse load status (the error string is surfaced in the UI from Commit 9).
@@ -177,6 +197,26 @@ pub struct App {
     auto_resized_done: bool,
     /// Set when we request a programmatic resize, to ignore the resulting event.
     auto_resize_pending: bool,
+    /// A double-click is pending; the fullscreen toggle fires on release unless
+    /// the cursor moved more than `DBLCLICK_DRAG_TOL` (i.e. it was a drag).
+    pending_dblclick: bool,
+    dblclick_motion: f32,
+
+    // Folder navigation, look-ahead preload, and view lock.
+    /// L lock: carry zoom/pan/exposure to the next image and skip auto-resize.
+    locked: bool,
+    /// Last arrow-key direction (+1 next, -1 prev), used to pick the preload.
+    nav_dir: i32,
+    /// Set once the user starts arrow-navigating, so neighbours get preloaded.
+    preload_armed: bool,
+    preload_tx: Sender<PreloadResult>,
+    preload_rx: Receiver<PreloadResult>,
+    preload_gen: u64,
+    /// A decoded neighbour waiting to be adopted instantly on the next nav.
+    preload_cache: Option<ImageData>,
+
+    /// Transient bottom-right status toast.
+    toast: Option<Toast>,
 }
 
 impl App {
@@ -196,6 +236,7 @@ impl App {
         });
 
         let (load_tx, load_rx) = std::sync::mpsc::channel();
+        let (preload_tx, preload_rx) = std::sync::mpsc::channel();
         let ocio = OcioManager::new(resolve_resources_dir());
         let prefs = AppPreferences::load();
 
@@ -242,6 +283,16 @@ impl App {
             user_resized: false,
             auto_resized_done: false,
             auto_resize_pending: false,
+            pending_dblclick: false,
+            dblclick_motion: 0.0,
+            locked: false,
+            nav_dir: 1,
+            preload_armed: false,
+            preload_tx,
+            preload_rx,
+            preload_gen: 0,
+            preload_cache: None,
+            toast: None,
         }
     }
 
@@ -445,6 +496,10 @@ impl App {
         let gl = Arc::new(gl);
         let renderer = Renderer::new(gl.clone()).context("failed to create renderer")?;
         let egui = egui_glow::EguiGlow::new(event_loop, gl.clone(), None, None, false);
+        install_ui_font(&egui.egui_ctx);
+
+        // Open centred on the current monitor.
+        center_window(&window);
 
         Ok(Gfx {
             gl,
@@ -494,9 +549,19 @@ impl App {
     fn load_path(&mut self, path: PathBuf) {
         self.load_gen += 1;
         let gen = self.load_gen;
-        self.load_state = LoadState::Loading;
         self.load_start = Instant::now();
         self.pending_name = path.file_name().map(|s| s.to_string_lossy().into_owned());
+
+        // Preload hit: the neighbour is already decoded — adopt it immediately,
+        // skipping the loading state and the decode thread.
+        if let Some(data) = self.preload_cache.take_if(|d| d.path == path) {
+            log::info!("adopting preloaded {}", path.display());
+            self.adopt_loaded(data);
+            self.request_redraw();
+            return;
+        }
+
+        self.load_state = LoadState::Loading;
         log::info!("loading (gen {gen}) {}", path.display());
 
         let tx = self.load_tx.clone();
@@ -525,53 +590,7 @@ impl App {
             }
             match msg.result {
                 Ok(data) => {
-                    let equirect = data.is_equirectangular();
-                    log::info!(
-                        "loaded {}x{} ({} ch, {}) {} from {}",
-                        data.width,
-                        data.height,
-                        data.channels,
-                        data.dtype_name,
-                        if equirect { "[panorama]" } else { "[2-D]" },
-                        data.path.display()
-                    );
-                    if let Some(gfx) = &mut self.gfx {
-                        gfx.renderer.set_image(&data);
-                    }
-                    log::info!(
-                        "load-to-ready: {:.2}s for {}",
-                        self.load_start.elapsed().as_secs_f32(),
-                        data.path.display()
-                    );
-                    self.file_info = FileInfo {
-                        name: data
-                            .path
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                        width: data.width,
-                        height: data.height,
-                        channels: data.channels,
-                        dtype: data.dtype_name.clone(),
-                        compression: data.compression.clone(),
-                        panorama: equirect,
-                    };
-                    self.loaded_path = Some(data.path.clone());
-                    self.camera = CameraController::for_image(equirect);
-                    self.exposure = 0.0;
-                    self.gamma = 1.0;
-                    self.wrap_2d = false;
-                    self.load_state = LoadState::Loaded;
-                    self.update_window_title();
-                    // Choose the OCIO view: panoramas restore the saved view for
-                    // their extension; 2-D images always default to Standard.
-                    self.select_view_for_load(equirect, &data.path);
-                    // Size the window to the first 2-D image (panoramas keep the
-                    // current window).
-                    if !equirect {
-                        self.maybe_autosize(data.width, data.height);
-                    }
-                    self.apply_debug_overrides();
+                    self.adopt_loaded(data);
                     adopted = true;
                 }
                 Err(e) => {
@@ -586,6 +605,247 @@ impl App {
                 gfx.window.request_redraw();
             }
         }
+    }
+
+    /// Adopt a freshly-decoded image as the active one (from a background load or
+    /// a preload-cache hit), applying the view lock and arming the next preload.
+    fn adopt_loaded(&mut self, data: ImageData) {
+        let equirect = data.is_equirectangular();
+        log::info!(
+            "loaded {}x{} ({} ch, {}) {} from {}",
+            data.width,
+            data.height,
+            data.channels,
+            data.dtype_name,
+            if equirect { "[panorama]" } else { "[2-D]" },
+            data.path.display()
+        );
+        if let Some(gfx) = &mut self.gfx {
+            gfx.renderer.set_image(&data);
+        }
+        log::info!(
+            "load-to-ready: {:.2}s for {}",
+            self.load_start.elapsed().as_secs_f32(),
+            data.path.display()
+        );
+
+        // L lock: keep the current zoom/pan/exposure when the projection mode
+        // matches the previous image; a 2-D <-> panorama change resets to the
+        // per-image default.
+        let keep_view =
+            self.locked && self.loaded_path.is_some() && self.camera.is_panorama() == equirect;
+
+        self.file_info = FileInfo {
+            name: data
+                .path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            width: data.width,
+            height: data.height,
+            channels: data.channels,
+            dtype: data.dtype_name.clone(),
+            compression: data.compression.clone(),
+            panorama: equirect,
+        };
+        self.loaded_path = Some(data.path.clone());
+        if !keep_view {
+            self.camera = CameraController::for_image(equirect);
+            self.exposure = 0.0;
+            self.gamma = 1.0;
+            self.wrap_2d = false;
+        }
+        self.load_state = LoadState::Loaded;
+        self.update_window_title();
+        // Choose the OCIO view: panoramas restore the saved view for their
+        // extension; 2-D images always default to Standard.
+        self.select_view_for_load(equirect, &data.path);
+        // Size the window to the first 2-D image (panoramas, locked views, and
+        // subsequent images keep the current window).
+        if !equirect && !self.locked {
+            self.maybe_autosize(data.width, data.height);
+        }
+        self.apply_debug_overrides();
+
+        // Look-ahead: once arrow-navigating, decode the next neighbour in the
+        // background so the following arrow press is instant.
+        if self.preload_armed {
+            if let Some(next) = sibling_path(&data.path, self.nav_dir) {
+                self.start_preload(next);
+            }
+        }
+    }
+
+    /// Decode `path` in the background and stash it in `preload_cache`.
+    fn start_preload(&mut self, path: PathBuf) {
+        // Skip if it is already cached or is the current image.
+        if self.preload_cache.as_ref().is_some_and(|d| d.path == path)
+            || self.loaded_path.as_deref() == Some(path.as_path())
+        {
+            return;
+        }
+        self.preload_gen += 1;
+        let gen = self.preload_gen;
+        let tx = self.preload_tx.clone();
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("image-preload-{gen}"))
+            .spawn(move || {
+                let result = match std::panic::catch_unwind(AssertUnwindSafe(|| load_image(&path)))
+                {
+                    Ok(Ok(data)) => Ok(data),
+                    Ok(Err(e)) => Err(format!("{e:#}")),
+                    Err(_) => Err("decoder panicked".to_string()),
+                };
+                let _ = tx.send(PreloadResult { gen, result });
+                let _ = proxy.send_event(UserEvent::PreloadFinished(gen));
+            });
+        if let Err(e) = spawned {
+            log::debug!("could not spawn preload thread: {e}");
+        }
+    }
+
+    fn poll_preloads(&mut self) {
+        while let Ok(msg) = self.preload_rx.try_recv() {
+            if msg.gen != self.preload_gen {
+                continue;
+            }
+            match msg.result {
+                Ok(data) => {
+                    log::debug!("preloaded {}", data.path.display());
+                    self.preload_cache = Some(data);
+                }
+                Err(e) => log::debug!("preload failed: {e}"),
+            }
+        }
+    }
+
+    /// Arrow-key navigation: load the alphabetical sibling `dir` steps away.
+    fn navigate(&mut self, dir: i32) {
+        let Some(current) = self.loaded_path.clone() else {
+            return;
+        };
+        let Some(target) = sibling_path(&current, dir) else {
+            return;
+        };
+        self.nav_dir = dir;
+        self.preload_armed = true;
+        self.load_path(target);
+    }
+
+    /// Home: reset pan+zoom to the fit view (2-D) or default look (panorama).
+    /// Tone adjustments are intentionally left alone (Ctrl+R resets those).
+    fn reset_view_full(&mut self) {
+        if self.camera.is_panorama() {
+            self.camera = CameraController::for_image(true);
+        } else {
+            let (vw, vh) = self.viewport();
+            let aspect = self
+                .gfx
+                .as_ref()
+                .and_then(|g| g.renderer.image_aspect())
+                .unwrap_or(1.0);
+            // Contain-fit: largest zoom that still shows the whole image.
+            let fit = (vw / vh / aspect.max(1e-4)).min(1.0);
+            self.camera.camera = Camera::Flat {
+                pan: Vec2::ZERO,
+                zoom: 1.0,
+            };
+            self.camera.set_zoom(fit);
+        }
+    }
+
+    // ---- toast HUD -------------------------------------------------------
+
+    fn show_toast(&mut self, text: String) {
+        self.toast = Some(Toast {
+            text,
+            born: Instant::now(),
+        });
+        self.request_redraw();
+    }
+
+    /// `(text, alpha)` for the active toast, or `None` once it has expired.
+    fn toast_render(&self) -> Option<(String, f32)> {
+        let toast = self.toast.as_ref()?;
+        let e = toast.born.elapsed();
+        if e >= TOAST_HOLD + TOAST_FADE {
+            return None;
+        }
+        let alpha = if e <= TOAST_HOLD {
+            1.0
+        } else {
+            1.0 - (e - TOAST_HOLD).as_secs_f32() / TOAST_FADE.as_secs_f32()
+        };
+        Some((toast.text.clone(), alpha.clamp(0.0, 1.0)))
+    }
+
+    fn toast_active(&self) -> bool {
+        // A small grace past the fade so one final frame draws the cleared
+        // (alpha-0) state instead of leaving a faint toast until the next input.
+        self.toast.as_ref().is_some_and(|t| {
+            t.born.elapsed() < TOAST_HOLD + TOAST_FADE + Duration::from_millis(100)
+        })
+    }
+
+    fn show_exposure_toast(&mut self) {
+        let text = fmt_ev(self.exposure);
+        self.show_toast(text);
+    }
+
+    fn show_gamma_toast(&mut self) {
+        let text = format!("Gamma {:.1}", self.gamma);
+        self.show_toast(text);
+    }
+
+    fn show_zoom_toast(&mut self) {
+        let text = match self.camera.camera {
+            Camera::Pano { fov_deg, .. } => format!("FOV {}°", fov_deg.round() as i32),
+            Camera::Flat { .. } => match self.flat_zoom_percent() {
+                Some(p) => format!("{}%", p.round() as i32),
+                None => return,
+            },
+        };
+        self.show_toast(text);
+    }
+
+    /// Current 2-D zoom as a percentage where 100% == 1 image px : 1 monitor px.
+    fn flat_zoom_percent(&self) -> Option<f32> {
+        let img_h = self.file_info.height;
+        if img_h == 0 {
+            return None;
+        }
+        if let Camera::Flat { zoom, .. } = self.camera.camera {
+            let (_, vh) = self.viewport();
+            Some(zoom * vh / img_h as f32 * 100.0)
+        } else {
+            None
+        }
+    }
+
+    /// Numpad exact zoom: digit `d` → `100/d %` (plain) or `d*100 %` (Ctrl).
+    /// Exact 1:1 device pixels for 2-D; an FOV approximation for panoramas.
+    fn set_exact_zoom(&mut self, digit: u32, ctrl: bool) {
+        if digit == 0 {
+            return;
+        }
+        let pct = if ctrl {
+            100.0 * digit as f32
+        } else {
+            100.0 / digit as f32
+        };
+        let (_, vh) = self.viewport();
+        let img_h = self.file_info.height.max(1) as f32;
+        let zoom = (pct / 100.0) * (img_h / vh);
+        match self.camera.camera {
+            Camera::Flat { .. } => self.camera.set_zoom(zoom),
+            Camera::Pano { .. } => {
+                let fov = (1.0 / zoom.max(1e-4)).atan().to_degrees() * 2.0;
+                self.camera.set_fov(fov);
+            }
+        }
+        self.show_zoom_toast();
+        self.request_redraw();
     }
 
     // ---- input -----------------------------------------------------------
@@ -639,13 +899,18 @@ impl App {
 
     /// Apply a relative drag delta (raw device motion, pixels).
     fn on_drag_motion(&mut self, dx: f32, dy: f32) {
+        // Track total travel so a double-click-and-drag suppresses fullscreen.
+        if self.pending_dblclick {
+            self.dblclick_motion += (dx * dx + dy * dy).sqrt();
+        }
         let (vw, vh) = self.viewport();
         match self.camera.camera {
             Camera::Pano { pitch_rad, .. } => {
-                // Pixels-per-radian from the current vertical FOV.
-                let rad_per_px = (2.0 * self.camera.camera.half_fov_radians()) / vh;
-                // Latitude-based horizontal multiplier (same formula as original).
-                let h_mult = (1.0 / pitch_rad.abs().cos().max(0.25)).min(2.5);
+                // Pixels-per-radian from the current vertical FOV, +20% overall.
+                let rad_per_px = (2.0 * self.camera.camera.half_fov_radians()) / vh * 1.2;
+                // Gentle latitude compensation for equirect horizontal stretch
+                // (capped low so it never feels like runaway speed near the poles).
+                let h_mult = (1.0 / pitch_rad.abs().cos().max(0.25)).min(1.5);
                 let dyaw = -dx * rad_per_px * h_mult;
                 let dpitch = -dy * rad_per_px;
                 self.camera.rotate(dyaw, dpitch);
@@ -659,35 +924,23 @@ impl App {
                     .unwrap_or(1.0);
                 let sx = inv_zoom * (vw / vh) / image_aspect.max(1e-4);
                 let sy = inv_zoom;
-                // Grab feel: content follows the cursor.
+                // Grab feel: content follows the cursor. Panning is unbounded —
+                // the image may be moved freely past the viewport edge.
                 let du = -(dx / vw) * sx;
                 let dv = -(dy / vh) * sy;
                 self.camera.pan(Vec2::new(du, dv));
-                if !self.wrap_2d {
-                    self.clamp_2d_pan();
-                }
             }
         }
         self.request_redraw();
     }
 
-    /// Keep the 2-D image within the viewport (no-wrap mode).
-    fn clamp_2d_pan(&mut self) {
-        let (vw, vh) = self.viewport();
-        let image_aspect = self
-            .gfx
-            .as_ref()
-            .and_then(|g| g.renderer.image_aspect())
-            .unwrap_or(1.0);
-        if let Camera::Flat { pan, zoom } = &mut self.camera.camera {
-            let inv_zoom = 1.0 / zoom.max(1e-4);
-            let sx = inv_zoom * (vw / vh) / image_aspect.max(1e-4);
-            let sy = inv_zoom;
-            // Visible half-span; if the image is smaller than the view, centre it.
-            let lim_u = (0.5 - 0.5 * sx).max(0.0);
-            let lim_v = (0.5 - 0.5 * sy).max(0.0);
-            pan.x = pan.x.clamp(-lim_u, lim_u);
-            pan.y = pan.y.clamp(-lim_v, lim_v);
+    /// On leaving wrap mode, fold the (possibly large) pan back into the
+    /// canonical range so the same on-screen region maps onto the real image
+    /// rather than a now-clipped tiled clone.
+    fn normalize_pan_to_canonical(&mut self) {
+        if let Camera::Flat { pan, .. } = &mut self.camera.camera {
+            pan.x = (pan.x + 0.5).rem_euclid(1.0) - 0.5;
+            pan.y = (pan.y + 0.5).rem_euclid(1.0) - 0.5;
         }
     }
 
@@ -701,25 +954,25 @@ impl App {
         }
 
         if self.ctrl() {
-            // Ctrl + wheel: exposure.
-            self.exposure += steps * 0.1;
+            // Ctrl + wheel: exposure (half-strength steps).
+            self.exposure += steps * 0.05;
+            self.show_exposure_toast();
             self.request_redraw();
             return;
         }
 
         match self.camera.camera {
             Camera::Pano { fov_deg, .. } => {
-                // Progressive feel: step scaled by current FOV.
-                let step = (fov_deg / 90.0) * 5.0;
+                // Progressive feel: step scaled by current FOV (2× strength).
+                let step = (fov_deg / 90.0) * 10.0;
                 self.camera.adjust_fov(-steps * step);
             }
             Camera::Flat { .. } => {
-                self.camera.adjust_zoom(1.1_f32.powf(steps));
-                if !self.wrap_2d {
-                    self.clamp_2d_pan();
-                }
+                // 2× per-notch strength (1.1² ≈ 1.21).
+                self.camera.adjust_zoom(1.21_f32.powf(steps));
             }
         }
+        self.show_zoom_toast();
         self.request_redraw();
     }
 
@@ -729,23 +982,30 @@ impl App {
             (_, Some(",")) => {
                 if ctrl {
                     self.gamma = (self.gamma - 0.1).max(0.1);
+                    self.show_gamma_toast();
                 } else {
-                    self.exposure -= 1.0;
+                    self.exposure -= 0.5;
+                    self.show_exposure_toast();
                 }
             }
             (_, Some(".")) => {
                 if ctrl {
                     self.gamma = (self.gamma + 0.1).min(4.0);
+                    self.show_gamma_toast();
                 } else {
-                    self.exposure += 1.0;
+                    self.exposure += 0.5;
+                    self.show_exposure_toast();
                 }
+            }
+            // Ctrl+R: reset exposure & gamma.
+            (_, Some("r")) | (_, Some("R")) if ctrl => {
+                self.exposure = 0.0;
+                self.gamma = 1.0;
+                self.show_toast(format!("{}   Gamma {:.1}", fmt_ev(0.0), 1.0));
             }
             (_, Some("p")) | (_, Some("P")) => {
                 let want = !self.camera.is_panorama();
                 self.camera.set_mode(want);
-                if !self.camera.is_panorama() && !self.wrap_2d {
-                    self.clamp_2d_pan();
-                }
                 log::info!(
                     "projection -> {}",
                     if self.camera.is_panorama() {
@@ -758,19 +1018,37 @@ impl App {
             (_, Some("w")) | (_, Some("W")) => {
                 self.wrap_2d = !self.wrap_2d;
                 if !self.wrap_2d {
-                    self.clamp_2d_pan();
+                    self.normalize_pan_to_canonical();
                 }
                 log::info!("2-D wrap -> {}", self.wrap_2d);
             }
             (_, Some("t")) | (_, Some("T")) => self.toggle_view_transform(),
+            (_, Some("o")) | (_, Some("O")) => self.open_file_dialog(),
+            (_, Some("l")) | (_, Some("L")) => {
+                self.locked = !self.locked;
+                self.show_toast(if self.locked { "Lock on" } else { "Lock off" }.to_string());
+                log::info!("view lock -> {}", self.locked);
+            }
+            (_, Some("h")) | (_, Some("H")) => {
+                self.ui_state.show_help = !self.ui_state.show_help;
+            }
+            (_, Some("f")) | (_, Some("F")) => self.toggle_fullscreen(),
             (_, Some("q")) | (_, Some("Q")) => self.escape_or_exit(event_loop),
             (Key::Named(NamedKey::F2), _) => {
                 self.show_metadata = !self.show_metadata;
                 log::info!("metadata overlay -> {}", self.show_metadata);
             }
-            (Key::Named(NamedKey::Home), _) => self.camera.reset_view(),
+            (Key::Named(NamedKey::Home), _) => self.reset_view_full(),
             (Key::Named(NamedKey::F11), _) => self.toggle_fullscreen(),
-            (Key::Named(NamedKey::Escape), _) => self.escape_or_exit(event_loop),
+            (Key::Named(NamedKey::ArrowRight), _) => self.navigate(1),
+            (Key::Named(NamedKey::ArrowLeft), _) => self.navigate(-1),
+            (Key::Named(NamedKey::Escape), _) => {
+                if self.ui_state.show_help {
+                    self.ui_state.show_help = false;
+                } else {
+                    self.escape_or_exit(event_loop);
+                }
+            }
             _ => return,
         }
         self.request_redraw();
@@ -804,15 +1082,27 @@ impl App {
                     .last_left_press
                     .is_some_and(|t| now.duration_since(t) < DOUBLE_CLICK);
                 self.last_left_press = Some(now);
+                // Always begin a drag so look-around/pan works; on a double-click
+                // also arm a deferred fullscreen toggle (resolved on release) so a
+                // double-click-and-drag is a drag, not a fullscreen flip.
+                self.start_drag();
                 if double {
-                    self.toggle_fullscreen();
-                    self.request_redraw();
-                } else {
-                    self.start_drag();
+                    self.pending_dblclick = true;
+                    self.dblclick_motion = 0.0;
                 }
             }
             (ElementState::Pressed, MouseButton::Middle) => self.start_drag(),
-            (ElementState::Released, MouseButton::Left | MouseButton::Middle) => self.end_drag(),
+            (ElementState::Released, MouseButton::Left) => {
+                self.end_drag();
+                if self.pending_dblclick {
+                    self.pending_dblclick = false;
+                    if self.dblclick_motion < DBLCLICK_DRAG_TOL {
+                        self.toggle_fullscreen();
+                        self.request_redraw();
+                    }
+                }
+            }
+            (ElementState::Released, MouseButton::Middle) => self.end_drag(),
             _ => {}
         }
     }
@@ -879,7 +1169,7 @@ impl App {
             let title = if self.file_info.name.is_empty() {
                 "imgvwr".to_string()
             } else {
-                format!("{} — imgvwr", self.file_info.name)
+                format!("{} · imgvwr", self.file_info.name)
             };
             gfx.window.set_title(&title);
         }
@@ -919,12 +1209,16 @@ impl App {
             display_views,
             active,
             ocio_available: !self.ocio.display_views().is_empty(),
+            exposure: self.exposure,
+            gamma: self.gamma,
             loading,
             loading_name: self.pending_name.clone(),
             error,
             show_hint,
             show_metadata: self.show_metadata || forced == Some("metadata"),
             metadata: self.metadata_lines(),
+            show_help: self.ui_state.show_help,
+            toast: self.toast_render(),
         }
     }
 
@@ -1013,20 +1307,21 @@ impl App {
                 self.load_state = LoadState::Idle;
                 self.request_redraw();
             }
+            UiAction::CloseHelp => {
+                self.ui_state.show_help = false;
+                self.request_redraw();
+            }
         }
     }
 
     fn open_file_dialog(&mut self) {
         let file = rfd::FileDialog::new()
-            .add_filter(
-                "Images",
-                &[
-                    "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "ico", "tga", "pnm",
-                    "hdr", "pic", "exr", "nef", "cr2", "cr3", "arw", "dng", "raf", "orf", "rw2",
-                ],
-            )
+            .add_filter("Images", &supported_extensions())
             .pick_file();
         if let Some(path) = file {
+            // A manual open ends any arrow-nav preload chain.
+            self.preload_armed = false;
+            self.preload_cache = None;
             self.load_path(path);
         }
     }
@@ -1203,6 +1498,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // latter doesn't suppress future auto-sizing semantics.
                 if self.auto_resize_pending {
                     self.auto_resize_pending = false;
+                    // Re-centre after the (async) auto-resize to the image size.
+                    if let Some(gfx) = &self.gfx {
+                        center_window(&gfx.window);
+                    }
                 } else if self.loaded_path.is_some() {
                     self.user_resized = true;
                 }
@@ -1224,15 +1523,25 @@ impl ApplicationHandler<UserEvent> for App {
             }
             // Block wheel input when the toolbar is hovered (§11.3).
             WindowEvent::MouseWheel { delta, .. } if !egui_consumed => self.on_wheel(delta),
-            WindowEvent::DroppedFile(path) => self.load_path(path),
+            WindowEvent::DroppedFile(path) => {
+                // A manually-dropped file ends any arrow-nav preload chain.
+                self.preload_armed = false;
+                self.preload_cache = None;
+                self.load_path(path);
+            }
             WindowEvent::KeyboardInput { event, .. }
                 if !egui_consumed && event.state == ElementState::Pressed =>
             {
-                let text = match &event.logical_key {
-                    Key::Character(s) => Some(s.as_str().to_string()),
-                    _ => None,
-                };
-                self.on_key(event_loop, &event.logical_key, text.as_deref());
+                // Numpad / digit keys set an exact zoom level.
+                if let Some(digit) = digit_from_physical(&event.physical_key) {
+                    self.set_exact_zoom(digit, self.ctrl());
+                } else {
+                    let text = match &event.logical_key {
+                        Key::Character(s) => Some(s.as_str().to_string()),
+                        _ => None,
+                    };
+                    self.on_key(event_loop, &event.logical_key, text.as_deref());
+                }
             }
             _ => {}
         }
@@ -1262,6 +1571,11 @@ impl ApplicationHandler<UserEvent> for App {
             // Keep the loading spinner animating while a decode is in flight.
             event_loop.set_control_flow(ControlFlow::Poll);
             self.request_redraw();
+        } else if self.toast_active() {
+            // Drive ~60 fps so the bottom-right toast can animate its fade-out.
+            let next = Instant::now() + Duration::from_millis(16);
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+            self.request_redraw();
         } else if let Some(deadline) = self.toolbar_hide_deadline {
             // Wake at the deadline to evaluate hiding the toolbar.
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
@@ -1276,8 +1590,100 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::LoadFinished(_gen) => self.poll_loads(),
+            UserEvent::PreloadFinished(_gen) => self.poll_preloads(),
         }
     }
+}
+
+/// Position `window` centred on its current monitor.
+fn center_window(window: &Window) {
+    let Some(monitor) = window.current_monitor() else {
+        return;
+    };
+    let ms = monitor.size();
+    let mp = monitor.position();
+    let ws = window.outer_size();
+    let x = mp.x + ((ms.width as i32 - ws.width as i32) / 2).max(0);
+    let y = mp.y + ((ms.height as i32 - ws.height as i32) / 2).max(0);
+    window.set_outer_position(PhysicalPosition::new(x, y));
+}
+
+/// Replace egui's thin default proportional font with the native Segoe UI for
+/// sharper, more familiar text. Falls back to the egui default if not found.
+fn install_ui_font(ctx: &egui::Context) {
+    const CANDIDATES: &[&str] = &[r"C:\Windows\Fonts\segoeui.ttf"];
+    for path in CANDIDATES {
+        if let Ok(bytes) = std::fs::read(path) {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts
+                .font_data
+                .insert("ui".to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
+            if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                fam.insert(0, "ui".to_owned());
+            }
+            ctx.set_fonts(fonts);
+            log::info!("UI font: {path}");
+            return;
+        }
+    }
+    log::info!("UI font: egui default (Segoe UI not found)");
+}
+
+/// The alphabetical sibling image `dir` steps from `current` in its folder
+/// (wrapping at the ends). `None` if the folder can't be read or has no
+/// supported images.
+fn sibling_path(current: &Path, dir: i32) -> Option<PathBuf> {
+    let parent = current.parent()?;
+    let mut files: Vec<PathBuf> = std::fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_supported(p))
+        .collect();
+    if files.is_empty() {
+        return None;
+    }
+    files.sort_by_key(|p| {
+        p.file_name()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    });
+    let idx = files.iter().position(|p| p == current).or_else(|| {
+        files
+            .iter()
+            .position(|p| p.file_name() == current.file_name())
+    })?;
+    let n = files.len() as i32;
+    let next = (idx as i32 + dir).rem_euclid(n) as usize;
+    Some(files[next].clone())
+}
+
+/// Format an exposure value as e.g. "+3 EV" or "+0.05 EV".
+fn fmt_ev(ev: f32) -> String {
+    if ev.fract().abs() < 1e-3 {
+        format!("{:+} EV", ev as i32)
+    } else {
+        format!("{:+.2} EV", ev)
+    }
+}
+
+/// Map a physical key to a zoom digit 1..=9 (numpad or top row), else `None`.
+fn digit_from_physical(key: &PhysicalKey) -> Option<u32> {
+    let PhysicalKey::Code(code) = key else {
+        return None;
+    };
+    Some(match code {
+        KeyCode::Numpad1 | KeyCode::Digit1 => 1,
+        KeyCode::Numpad2 | KeyCode::Digit2 => 2,
+        KeyCode::Numpad3 | KeyCode::Digit3 => 3,
+        KeyCode::Numpad4 | KeyCode::Digit4 => 4,
+        KeyCode::Numpad5 | KeyCode::Digit5 => 5,
+        KeyCode::Numpad6 | KeyCode::Digit6 => 6,
+        KeyCode::Numpad7 | KeyCode::Digit7 => 7,
+        KeyCode::Numpad8 | KeyCode::Digit8 => 8,
+        KeyCode::Numpad9 | KeyCode::Digit9 => 9,
+        _ => return None,
+    })
 }
 
 /// Load the bundled app icon as a winit window icon (title-bar / taskbar).

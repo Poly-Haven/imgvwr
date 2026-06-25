@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
-use image::DynamicImage;
+use image::{DynamicImage, ImageDecoder};
 
 use super::{ImageData, PixelBuffer};
 
@@ -27,8 +27,14 @@ pub fn load_via_image(path: &Path) -> Result<ImageData> {
         .into_decoder()
         .with_context(|| format!("failed to decode {}", path.display()))?;
     let icc = extract_icc(&mut decoder);
-    let img = image::DynamicImage::from_decoder(decoder)
+    // Read EXIF orientation before `from_decoder` consumes the decoder, then
+    // bake it into the pixels so rotated/flipped photos display upright (§8.2).
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder)
         .with_context(|| format!("failed to decode {}", path.display()))?;
+    img.apply_orientation(orientation);
     let channels = img.color().channel_count();
     let mut data = dynamic_to_imagedata(path, img, channels, None);
     apply_icc(icc, &mut data);
@@ -109,7 +115,7 @@ pub fn load_raw(path: &Path) -> Result<ImageData> {
         .map_err(|e| anyhow!("RAW develop failed: {e:?}"))?;
 
     let dim = developed.dim();
-    let (width, height) = (dim.w, dim.h);
+    let (mut width, mut height) = (dim.w, dim.h);
     let n = width * height;
     if n == 0 {
         return Err(anyhow!("RAW develop produced an empty image"));
@@ -149,6 +155,14 @@ pub fn load_raw(path: &Path) -> Result<ImageData> {
         }
     };
 
+    // rawler 0.6 hardcodes `RawImage.orientation` to Normal, so the developed
+    // buffer is in sensor order. Read the real EXIF orientation from the file
+    // metadata and bake it into the pixels (portrait photos otherwise display
+    // sideways).
+    if let Some(flips) = raw_orientation_flips(path) {
+        apply_orientation_f32(&mut rgba, &mut width, &mut height, flips);
+    }
+
     Ok(ImageData {
         path: path.to_path_buf(),
         width: width as u32,
@@ -159,6 +173,76 @@ pub fn load_raw(path: &Path) -> Result<ImageData> {
         pixels: PixelBuffer::F32(rgba),
         is_encoded_srgb: true,
     })
+}
+
+/// Read a RAW file's EXIF orientation as `(transpose, flip_h, flip_v)`.
+///
+/// rawler does not expose orientation on the developed image, so this re-opens
+/// the file via the lower-level decoder API to read `exif.orientation`. Returns
+/// `None` when there is no orientation, it is identity, or metadata is
+/// unreadable. The extra metadata parse is cheap next to demosaic+develop.
+fn raw_orientation_flips(path: &Path) -> Option<(bool, bool, bool)> {
+    use rawler::decoders::RawDecodeParams;
+    use rawler::{get_decoder, Orientation, RawFile};
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let file = File::open(path).ok()?;
+    let mut rawfile = RawFile::new(path, BufReader::new(file));
+    let decoder = get_decoder(&mut rawfile).ok()?;
+    let meta = decoder
+        .raw_metadata(&mut rawfile, RawDecodeParams::default())
+        .ok()?;
+    let flips = Orientation::from_u16(meta.exif.orientation?).to_flips();
+    (flips != (false, false, false)).then_some(flips)
+}
+
+/// Apply EXIF flips/transpose to an interleaved RGBA-f32 buffer in place,
+/// updating `width`/`height` when transposed. Flips are applied before the
+/// transpose, matching rawler's `Orientation::to_flips` contract.
+fn apply_orientation_f32(
+    rgba: &mut Vec<f32>,
+    width: &mut usize,
+    height: &mut usize,
+    flips: (bool, bool, bool),
+) {
+    let (transpose, flip_h, flip_v) = flips;
+    let (w, h) = (*width, *height);
+    if flip_h {
+        for y in 0..h {
+            for x in 0..w / 2 {
+                let a = (y * w + x) * 4;
+                let b = (y * w + (w - 1 - x)) * 4;
+                for k in 0..4 {
+                    rgba.swap(a + k, b + k);
+                }
+            }
+        }
+    }
+    if flip_v {
+        for y in 0..h / 2 {
+            for x in 0..w {
+                let a = (y * w + x) * 4;
+                let b = ((h - 1 - y) * w + x) * 4;
+                for k in 0..4 {
+                    rgba.swap(a + k, b + k);
+                }
+            }
+        }
+    }
+    if transpose {
+        let mut out = vec![0f32; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let s = (y * w + x) * 4;
+                let d = (x * h + y) * 4; // new row stride is the old height
+                out[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+            }
+        }
+        *rgba = out;
+        *width = h;
+        *height = w;
+    }
 }
 
 /// OpenEXR via the `exr` crate. Reads the first valid layer's largest level and

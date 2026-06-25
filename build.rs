@@ -17,6 +17,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
 
+    // Embed the application icon into the .exe so Explorer/taskbar show it before
+    // the window's runtime icon is applied. Independent of the OCIO feature so it
+    // also runs for `--no-default-features` builds.
+    embed_windows_icon();
+
     // Gamma-only fallback is an explicit opt-out, never a silent degrade.
     if std::env::var_os("CARGO_FEATURE_OCIO").is_none() {
         println!("cargo:warning=`ocio` feature disabled - building gamma-only fallback");
@@ -97,6 +102,20 @@ fn main() {
     // 5. Stage the runtime DLL closure next to the executable so dev runs work
     //    without VCPKG bin on PATH. (CI packaging does its own bundling, §20.)
     stage_runtime_dlls(&bin_dir, &out_dir);
+}
+
+/// Compile `resources/icons/app_icon.ico` into the executable as the default
+/// Windows application icon. A no-op on non-Windows targets.
+fn embed_windows_icon() {
+    println!("cargo:rerun-if-changed=resources/icons/app_icon.ico");
+    #[cfg(windows)]
+    {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("resources/icons/app_icon.ico");
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=failed to embed app icon: {e}");
+        }
+    }
 }
 
 /// Find a versioned import lib like `OpenEXR-3_4.lib` and return its link name

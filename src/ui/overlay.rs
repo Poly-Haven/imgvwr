@@ -25,6 +25,14 @@ pub fn build_overlays(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<
     if inputs.show_metadata && !inputs.metadata.is_empty() {
         metadata_hud(ctx, inputs);
     }
+
+    if let Some((text, alpha)) = &inputs.toast {
+        toast(ctx, text, *alpha);
+    }
+
+    if inputs.show_help {
+        help_dialog(ctx, actions);
+    }
 }
 
 fn loading(ctx: &egui::Context, inputs: &UiInputs) {
@@ -95,8 +103,9 @@ fn hint(ctx: &egui::Context) {
 }
 
 fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs) {
+    // Top-right so the left-edge toolbar never covers it.
     egui::Area::new(egui::Id::new("imgvwr_metadata"))
-        .anchor(egui::Align2::LEFT_TOP, egui::Vec2::new(10.0, 10.0))
+        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-10.0, 10.0))
         .interactable(false)
         .show(ctx, |ui| {
             let frame = egui::Frame {
@@ -111,19 +120,100 @@ fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs) {
                     .spacing([12.0, 2.0])
                     .show(ui, |ui| {
                         for (key, value) in &inputs.metadata {
+                            ui.label(egui::RichText::new(key).color(egui::Color32::from_gray(150)));
+                            ui.label(egui::RichText::new(value).color(egui::Color32::WHITE));
+                            ui.end_row();
+                        }
+                    });
+            });
+        });
+}
+
+/// Transient bottom-right HUD; `alpha` fades it out (see `App::toast_render`).
+fn toast(ctx: &egui::Context, text: &str, alpha: f32) {
+    let a = alpha.clamp(0.0, 1.0);
+    if a <= 0.0 {
+        return;
+    }
+    let bg = (180.0 * a) as u8;
+    let fg = (255.0 * a) as u8;
+    egui::Area::new(egui::Id::new("imgvwr_toast"))
+        .anchor(egui::Align2::RIGHT_BOTTOM, egui::Vec2::new(-12.0, -12.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            let frame = egui::Frame {
+                fill: egui::Color32::from_rgba_unmultiplied(0, 0, 0, bg),
+                inner_margin: egui::Margin::symmetric(10, 6),
+                corner_radius: egui::CornerRadius::same(4),
+                ..Default::default()
+            };
+            frame.show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(text)
+                        .color(egui::Color32::from_rgba_unmultiplied(fg, fg, fg, fg))
+                        .size(16.0),
+                );
+            });
+        });
+}
+
+/// Centred hotkey reference (toggled with H, dismissed with H/Esc/Close).
+fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
+    const KEYS: &[(&str, &str)] = &[
+        ("Drag (L/M mouse)", "Pan (2-D) / look around (pano)"),
+        ("Mouse wheel", "Zoom (2-D) / FOV (pano)"),
+        ("Ctrl + wheel", "Exposure"),
+        (", / .", "Exposure −/+"),
+        ("Ctrl + , / .", "Gamma −/+"),
+        ("Ctrl + R", "Reset exposure & gamma"),
+        ("Numpad 1–9", "Exact zoom (100/N %); Ctrl = N×100 %"),
+        ("← / →", "Previous / next image in folder"),
+        ("L", "Lock zoom/pan across images"),
+        ("P", "Toggle 2-D / panorama"),
+        ("W", "Toggle 2-D tiled wrap"),
+        ("T", "Toggle Standard / last view transform"),
+        ("O", "Open file…"),
+        ("F2", "Metadata overlay"),
+        ("Home", "Reset view (fit)"),
+        ("F / F11 / dbl-click", "Toggle fullscreen"),
+        ("H", "This help"),
+        ("Esc / Q", "Exit fullscreen / quit"),
+    ];
+    egui::Area::new(egui::Id::new("imgvwr_help"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            overlay_frame().show(ui, |ui| {
+                ui.set_max_width(420.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Keyboard & mouse")
+                            .strong()
+                            .color(egui::Color32::WHITE)
+                            .size(18.0),
+                    );
+                });
+                ui.add_space(8.0);
+                egui::Grid::new("imgvwr_help_grid")
+                    .num_columns(2)
+                    .spacing([18.0, 4.0])
+                    .show(ui, |ui| {
+                        for (key, action) in KEYS {
                             ui.label(
-                                egui::RichText::new(key)
-                                    .color(egui::Color32::from_gray(150))
-                                    .small(),
+                                egui::RichText::new(*key)
+                                    .color(egui::Color32::from_rgb(180, 200, 255)),
                             );
                             ui.label(
-                                egui::RichText::new(value)
-                                    .color(egui::Color32::WHITE)
-                                    .small(),
+                                egui::RichText::new(*action).color(egui::Color32::from_gray(220)),
                             );
                             ui.end_row();
                         }
                     });
+                ui.add_space(10.0);
+                ui.vertical_centered(|ui| {
+                    if ui.button("Close").clicked() {
+                        actions.push(UiAction::CloseHelp);
+                    }
+                });
             });
         });
 }

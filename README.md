@@ -20,19 +20,29 @@ for Windows.
 |---|---|
 | Left / middle mouse drag | Pan (2D) or look around (panorama) |
 | Mouse wheel | Zoom (2D) or FOV (panorama) |
-| `Ctrl` + wheel | Exposure ±0.1 stops per notch |
-| `,` | Exposure −1 stop |
-| `.` | Exposure +1 stop |
-| `Ctrl + ,` | Gamma −0.1 |
-| `Ctrl + .` | Gamma +0.1 |
+| `Ctrl` + wheel | Exposure ±0.05 stops per notch |
+| `,` / `.` | Exposure −/+ 0.5 stops |
+| `Ctrl + ,` / `Ctrl + .` | Gamma −/+ 0.1 |
+| `Ctrl + R` | Reset exposure & gamma |
+| Numpad `1`–`9` | Exact zoom: `100/N %` (with `Ctrl`: `N×100 %`) |
+| `←` / `→` | Previous / next image in the folder (alphabetical) |
+| `L` | Lock zoom/pan across images |
 | `P` | Toggle 2D ↔ panorama mode |
 | `W` | Toggle tiled wrap (2D) |
 | `T` | Toggle Standard ↔ last-used view transform |
+| `O` | Open file… |
 | `F2` | Toggle metadata overlay |
-| `Home` | Reset view to state at load time |
+| `H` | Show keyboard / mouse help |
+| `Home` | Reset view (fit) |
 | Move cursor to left edge | Show toolbar overlay |
-| `F11` / double-click | Toggle fullscreen |
+| `F` / `F11` / double-click | Toggle fullscreen |
 | `Escape` / `Q` | Exit fullscreen or close |
+
+Arrow-key navigation pre-decodes the next image in the background so stepping
+through a folder is instant. **L** locks the current zoom/pan (and exposure) so
+they carry across images of the same kind for side-by-side comparison. For 2D
+images, numpad zoom is exact (100 % = 1 image pixel per monitor pixel); for
+panoramas it maps to an equivalent field of view.
 
 ## Supported formats
 

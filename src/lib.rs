@@ -25,6 +25,8 @@ use app::App;
 pub enum UserEvent {
     /// A background image load finished; carries its generation id.
     LoadFinished(u64),
+    /// A background *preload* (arrow-key look-ahead) finished; its generation id.
+    PreloadFinished(u64),
 }
 
 /// Initialise logging and run the winit event loop until the window closes.

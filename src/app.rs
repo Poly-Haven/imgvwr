@@ -518,9 +518,13 @@ impl App {
         let display_builder = DisplayBuilder::new().with_window_attributes(Some(window_attributes));
         let (window, gl_config) = display_builder
             .build(event_loop, template, |configs| {
+                // The scene is a fullscreen textured quad plus egui's own
+                // (already-antialiased) triangles, so MSAA buys nothing and only
+                // costs fill rate — pick the config with the fewest samples
+                // (0 = no MSAA) rather than the most.
                 configs
                     .reduce(|a, b| {
-                        if b.num_samples() > a.num_samples() {
+                        if b.num_samples() < a.num_samples() {
                             b
                         } else {
                             a
@@ -689,9 +693,11 @@ impl App {
                         x = x.clamp(mp.x, mp.x + (ms.width as i32 - new_outer_w as i32).max(0));
                         y = y.clamp(mp.y, mp.y + (ms.height as i32 - new_outer_h as i32).max(0));
                     }
-                    gfx.window.set_outer_position(PhysicalPosition::new(x, y));
-                    let _ = gfx.window.request_inner_size(target);
-                    did = true;
+                    // Move and resize in a single OS call so the frame doesn't
+                    // visibly jump in two steps (set_outer_position then
+                    // request_inner_size would). `target` is the inner size we
+                    // want; SetWindowPos takes the outer rect.
+                    did = set_window_outer_rect(&gfx.window, x, y, new_outer_w, new_outer_h);
                 }
             }
         }
@@ -1940,7 +1946,12 @@ impl ApplicationHandler<UserEvent> for App {
                     {
                         gfx.gl_surface.resize(&gfx.gl_context, w, h);
                     }
-                    gfx.window.request_redraw();
+                }
+                // Redraw synchronously rather than via request_redraw so the new
+                // surface size is presented this frame — otherwise the previous
+                // frame is shown stretched to the new size until the next redraw.
+                if matches!(self.render(), RenderOutcome::Captured) {
+                    event_loop.exit();
                 }
                 // A resize we didn't initiate (outside the suppression window),
                 // and not a maximize/fullscreen, is the user dragging the border:
@@ -2142,22 +2153,51 @@ fn startup_geometry(
 /// Replace egui's thin default proportional font with the native Segoe UI for
 /// sharper, more familiar text. Falls back to the egui default if not found.
 fn install_ui_font(ctx: &egui::Context) {
-    const CANDIDATES: &[&str] = &[r"C:\Windows\Fonts\segoeui.ttf"];
-    for path in CANDIDATES {
-        if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = egui::FontDefinitions::default();
-            fonts
-                .font_data
-                .insert("ui".to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
-            if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                fam.insert(0, "ui".to_owned());
-            }
-            ctx.set_fonts(fonts);
-            log::info!("UI font: {path}");
-            return;
-        }
+    // Candidate fonts, most-preferred first: a debug-only override (for font
+    // A/B testing), the bundled font (ships with the app, so the UI looks
+    // identical on every machine), then the OS Segoe UI, then egui's default.
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    #[cfg(debug_assertions)]
+    if let Some(p) = std::env::var_os("IMGVWR_UI_FONT") {
+        candidates.push(PathBuf::from(p));
     }
-    log::info!("UI font: egui default (Segoe UI not found)");
+    candidates.push(
+        resolve_resources_dir()
+            .join("fonts")
+            .join("Inter-Regular.otf"),
+    );
+    candidates.push(PathBuf::from(r"C:\Windows\Fonts\segoeui.ttf"));
+
+    let mut loaded = false;
+    for path in &candidates {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let mut fonts = egui::FontDefinitions::default();
+        fonts
+            .font_data
+            .insert("ui".to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
+        if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            fam.insert(0, "ui".to_owned());
+        }
+        ctx.set_fonts(fonts);
+        log::info!("UI font: {}", path.display());
+        loaded = true;
+        break;
+    }
+    if !loaded {
+        log::info!("UI font: egui default (no candidate font found)");
+    }
+
+    // Debug-only global zoom, for crispness A/B testing.
+    #[cfg(debug_assertions)]
+    if let Some(z) = std::env::var("IMGVWR_UI_ZOOM")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+    {
+        ctx.set_zoom_factor(z);
+        log::info!("UI zoom: {z}");
+    }
 }
 
 /// The alphabetical sibling image `dir` steps from `current` in its folder
@@ -2317,6 +2357,45 @@ fn toprow_digit(key: &PhysicalKey) -> Option<u32> {
         KeyCode::Digit9 => 9,
         _ => return None,
     })
+}
+
+/// Atomically move and resize the window to the given OUTER rect (physical px)
+/// in a single OS call, so the frame doesn't visibly jump in two steps the way
+/// `set_outer_position` followed by `request_inner_size` does. Returns false if
+/// the native handle couldn't be obtained.
+#[cfg(windows)]
+fn set_window_outer_rect(window: &Window, x: i32, y: i32, w: u32, h: u32) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return false;
+    };
+    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
+    // SAFETY: `hwnd` is a live top-level window owned by `window`. With
+    // SWP_NOZORDER the insert-after handle is ignored, so null is fine.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            x,
+            y,
+            w as i32,
+            h as i32,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    true
+}
+
+#[cfg(not(windows))]
+fn set_window_outer_rect(window: &Window, x: i32, y: i32, w: u32, h: u32) -> bool {
+    window.set_outer_position(PhysicalPosition::new(x, y));
+    let _ = window.request_inner_size(PhysicalSize::new(w, h));
+    true
 }
 
 /// Set the window's title-bar (small) and taskbar (big) icons from the bundled

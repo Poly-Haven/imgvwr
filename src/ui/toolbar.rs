@@ -6,7 +6,9 @@ const PANEL_WIDTH: f32 = 200.0;
 
 fn panel_frame() -> egui::Frame {
     egui::Frame {
-        fill: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 170),
+        // Near-opaque so anti-aliased text edges blend over a flat dark fill
+        // rather than the busy image behind, which reads as soft/fuzzy.
+        fill: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 240),
         inner_margin: egui::Margin::same(6),
         ..Default::default()
     }

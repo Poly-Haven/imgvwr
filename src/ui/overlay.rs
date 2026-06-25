@@ -9,7 +9,10 @@ const ACCENT: egui::Color32 = egui::Color32::from_rgb(190, 111, 255);
 
 fn overlay_frame() -> egui::Frame {
     egui::Frame {
-        fill: egui::Color32::from_rgba_unmultiplied(20, 20, 20, 220),
+        // Near-opaque: anti-aliased text over a flat dark fill stays crisp,
+        // whereas a translucent panel lets the busy image bleed through the
+        // glyph edges and look soft.
+        fill: egui::Color32::from_rgba_unmultiplied(20, 20, 20, 245),
         inner_margin: egui::Margin::same(16),
         corner_radius: egui::CornerRadius::same(8),
         ..Default::default()
@@ -230,7 +233,9 @@ fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs) -> bool {
         .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-10.0, 40.0))
         .show(ctx, |ui| {
             let frame = egui::Frame {
-                fill: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160),
+                // Near-opaque so the selectable metadata text stays crisp over
+                // whatever image is behind it.
+                fill: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 240),
                 inner_margin: egui::Margin::same(8),
                 corner_radius: egui::CornerRadius::same(4),
                 ..Default::default()
@@ -272,7 +277,9 @@ fn toast(ctx: &egui::Context, text: &str, alpha: f32) {
     if a <= 0.0 {
         return;
     }
-    let bg = (180.0 * a) as u8;
+    // Near-opaque at full strength (then fades with `a`) so the text reads
+    // crisply over the image rather than blending into it.
+    let bg = (240.0 * a) as u8;
     let fg = (255.0 * a) as u8;
     const FONT_SIZE: f32 = 16.0;
     let font = egui::FontId::proportional(FONT_SIZE);

@@ -63,6 +63,18 @@ the authoritative license text.
 
 ---
 
+## Bundled font (`resources/fonts/`)
+
+### Inter — SIL Open Font License 1.1
+Copyright (c) 2016 The Inter Project Authors
+(<https://github.com/rsms/inter>).
+
+`Inter-Regular.otf` is bundled and used as the UI font so the interface renders
+identically (and crisply) on every machine. The full license text ships
+alongside it at `resources/fonts/OFL.txt`.
+
+---
+
 ## Rust crates
 
 All Rust crate dependencies are licensed under MIT and/or Apache-2.0. Run

@@ -1380,6 +1380,18 @@ impl App {
         self.show_toast(text);
     }
 
+    /// Reset all image-processing adjustments (Ctrl+R): exposure, gamma, clarity,
+    /// channel isolation. (Geometric squash/stretch resets with R/Home instead.)
+    fn reset_image_processing(&mut self) {
+        self.exposure_target = 0.0;
+        self.gamma_target = 1.0;
+        self.clarity_amount = 0.0;
+        self.clarity_radius = 64.0;
+        self.isolate_channel = None;
+        self.show_toast("Adjustments reset".to_string());
+        self.request_redraw();
+    }
+
     /// Adjust the Clarity strength (0 = off). Chunky steps; the range goes well
     /// past photographic levels so issues can be cranked into the extreme.
     fn adjust_clarity(&mut self, delta: f32) {
@@ -1722,12 +1734,8 @@ impl App {
             (_, Some("]")) => self.adjust_clarity_radius(16.0),
             (_, Some(";")) => self.adjust_clarity(-0.5),
             (_, Some("'")) => self.adjust_clarity(0.5),
-            // Ctrl+R: reset exposure & gamma (eased).
-            (_, Some("r")) | (_, Some("R")) if ctrl => {
-                self.exposure_target = 0.0;
-                self.gamma_target = 1.0;
-                self.show_toast(format!("{}   Gamma {:.1}", fmt_ev(0.0), 1.0));
-            }
+            // Ctrl+R: reset all image-processing adjustments.
+            (_, Some("r")) | (_, Some("R")) if ctrl => self.reset_image_processing(),
             // R (no Ctrl): reset the view, same as Home / Backspace.
             (_, Some("r")) | (_, Some("R")) => self.reset_view_full(),
             (_, Some("a")) | (_, Some("A")) => {
@@ -2418,8 +2426,11 @@ impl App {
             .map(|g| g.window.scale_factor() as f32)
             .unwrap_or(1.0);
         let (vw, _) = self.viewport();
-        let near_corner = self.cursor_pos.x >= (vw - 240.0 * scale) as f64
-            && self.cursor_pos.y <= (140.0 * scale) as f64;
+        // A small top-right corner triangle (~80px legs): reveal only when the
+        // cursor is inside the diagonal from (w-80, 0) to (w, 80).
+        let edge = (80.0 * scale) as f64;
+        let near_corner =
+            self.cursor_in_window && (vw as f64 - self.cursor_pos.x) + self.cursor_pos.y <= edge;
         if near_corner || self.ui_state.pointer_over_metadata {
             self.metadata_hover = true;
             self.metadata_hide_deadline = None;

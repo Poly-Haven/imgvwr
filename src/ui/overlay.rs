@@ -90,7 +90,9 @@ fn bottom_panel(
             ui.set_width(screen.width());
             frame.show(ui, |ui| {
                 ui.set_min_width(screen.width() - 24.0);
-                ui.horizontal(|ui| {
+                // Wrap onto multiple rows when the window is too narrow to fit
+                // all the sliders in one line.
+                ui.horizontal_wrapped(|ui| {
                     // Tone group.
                     adj_slider(
                         ui,
@@ -117,7 +119,7 @@ fn bottom_panel(
                     ui.separator();
                     ui.add_space(12.0);
                     // Clarity group (local contrast).
-                    ui.label(egui::RichText::new("Clarity").color(ACCENT).strong());
+                    ui.label(egui::RichText::new("Clarity").color(egui::Color32::from_gray(190)));
                     adj_slider(
                         ui,
                         "",
@@ -130,7 +132,7 @@ fn bottom_panel(
                     );
                     adj_slider(
                         ui,
-                        "radius",
+                        "Radius",
                         inputs.clarity_radius,
                         8.0..=256.0,
                         16.0,
@@ -598,13 +600,14 @@ fn hint(ctx: &egui::Context) {
 }
 
 /// Draw the F2 metadata box (top-right, below the slot flags). Returns whether
-/// the pointer is over it, so the caller can keep it visible while hovered and
-/// suppress image panning over it (the values are selectable text).
+/// it should stay revealed — the pointer is over it, or its View dropdown menu is
+/// open (so navigating into the menu doesn't dismiss the box and close the menu).
 fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) -> bool {
     // To the left of the right-edge slot-flag column so the two never overlap.
     // Slides in from the right edge: at slide 0 it's pushed fully off-screen.
     let slide = inputs.metadata_slide.clamp(0.0, 1.0);
     let off_x = -34.0 + (1.0 - slide) * 360.0;
+    let mut view_menu_open = false;
     let resp = egui::Area::new(egui::Id::new("imgvwr_metadata"))
         .anchor(
             egui::Align2::RIGHT_TOP,
@@ -648,7 +651,7 @@ fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActi
                                 )
                                 .selectable(false),
                             );
-                            view_dropdown(ui, inputs, actions);
+                            view_menu_open = view_dropdown(ui, inputs, actions);
                             ui.end_row();
                         }
                         // Channels: a clickable colour box per channel that
@@ -671,7 +674,7 @@ fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActi
                     });
             });
         });
-    resp.response.contains_pointer()
+    resp.response.contains_pointer() || view_menu_open
 }
 
 /// The `(label, colour, channel-index)` boxes to show for a channel count.
@@ -725,8 +728,10 @@ fn channel_box(
 }
 
 /// The View-transform dropdown for the metadata box: the current display's views
-/// inline, plus a `Display ▸` sub-menu whose entries open each display's views.
-fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
+/// inline, plus a `Display ›` sub-menu whose entries open each display's views.
+/// Returns whether the menu (or one of its sub-menus) is currently open, so the
+/// caller can keep the metadata box revealed while the user navigates it.
+fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>) -> bool {
     let current = inputs
         .active
         .as_ref()
@@ -734,7 +739,7 @@ fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiActio
         .unwrap_or_else(|| "gamma 2.2".to_string());
     if !inputs.ocio_available {
         ui.label(egui::RichText::new(current).color(egui::Color32::WHITE));
-        return;
+        return false;
     }
     let active_display = inputs
         .active
@@ -742,7 +747,7 @@ fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiActio
         .map(|(d, _)| d.clone())
         .or_else(|| inputs.displays().first().cloned())
         .unwrap_or_default();
-    ui.menu_button(format!("{current}  ⏷"), |ui| {
+    let resp = ui.menu_button(format!("{current}  ▾"), |ui| {
         for view in inputs.views_for(&active_display) {
             let is_active = inputs
                 .active
@@ -757,9 +762,9 @@ fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiActio
             }
         }
         ui.separator();
-        ui.menu_button("Display  ▸", |ui| {
+        ui.menu_button("Display  ›", |ui| {
             for display in inputs.displays() {
-                ui.menu_button(&display, |ui| {
+                ui.menu_button(format!("{display}  ›"), |ui| {
                     for view in inputs.views_for(&display) {
                         if ui.selectable_label(false, &view).clicked() {
                             actions.push(UiAction::SetView {
@@ -773,6 +778,8 @@ fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiActio
             }
         });
     });
+    // `inner` is `Some` only while the menu is open (the closure ran this frame).
+    resp.inner.is_some()
 }
 
 /// Transient bottom-right HUD; `alpha` fades it out (see `App::toast_render`).

@@ -49,7 +49,7 @@ pub struct AppPreferences {
 }
 
 fn default_corner_radius() -> u32 {
-    4
+    6
 }
 
 fn default_background_color() -> [u8; 3] {

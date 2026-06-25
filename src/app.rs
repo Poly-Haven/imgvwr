@@ -794,27 +794,29 @@ impl App {
         let Some((tpos, tsize)) = self.window_anim_target else {
             return false;
         };
-        let result = self.gfx.as_ref().and_then(|gfx| {
-            let cur_pos = gfx.window.outer_position().ok()?;
+        let result = self.gfx.as_ref().map(|gfx| {
             let cur = gfx.window.outer_size();
             let k = 1.0 - (-dt / WINDOW_EASE_TAU).exp();
-            let li = |a: i32, b: i32| (a as f32 + (b - a) as f32 * k).round() as i32;
             let lu = |a: u32, b: u32| {
                 ((a as f32 + (b as f32 - a as f32) * k).round() as i32).max(MIN_DIM as i32) as u32
             };
-            let (nx, ny) = (li(cur_pos.x, tpos.x), li(cur_pos.y, tpos.y));
             let (nw, nh) = (lu(cur.width, tsize.width), lu(cur.height, tsize.height));
-            let settled = (nx - tpos.x).abs() <= 1
-                && (ny - tpos.y).abs() <= 1
-                && (nw as i32 - tsize.width as i32).abs() <= 1
+            let settled = (nw as i32 - tsize.width as i32).abs() <= 1
                 && (nh as i32 - tsize.height as i32).abs() <= 1;
-            let (x, y, w, h) = if settled {
-                (tpos.x, tpos.y, tsize.width, tsize.height)
+            let (w, h) = if settled {
+                (tsize.width, tsize.height)
             } else {
-                (nx, ny, nw, nh)
+                (nw, nh)
             };
+            // Ease only the SIZE; derive the position from the fixed target
+            // centre so the centre doesn't wobble (easing x/y independently of
+            // w/h drifts the centre ±1px and reads as a shiver).
+            let cx = tpos.x + tsize.width as i32 / 2;
+            let cy = tpos.y + tsize.height as i32 / 2;
+            let x = cx - w as i32 / 2;
+            let y = cy - h as i32 / 2;
             set_window_outer_rect(&gfx.window, x, y, w, h);
-            Some(settled)
+            settled
         });
         match result {
             Some(settled) => {
@@ -2251,7 +2253,7 @@ impl App {
         })
     }
 
-    fn render(&mut self) -> RenderOutcome {
+    fn render(&mut self, advance_window: bool) -> RenderOutcome {
         // Advance any in-progress incremental upload before drawing this frame.
         if self.pending.is_some() {
             self.pump_upload();
@@ -2281,8 +2283,14 @@ impl App {
             self.titlebar_alpha = tb_target;
         }
         // Advance the window-geometry ease (the window-follow animates its size
-        // smoothly rather than snapping).
-        let win_moving = self.ease_window(dt);
+        // smoothly rather than snapping) only on the timed redraws. A redraw
+        // triggered *by* a resize just re-tracks content at the new size without
+        // posting another resize (which would cause a resize storm).
+        let win_moving = if advance_window {
+            self.ease_window(dt)
+        } else {
+            self.window_anim_target.is_some()
+        };
         // Keep scheduling frames while the camera, titlebar, or window geometry
         // is still moving; all settle, after which about_to_wait returns to Wait.
         self.animating = cam_moving || !tb_settled || win_moving;
@@ -2441,13 +2449,11 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 // Redraw synchronously so the new surface size is presented this
-                // frame (otherwise the previous frame shows stretched). During a
-                // window-geometry ease the per-frame loop already redraws, so skip
-                // it here to avoid a resize storm (each render would post another
-                // resize).
-                if self.window_anim_target.is_none()
-                    && matches!(self.render(), RenderOutcome::Captured)
-                {
+                // frame (otherwise the previous frame shows stretched). Pass
+                // advance_window = false so a redraw caused by the geometry ease's
+                // own resize doesn't post another resize (avoids a resize storm),
+                // while still tracking the content to the new size.
+                if matches!(self.render(false), RenderOutcome::Captured) {
                     event_loop.exit();
                 }
                 // A resize we didn't initiate (outside the suppression window),
@@ -2463,7 +2469,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if matches!(self.render(), RenderOutcome::Captured) {
+                if matches!(self.render(true), RenderOutcome::Captured) {
                     event_loop.exit();
                 }
             }

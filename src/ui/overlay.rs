@@ -91,25 +91,51 @@ fn bottom_panel(
             frame.show(ui, |ui| {
                 ui.set_min_width(screen.width() - 24.0);
                 ui.horizontal(|ui| {
-                    tone_slider(
+                    // Tone group.
+                    adj_slider(
                         ui,
                         "Exposure",
                         inputs.exposure,
                         -16.0..=16.0,
                         0.5,
+                        2,
                         UiAction::SetExposure,
                         actions,
                     );
-                    ui.add_space(16.0);
-                    ui.separator();
-                    ui.add_space(16.0);
-                    tone_slider(
+                    ui.add_space(12.0);
+                    adj_slider(
                         ui,
                         "Gamma",
                         inputs.gamma,
                         0.1..=4.0,
                         0.1,
+                        2,
                         UiAction::SetGamma,
+                        actions,
+                    );
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(12.0);
+                    // Clarity group (local contrast).
+                    ui.label(egui::RichText::new("Clarity").color(ACCENT).strong());
+                    adj_slider(
+                        ui,
+                        "",
+                        inputs.clarity_amount,
+                        0.0..=10.0,
+                        0.5,
+                        2,
+                        UiAction::SetClarity,
+                        actions,
+                    );
+                    adj_slider(
+                        ui,
+                        "radius",
+                        inputs.clarity_radius,
+                        8.0..=256.0,
+                        16.0,
+                        0,
+                        UiAction::SetClarityRadius,
                         actions,
                     );
                 });
@@ -119,13 +145,15 @@ fn bottom_panel(
 }
 
 /// A labelled slider with `−` / `+` step buttons, emitting `make(value)` on any
-/// change. Used for the bottom-panel tone (and future) adjustments.
-fn tone_slider(
+/// change. Used for the bottom-panel image adjustments.
+#[allow(clippy::too_many_arguments)]
+fn adj_slider(
     ui: &mut egui::Ui,
     label: &str,
     value: f32,
     range: std::ops::RangeInclusive<f32>,
     step: f32,
+    decimals: usize,
     make: fn(f32) -> UiAction,
     actions: &mut Vec<UiAction>,
 ) {
@@ -136,7 +164,7 @@ fn tone_slider(
     }
     let mut v = value;
     if ui
-        .add(egui::Slider::new(&mut v, range).fixed_decimals(2))
+        .add(egui::Slider::new(&mut v, range).fixed_decimals(decimals))
         .changed()
     {
         actions.push(make(v));
@@ -816,6 +844,8 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
             &[
                 (", / .", "Exposure −/+"),
                 ("Ctrl + , / .", "Gamma −/+"),
+                ("[ / ]", "Clarity radius −/+"),
+                ("; / '", "Clarity strength −/+"),
                 ("Ctrl + R", "Reset exposure & gamma"),
                 ("T", "Standard / last view transform"),
                 ("O", "Open file…"),

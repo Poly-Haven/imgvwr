@@ -1,6 +1,6 @@
 #version 400 core
 
-in vec2 in_position;
+layout(location = 0) in vec2 in_position;
 out vec2 v_uv;
 
 void main() {

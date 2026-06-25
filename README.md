@@ -11,6 +11,9 @@ for Windows.
   `GL_MAX_TEXTURE_SIZE`.
 - **OCIO v2 colour management:** bundled Blender/AgX config, with AgX/Filmic and
   other view transforms selectable from the metadata box's View dropdown.
+- **Review tools:** per-channel isolation, an auto-exposure pick for HDR
+  panoramas, and a GPU **Clarity** (local-contrast) filter that can be cranked
+  well past photographic levels to make issues pop.
 - **Minimal UI:** the image *is* the window; a borderless titlebar (Open,
   Settings, window controls) reveals at the top edge, an adjustment-slider panel
   at the bottom edge, and the metadata box at the top-right — all auto-hiding.
@@ -37,6 +40,8 @@ for Windows.
 |---|---|
 | `,` / `.` | Exposure −/+ 0.5 stops |
 | `Ctrl + ,` / `Ctrl + .` | Gamma −/+ 0.1 |
+| `[` / `]` | Clarity (local contrast) radius −/+ |
+| `;` / `'` | Clarity strength −/+ (0 = off; crank high to make issues pop) |
 | `Ctrl + R` | Reset exposure & gamma |
 | `T` | Toggle Standard ↔ last-used view transform |
 | `O` | Open file… |

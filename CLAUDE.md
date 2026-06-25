@@ -26,7 +26,12 @@ cargo build --release
   `renderer/mod.rs`. The panorama path must sample via `sample_image_grad` (seam-corrected
   derivatives), never plain `sample_image`, or the longitude wrap shows a mip-LOD seam.
 - Headless verification (no visible window needed): `IMGVWR_CAPTURE=out.png` renders one frame
-  to a PNG; `IMGVWR_DEBUG_*` env vars (debug builds only) force camera/exposure/projection state.
+  to a PNG; `IMGVWR_DEBUG_*` env vars (debug builds only) force camera/exposure/projection state
+  (e.g. `IMGVWR_DEBUG_CLARITY`, `IMGVWR_DEBUG_ISOLATE`, `IMGVWR_DEBUG_BOTTOM`).
+- Screen-space review effects belong in the reusable post chain (`renderer/post.rs`): the scene
+  renders into an offscreen RGBA16F target and effects run as fullscreen passes composited to the
+  default framebuffer. Clarity lives there; focus peaking / false-colour / slot-diff should reuse
+  it. When the effect is off, `Renderer::render` bypasses the whole chain (zero overhead).
 - The camera is an enum (`Pano` | `Flat`) — keep the two states distinct; convert through
   `center_uv` on the P-toggle rather than reusing fields.
 - rawler's `raw_metadata` is brittle (rejects some decodable files); raw EXIF orientation is read

@@ -210,6 +210,9 @@ pub struct App {
     nearest_filter: bool,
     /// Isolated channel shown as greyscale (0=R 1=G 2=B 3=A); `None` = all.
     isolate_channel: Option<u8>,
+    /// Clarity (local-contrast) strength (0 = off) and blur radius (viewport px).
+    clarity_amount: f32,
+    clarity_radius: f32,
     show_metadata: bool,
 
     // Colour management.
@@ -372,6 +375,8 @@ impl App {
             wrap_2d: false,
             nearest_filter: false,
             isolate_channel: None,
+            clarity_amount: 0.0,
+            clarity_radius: 64.0,
             show_metadata: false,
             ocio,
             last_view: None,
@@ -1355,6 +1360,26 @@ impl App {
         self.show_toast(text);
     }
 
+    /// Adjust the Clarity strength (0 = off). Chunky steps; the range goes well
+    /// past photographic levels so issues can be cranked into the extreme.
+    fn adjust_clarity(&mut self, delta: f32) {
+        self.clarity_amount = (self.clarity_amount + delta).clamp(0.0, 10.0);
+        let msg = if self.clarity_amount <= 0.0 {
+            "Clarity off".to_string()
+        } else {
+            format!("Clarity {:.2}", self.clarity_amount)
+        };
+        self.show_toast(msg);
+        self.request_redraw();
+    }
+
+    /// Adjust the Clarity unsharp-mask radius (viewport pixels).
+    fn adjust_clarity_radius(&mut self, delta: f32) {
+        self.clarity_radius = (self.clarity_radius + delta).clamp(8.0, 256.0);
+        self.show_toast(format!("Clarity radius {:.0} px", self.clarity_radius));
+        self.request_redraw();
+    }
+
     /// Ease the rendered exposure / gamma toward their targets (so keyboard and
     /// slider adjustments animate like zoom). Returns true while still moving.
     fn animate_tone(&mut self, dt: f32) -> bool {
@@ -1672,6 +1697,11 @@ impl App {
                     self.show_exposure_toast();
                 }
             }
+            // Clarity (local contrast): [ ] radius, ; ' strength.
+            (_, Some("[")) => self.adjust_clarity_radius(-16.0),
+            (_, Some("]")) => self.adjust_clarity_radius(16.0),
+            (_, Some(";")) => self.adjust_clarity(-0.5),
+            (_, Some("'")) => self.adjust_clarity(0.5),
             // Ctrl+R: reset exposure & gamma (eased).
             (_, Some("r")) | (_, Some("R")) if ctrl => {
                 self.exposure_target = 0.0;
@@ -2122,6 +2152,12 @@ impl App {
                 self.isolate_channel = (c >= 0).then_some(c as u8);
             }
         }
+        if let Some(v) = f("IMGVWR_DEBUG_CLARITY") {
+            self.clarity_amount = v;
+        }
+        if let Some(v) = f("IMGVWR_DEBUG_CLARITY_RADIUS") {
+            self.clarity_radius = v;
+        }
         if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
             self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
         }
@@ -2217,6 +2253,8 @@ impl App {
             // The bottom-panel sliders show/control the dialed targets.
             exposure: self.exposure_target,
             gamma: self.gamma_target,
+            clarity_amount: self.clarity_amount,
+            clarity_radius: self.clarity_radius,
             loading,
             progress,
             loading_name: self.pending_name.clone(),
@@ -2448,6 +2486,14 @@ impl App {
                 self.gamma_target = v.clamp(0.1, 4.0);
                 self.request_redraw();
             }
+            UiAction::SetClarity(v) => {
+                self.clarity_amount = v.clamp(0.0, 10.0);
+                self.request_redraw();
+            }
+            UiAction::SetClarityRadius(v) => {
+                self.clarity_radius = v.clamp(8.0, 256.0);
+                self.request_redraw();
+            }
             UiAction::OpenSettings => {
                 self.ui_state.show_settings = true;
                 self.ui_state.confirm_default = false;
@@ -2578,6 +2624,8 @@ impl App {
             nearest: self.nearest_filter,
             background: srgb_u8_to_f32(self.prefs.background_color),
             isolate_channel: self.isolate_channel.map(|c| c as i32).unwrap_or(-1),
+            clarity_amount: self.clarity_amount,
+            clarity_radius: self.clarity_radius,
         };
         let capture_ready = self.capture_ready();
 

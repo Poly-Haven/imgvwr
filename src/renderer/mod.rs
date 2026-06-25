@@ -2,6 +2,7 @@
 //! texture (single or tiled), the OCIO LUTs, and the per-frame uniforms. The
 //! only module that calls `glow` directly (besides `texture`).
 
+mod post;
 mod texture;
 
 use std::sync::Arc;
@@ -46,6 +47,10 @@ pub struct RenderParams {
     pub background: [f32; 3],
     /// Channel to isolate as greyscale: -1 = all, 0=R 1=G 2=B 3=A.
     pub isolate_channel: i32,
+    /// Clarity (local-contrast) strength; 0 bypasses the whole post chain.
+    pub clarity_amount: f32,
+    /// Clarity unsharp-mask blur radius, in viewport pixels.
+    pub clarity_radius: f32,
 }
 
 impl Default for RenderParams {
@@ -64,6 +69,8 @@ impl Default for RenderParams {
             nearest: false,
             background: [0.02, 0.02, 0.02],
             isolate_channel: -1,
+            clarity_amount: 0.0,
+            clarity_radius: 64.0,
         }
     }
 }
@@ -161,6 +168,8 @@ pub struct Renderer {
     ocio_apply: String,
     threshold: i32,
     max_texture_size: i32,
+    /// Reusable offscreen post-process chain (Clarity, and future review tools).
+    post: post::PostChain,
 }
 
 impl Renderer {
@@ -177,6 +186,9 @@ impl Renderer {
             let threshold = texture::effective_threshold(max_texture_size);
             log::debug!("GL_MAX_TEXTURE_SIZE = {max_texture_size}, tiling threshold = {threshold}");
 
+            let post = post::PostChain::new(&gl)
+                .map_err(|e| anyhow!("failed to build post-process chain: {e}"))?;
+
             Ok(Self {
                 gl,
                 program,
@@ -191,6 +203,7 @@ impl Renderer {
                 ocio_apply: GAMMA_FALLBACK_APPLY.to_string(),
                 threshold,
                 max_texture_size,
+                post,
             })
         }
     }
@@ -335,11 +348,36 @@ impl Renderer {
         }
     }
 
-    pub fn render(&self, params: &RenderParams) {
+    /// Render a frame. With clarity off (strength 0) this draws the scene
+    /// straight to the default framebuffer exactly as before — zero overhead.
+    /// Otherwise the scene is rendered into an offscreen target and the post
+    /// chain composites a Clarity (local-contrast) pass to the default fb.
+    pub fn render(&mut self, params: &RenderParams) {
+        let gl = self.gl.clone();
+        let (w, h) = params.viewport;
+        if params.clarity_amount <= 0.0 || w <= 0 || h <= 0 {
+            unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, None) };
+            self.draw_scene(params);
+            return;
+        }
+        // Scene → offscreen target, then post-process → default framebuffer.
+        let scene_fbo = unsafe { self.post.scene_framebuffer(&gl, w, h) };
+        unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, Some(scene_fbo)) };
+        self.draw_scene(params);
+        unsafe {
+            self.post
+                .apply_clarity(&gl, params.clarity_radius, params.clarity_amount, w, h);
+        }
+    }
+
+    /// Draw the scene (textured quad through the OCIO/exposure pipeline) into the
+    /// currently-bound framebuffer.
+    fn draw_scene(&self, params: &RenderParams) {
         let gl = &self.gl;
         let (w, h) = params.viewport;
         let bg = params.background;
         unsafe {
+            gl.enable(glow::BLEND);
             gl.viewport(0, 0, w.max(1), h.max(1));
             gl.clear_color(bg[0], bg[1], bg[2], 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
@@ -512,6 +550,30 @@ unsafe fn build_program(
         let log = gl.get_program_info_log(program);
         gl.delete_program(program);
         return Err(anyhow!("shader program link failed:\n{log}"));
+    }
+    Ok(program)
+}
+
+/// Link [`VERTEX_SRC`] with a post-process fragment shader. Used by the
+/// reusable post-process chain ([`post::PostChain`]).
+unsafe fn build_post_program(gl: &glow::Context, frag: &str) -> Result<glow::Program> {
+    let program = gl
+        .create_program()
+        .map_err(|e| anyhow!("create_program: {e}"))?;
+    let vs = compile_shader(gl, glow::VERTEX_SHADER, VERTEX_SRC)?;
+    let fs = compile_shader(gl, glow::FRAGMENT_SHADER, frag)?;
+    gl.attach_shader(program, vs);
+    gl.attach_shader(program, fs);
+    gl.link_program(program);
+    let ok = gl.get_program_link_status(program);
+    gl.detach_shader(program, vs);
+    gl.detach_shader(program, fs);
+    gl.delete_shader(vs);
+    gl.delete_shader(fs);
+    if !ok {
+        let log = gl.get_program_info_log(program);
+        gl.delete_program(program);
+        return Err(anyhow!("post program link failed:\n{log}"));
     }
     Ok(program)
 }

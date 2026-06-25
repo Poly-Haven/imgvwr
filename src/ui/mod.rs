@@ -39,6 +39,9 @@ pub struct UiInputs {
     /// Current tone adjustments (eased target values), shown in the bottom panel.
     pub exposure: f32,
     pub gamma: f32,
+    /// Clarity (local-contrast) strength and radius for the bottom-panel sliders.
+    pub clarity_amount: f32,
+    pub clarity_radius: f32,
 
     // Overlays (Commit 9).
     pub loading: bool,
@@ -146,6 +149,10 @@ pub enum UiAction {
     SetExposure(f32),
     /// Set the gamma target from the bottom-panel slider / buttons.
     SetGamma(f32),
+    /// Set the Clarity strength (0 = off) from the bottom-panel slider.
+    SetClarity(f32),
+    /// Set the Clarity blur radius (viewport px) from the bottom-panel slider.
+    SetClarityRadius(f32),
     /// Open the settings dialog (titlebar gear button).
     OpenSettings,
     // Borderless titlebar controls.

@@ -49,12 +49,15 @@ glam = "0.29"
 # Native file dialog
 rfd = "0.15"
 
-# Win32 access for crisp multi-resolution window/taskbar icons (WM_SETICON).
+# Win32 access for crisp icons (WM_SETICON) + shell-association refresh.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
 ] }
+# Registry access for the "set as default viewer" file associations.
+winreg = "0.52"
 
 [build-dependencies]
 cc = "1"

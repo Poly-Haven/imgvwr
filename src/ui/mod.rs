@@ -4,6 +4,12 @@
 mod overlay;
 mod toolbar;
 
+/// Give a clickable widget's response the pointing-hand cursor on hover (egui
+/// only does this for hyperlinks by default).
+pub(crate) fn clickable(resp: egui::Response) -> egui::Response {
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Build the whole overlay UI for a frame: toolbar + overlays.
 pub fn build(
     ctx: &egui::Context,
@@ -94,4 +100,6 @@ pub enum UiAction {
     CloseHelp,
     /// Recall the comparator slot at this index (0..=8).
     RecallSlot(usize),
+    /// Register imgvwr as the default app for supported file types.
+    SetDefaultApp,
 }

@@ -835,12 +835,14 @@ impl App {
     }
 
     /// The active flag follows whichever slot (if any) holds the current image.
+    /// Matched by path, not `Arc` identity: navigating away and back yields a
+    /// different decoded instance of the same file, which should still highlight.
     fn recompute_active_slot(&mut self) {
         self.active_slot = match &self.current_image {
             Some(cur) => self
                 .slots
                 .iter()
-                .position(|s| s.as_ref().is_some_and(|d| Arc::ptr_eq(d, cur))),
+                .position(|s| s.as_ref().is_some_and(|d| d.path == cur.path)),
             None => None,
         };
     }
@@ -1306,7 +1308,9 @@ impl App {
                 self.show_metadata = !self.show_metadata;
                 log::info!("metadata overlay -> {}", self.show_metadata);
             }
-            (Key::Named(NamedKey::Home), _) => self.reset_view_full(),
+            (Key::Named(NamedKey::Home), _) | (Key::Named(NamedKey::Backspace), _) => {
+                self.reset_view_full()
+            }
             (Key::Named(NamedKey::F11), _) => self.toggle_fullscreen(),
             (Key::Named(NamedKey::ArrowRight), _) => self.navigate(1),
             (Key::Named(NamedKey::ArrowLeft), _) => self.navigate(-1),
@@ -1650,6 +1654,13 @@ impl App {
                 self.request_redraw();
             }
             UiAction::RecallSlot(i) => self.recall_slot(i + 1),
+            UiAction::SetDefaultApp => match register_default_app() {
+                Ok(n) => self.show_toast(format!("Default viewer for {n} file types")),
+                Err(e) => {
+                    log::error!("set-default failed: {e}");
+                    self.show_toast("Could not set default".to_string());
+                }
+            },
         }
     }
 
@@ -2015,6 +2026,72 @@ fn install_ui_font(ctx: &egui::Context) {
 /// The alphabetical sibling image `dir` steps from `current` in its folder
 /// (wrapping at the ends). `None` if the folder can't be read or has no
 /// supported images.
+/// Register imgvwr (per-user, no admin) as the handler for every supported
+/// extension: a ProgID with an open command + icon, each extension's
+/// `OpenWithProgids`, and the classic default association. Returns the number of
+/// extensions associated. Note: Windows protects an extension's *current*
+/// default with a hashed UserChoice, so already-defaulted types (e.g. .jpg) may
+/// still need confirmation in Settings → Default apps; unassociated types
+/// (most HDR/EXR/RAW) take effect immediately.
+#[cfg(windows)]
+fn register_default_app() -> Result<usize, String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+    use winreg::RegKey;
+
+    let exe = std::env::current_exe().map_err(|e| format!("exe path: {e}"))?;
+    let exe = exe.to_string_lossy().into_owned();
+    let progid = "imgvwr.Image";
+
+    let classes = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(r"Software\Classes", KEY_READ | KEY_WRITE)
+        .map_err(|e| format!("open HKCU Classes: {e}"))?;
+
+    // ProgID: friendly name, icon, and open command.
+    let (prog, _) = classes.create_subkey(progid).map_err(|e| e.to_string())?;
+    prog.set_value("", &"imgvwr Image")
+        .map_err(|e| e.to_string())?;
+    let (icon, _) = prog
+        .create_subkey("DefaultIcon")
+        .map_err(|e| e.to_string())?;
+    icon.set_value("", &format!("{exe},0"))
+        .map_err(|e| e.to_string())?;
+    let (cmd, _) = prog
+        .create_subkey(r"shell\open\command")
+        .map_err(|e| e.to_string())?;
+    cmd.set_value("", &format!("\"{exe}\" \"%1\""))
+        .map_err(|e| e.to_string())?;
+
+    // Associate each supported extension.
+    let mut count = 0usize;
+    for ext in crate::image_loader::supported_extensions() {
+        let Ok((key, _)) = classes.create_subkey(format!(".{ext}")) else {
+            continue;
+        };
+        if let Ok((owp, _)) = key.create_subkey("OpenWithProgids") {
+            let _ = owp.set_value(progid, &"");
+        }
+        let _ = key.set_value("", &progid);
+        count += 1;
+    }
+
+    // Refresh shell file-association state (icons / defaults).
+    unsafe {
+        windows_sys::Win32::UI::Shell::SHChangeNotify(
+            windows_sys::Win32::UI::Shell::SHCNE_ASSOCCHANGED as i32,
+            windows_sys::Win32::UI::Shell::SHCNF_IDLIST,
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+    }
+    log::info!("registered imgvwr as handler for {count} extensions");
+    Ok(count)
+}
+
+#[cfg(not(windows))]
+fn register_default_app() -> Result<usize, String> {
+    Err("only supported on Windows".into())
+}
+
 /// The portion of `path` below the deepest directory common to all of `group`,
 /// joined with `/` (e.g. `a/b/c.jpg` vs `x/b/c.jpg`). Used to disambiguate
 /// comparator slots whose filenames collide.

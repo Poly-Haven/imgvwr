@@ -2,9 +2,9 @@
 //! "no image" hint, and the F2 metadata HUD (see plans/rewrite.md §12.3, §12.5,
 //! §12.6).
 
-use super::{UiAction, UiInputs, UiState};
+use super::{clickable, UiAction, UiInputs, UiState};
 
-/// Accent colour for the active comparator slot flag.
+/// Accent colour (active comparator slot flag, progress bar).
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(190, 111, 255);
 
 fn overlay_frame() -> egui::Frame {
@@ -94,9 +94,7 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction
                                 .strong(),
                         );
                     });
-                    let resp = inner
-                        .response
-                        .interact(egui::Sense::click())
+                    let resp = clickable(inner.response.interact(egui::Sense::click()))
                         .on_hover_text(label);
                     if resp.clicked() {
                         actions.push(UiAction::RecallSlot(i));
@@ -107,24 +105,15 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction
 }
 
 fn loading(ctx: &egui::Context, inputs: &UiInputs) {
-    // Keep the bar (determinate fill or indeterminate sweep) animating.
+    // Keep the bar animating (determinate fill, or barber-pole when indeterminate).
     ctx.request_repaint();
-    let determinate = inputs.progress.is_some();
-    let value = match inputs.progress {
-        Some(p) => p.clamp(0.0, 1.0),
-        // Indeterminate (decoding): a repeating left-to-right sweep.
-        None => {
-            let t = ctx.input(|i| i.time);
-            (t % 1.2) as f32 / 1.2
-        }
-    };
     let name = inputs.loading_name.as_deref().unwrap_or("Loading");
     let label = match inputs.progress {
         Some(p) => format!("{name}  {}%", (p * 100.0).round() as i32),
         None => format!("{name}…"),
     };
     egui::Area::new(egui::Id::new("imgvwr_loading"))
-        .anchor(egui::Align2::RIGHT_BOTTOM, egui::Vec2::new(-12.0, -12.0))
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::new(12.0, -12.0))
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame {
@@ -141,13 +130,49 @@ fn loading(ctx: &egui::Context, inputs: &UiInputs) {
                         .size(13.0),
                 );
                 ui.add_space(4.0);
-                ui.add(
-                    egui::ProgressBar::new(value)
-                        .desired_width(190.0)
-                        .animate(!determinate),
-                );
+                progress_bar(ui, inputs.progress);
             });
         });
+}
+
+/// A progress bar in the accent colour. `Some(p)` fills `p`; `None` shows a full
+/// bar with animated diagonal "barber-pole" stripes to signal ongoing work.
+fn progress_bar(ui: &mut egui::Ui, value: Option<f32>) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(190.0, 12.0), egui::Sense::hover());
+    let painter = ui.painter().with_clip_rect(rect);
+    let radius = egui::CornerRadius::same(3);
+    painter.rect_filled(
+        rect,
+        radius,
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 28),
+    );
+    match value {
+        Some(p) => {
+            let mut fill = rect;
+            fill.set_width(rect.width() * p.clamp(0.0, 1.0));
+            painter.rect_filled(fill, radius, ACCENT);
+        }
+        None => {
+            painter.rect_filled(rect, radius, ACCENT);
+            // Scrolling diagonal stripes (a translucent lighter overlay).
+            let h = rect.height();
+            let stripe = 9.0;
+            let period = stripe * 2.0;
+            let phase = (ui.input(|i| i.time) as f32 * 36.0) % period;
+            let mut x = rect.left() - h - period + phase;
+            let light = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 55);
+            while x < rect.right() + period {
+                let pts = vec![
+                    egui::pos2(x, rect.bottom()),
+                    egui::pos2(x + h, rect.top()),
+                    egui::pos2(x + h + stripe, rect.top()),
+                    egui::pos2(x + stripe, rect.bottom()),
+                ];
+                painter.add(egui::Shape::convex_polygon(pts, light, egui::Stroke::NONE));
+                x += period;
+            }
+        }
+    }
 }
 
 fn error_panel(ctx: &egui::Context, inputs: &UiInputs, error: &str, actions: &mut Vec<UiAction>) {
@@ -175,7 +200,7 @@ fn error_panel(ctx: &egui::Context, inputs: &UiInputs, error: &str, actions: &mu
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new(error).color(egui::Color32::from_gray(220)));
                     ui.add_space(10.0);
-                    if ui.button("Dismiss").clicked() {
+                    if clickable(ui.button("Dismiss")).clicked() {
                         actions.push(UiAction::DismissError);
                     }
                 });
@@ -303,7 +328,7 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
         ("T", "Toggle Standard / last view transform"),
         ("O", "Open file…"),
         ("F2", "Metadata overlay"),
-        ("Home", "Reset view (fit)"),
+        ("Home / Backspace", "Reset view (fit)"),
         ("F / F11 / dbl-click", "Toggle fullscreen"),
         ("H", "This help"),
         ("Esc / Q", "Exit fullscreen / quit"),
@@ -339,7 +364,7 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
                     });
                 ui.add_space(10.0);
                 ui.vertical_centered(|ui| {
-                    if ui.button("Close").clicked() {
+                    if clickable(ui.button("Close")).clicked() {
                         actions.push(UiAction::CloseHelp);
                     }
                 });

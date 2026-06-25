@@ -38,7 +38,7 @@ for Windows.
 | `O` | Open file… |
 | `F2` | Toggle metadata overlay (also appears on top-right hover) |
 | `H` | Show keyboard / mouse help |
-| `Home` | Reset view (fit) |
+| `Home` / `Backspace` | Reset view (fit) |
 | Move cursor to left edge | Show toolbar overlay |
 | `F` / `F11` / double-click | Toggle fullscreen |
 | `Escape` / `Q` | Exit fullscreen or close |

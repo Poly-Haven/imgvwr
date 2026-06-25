@@ -1,6 +1,6 @@
 //! Left-edge hover toolbar (see plans/rewrite.md §12.1, §12.2).
 
-use super::{UiAction, UiInputs, UiState};
+use super::{clickable, UiAction, UiInputs, UiState};
 
 const PANEL_WIDTH: f32 = 200.0;
 
@@ -33,25 +33,28 @@ pub fn build_toolbar(
         .frame(panel_frame())
         .show(ctx, |ui| {
             ui.add_space(4.0);
-            if ui.button("📂  Open file…").clicked() {
+            if clickable(ui.button("📂  Open file…")).clicked() {
                 actions.push(UiAction::OpenFile);
             }
-            if ui
-                .add_enabled(inputs.has_image, egui::Button::new("🔁  Reload"))
+            if clickable(ui.add_enabled(inputs.has_image, egui::Button::new("🔁  Reload")))
                 .clicked()
             {
                 actions.push(UiAction::Reload);
             }
 
-            let vt = ui.add_enabled(
+            let vt = clickable(ui.add_enabled(
                 inputs.ocio_available,
                 egui::Button::new("🎨  View transform ›"),
-            );
+            ));
             if vt.clicked() {
                 state.show_view_submenu = !state.show_view_submenu;
                 if state.show_view_submenu && state.browse_display.is_none() {
                     state.browse_display = inputs.active.as_ref().map(|(d, _)| d.clone());
                 }
+            }
+
+            if clickable(ui.button("⭐  Set as default viewer")).clicked() {
+                actions.push(UiAction::SetDefaultApp);
             }
 
             // Image dimensions / channels / depth live in the F2 metadata box;
@@ -83,7 +86,7 @@ pub fn build_toolbar(
             .show(ctx, |ui| {
                 ui.add_space(4.0);
                 let display = browse.clone().unwrap_or_default();
-                if ui.button(format!("Display: {display} ›")).clicked() {
+                if clickable(ui.button(format!("Display: {display} ›"))).clicked() {
                     state.show_display_submenu = !state.show_display_submenu;
                 }
                 if let Some((_, active_view)) = &inputs.active {
@@ -103,7 +106,7 @@ pub fn build_toolbar(
                     } else {
                         egui::RichText::new(format!("   {view}"))
                     };
-                    if ui.button(label).clicked() {
+                    if clickable(ui.button(label)).clicked() {
                         actions.push(UiAction::SetView {
                             display: display.clone(),
                             view: view.clone(),
@@ -126,7 +129,7 @@ pub fn build_toolbar(
                 ui.label(egui::RichText::new("Display").color(egui::Color32::from_gray(160)));
                 ui.separator();
                 for display in inputs.displays() {
-                    if ui.button(&display).clicked() {
+                    if clickable(ui.button(&display)).clicked() {
                         state.browse_display = Some(display.clone());
                         state.show_display_submenu = false;
                     }

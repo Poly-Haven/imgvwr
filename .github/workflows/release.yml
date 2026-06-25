@@ -33,12 +33,15 @@ jobs:
       - name: Cache vcpkg-installed native deps
         uses: actions/cache@v4
         with:
-          path: ${{ env.VCPKG_ROOT }}\installed
+          path: ${{ github.workspace }}\vcpkg_installed
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
 
       - name: Install native deps (OpenColorIO, lcms, OpenEXR)
+        # Manifest mode: vcpkg.json in the repo root drives the install, so no
+        # package args are passed. Output lands in ./vcpkg_installed, which
+        # build.rs discovers ahead of the classic %VCPKG_ROOT%\installed path.
         run: >
-          & "$env:VCPKG_ROOT\vcpkg.exe" install opencolorio lcms openexr
+          & "$env:VCPKG_ROOT\vcpkg.exe" install
           --triplet x64-windows --clean-after-build
 
       - name: Verify Cargo version matches the tag

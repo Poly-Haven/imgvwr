@@ -20,6 +20,10 @@ pub const FLAT_FIT_FOV_DEG: f32 = 90.0;
 /// Default field of view when an image first opens in panorama mode.
 pub const DEFAULT_PANO_FOV_DEG: f32 = 100.0;
 
+/// Time constant (seconds) for the exponential easing of zoom/FOV/pan toward
+/// their target. Smaller = snappier. Frame-rate independent (see `animate`).
+const EASE_TAU: f32 = 0.07;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Camera {
     /// Equirectangular look-around.
@@ -82,15 +86,23 @@ impl Camera {
     }
 }
 
-/// The controller owns the live camera plus the post-load reset state (Home).
+/// The controller owns the rendered camera plus the `target` it eases toward.
+///
+/// Zoom (2D), FOV (panorama) and 2D pan animate: setters that should ease
+/// (wheel, numpad, Home) write `target`, and [`animate`](Self::animate) moves
+/// `camera` toward it each frame. Direct manipulation (drag look / drag pan) and
+/// the panorama look angle are instant — they write `camera` and `target`
+/// together, and `animate` snaps the look angle rather than easing it.
 #[derive(Clone, Debug)]
 pub struct CameraController {
+    /// The rendered camera (eased toward `target`).
     pub camera: Camera,
-    reset: Camera,
+    /// Destination the eased fields move toward.
+    target: Camera,
 }
 
 impl CameraController {
-    /// Build the camera for a freshly-loaded image, capturing the reset state.
+    /// Build the camera for a freshly-loaded image (settled: camera == target).
     pub fn for_image(equirectangular: bool) -> Self {
         let camera = if equirectangular {
             Camera::Pano {
@@ -106,7 +118,7 @@ impl CameraController {
         };
         Self {
             camera,
-            reset: camera,
+            target: camera,
         }
     }
 
@@ -114,87 +126,202 @@ impl CameraController {
         matches!(self.camera, Camera::Pano { .. })
     }
 
-    /// Restore the camera captured just after the last load (Home key).
-    pub fn reset_view(&mut self) {
-        self.camera = self.reset;
+    /// The target the eased fields are heading toward (for the zoom/FOV toast).
+    pub fn target(&self) -> Camera {
+        self.target
     }
 
-    /// Rotate in panorama mode (radians). No-op on `Flat`.
-    pub fn rotate(&mut self, dyaw_rad: f32, dpitch_rad: f32) {
-        if let Camera::Pano {
-            yaw_rad, pitch_rad, ..
-        } = &mut self.camera
-        {
-            *yaw_rad += dyaw_rad;
-            *pitch_rad = (*pitch_rad + dpitch_rad).clamp(MIN_PITCH_RAD, MAX_PITCH_RAD);
+    /// Target 2D zoom, if in flat mode (used by the window-follow).
+    pub fn target_zoom(&self) -> Option<f32> {
+        match self.target {
+            Camera::Flat { zoom, .. } => Some(zoom),
+            Camera::Pano { .. } => None,
         }
     }
 
-    /// Pan in 2D mode by a UV delta. No-op on `Pano`.
+    /// Finish any in-progress easing immediately (e.g. across an image load, so
+    /// the new image doesn't animate in from the previous view).
+    pub fn snap(&mut self) {
+        self.camera = self.target;
+    }
+
+    /// Freeze the target at the current camera, so no easing kicks in after the
+    /// rendered camera was set directly (e.g. headless debug overrides).
+    pub fn settle(&mut self) {
+        self.target = self.camera;
+    }
+
+    /// Set the absolute 2D zoom on both the rendered camera and its target
+    /// (instant, no easing) — for comparator swaps that must not animate. No-op
+    /// on `Pano`.
+    pub fn set_zoom_now(&mut self, scale: f32) {
+        let z = scale.max(flat_zoom_min());
+        for cam in [&mut self.camera, &mut self.target] {
+            if let Camera::Flat { zoom, .. } = cam {
+                *zoom = z;
+            }
+        }
+    }
+
+    /// Rotate the panorama look (radians) — instant (drag). No-op on `Flat`.
+    pub fn rotate(&mut self, dyaw_rad: f32, dpitch_rad: f32) {
+        for cam in [&mut self.camera, &mut self.target] {
+            if let Camera::Pano {
+                yaw_rad, pitch_rad, ..
+            } = cam
+            {
+                *yaw_rad += dyaw_rad;
+                *pitch_rad = (*pitch_rad + dpitch_rad).clamp(MIN_PITCH_RAD, MAX_PITCH_RAD);
+            }
+        }
+    }
+
+    /// Snap the panorama look to an absolute yaw/pitch — instant (Home). No-op
+    /// on `Flat`.
+    pub fn snap_look(&mut self, yaw_rad: f32, pitch_rad: f32) {
+        for cam in [&mut self.camera, &mut self.target] {
+            if let Camera::Pano {
+                yaw_rad: y,
+                pitch_rad: p,
+                ..
+            } = cam
+            {
+                *y = yaw_rad;
+                *p = pitch_rad.clamp(MIN_PITCH_RAD, MAX_PITCH_RAD);
+            }
+        }
+    }
+
+    /// Pan in 2D by a UV delta — instant (drag). No-op on `Pano`.
     pub fn pan(&mut self, d_uv: Vec2) {
-        if let Camera::Flat { pan, .. } = &mut self.camera {
+        for cam in [&mut self.camera, &mut self.target] {
+            if let Camera::Flat { pan, .. } = cam {
+                *pan += d_uv;
+            }
+        }
+    }
+
+    /// Pan in 2D by a UV delta — eased (wheel pan). No-op on `Pano`.
+    pub fn pan_target(&mut self, d_uv: Vec2) {
+        if let Camera::Flat { pan, .. } = &mut self.target {
             *pan += d_uv;
         }
     }
 
-    /// Adjust panorama FOV by `delta_deg` (clamped). No-op on `Flat`.
+    /// Set the absolute 2D pan target — eased (Home). No-op on `Pano`.
+    pub fn set_pan_target(&mut self, pan: Vec2) {
+        if let Camera::Flat { pan: p, .. } = &mut self.target {
+            *p = pan;
+        }
+    }
+
+    /// Adjust panorama FOV by `delta_deg` — eased. No-op on `Flat`.
     pub fn adjust_fov(&mut self, delta_deg: f32) {
-        if let Camera::Pano { fov_deg, .. } = &mut self.camera {
+        if let Camera::Pano { fov_deg, .. } = &mut self.target {
             *fov_deg = (*fov_deg + delta_deg).clamp(MIN_FOV_DEG, PANORAMA_MAX_FOV_DEG);
         }
     }
 
-    /// Multiply 2D zoom by `factor`. No-op on `Pano`. Zoom-in is uncapped; only
-    /// the zoom-out (minimum) bound is enforced.
+    /// Multiply the 2D zoom target by `factor` — eased. No-op on `Pano`.
+    /// Zoom-in is uncapped; only the zoom-out (minimum) bound is enforced.
     pub fn adjust_zoom(&mut self, factor: f32) {
-        if let Camera::Flat { zoom, .. } = &mut self.camera {
+        if let Camera::Flat { zoom, .. } = &mut self.target {
             *zoom = (*zoom * factor).max(flat_zoom_min());
         }
     }
 
-    /// Set 2D zoom to an absolute scale (zoom-in uncapped). No-op on `Pano`.
-    /// Used by the numpad exact-zoom keys.
+    /// Set the absolute 2D zoom target (zoom-in uncapped) — eased. No-op on
+    /// `Pano`. Used by the numpad exact-zoom keys and the window-follow.
     pub fn set_zoom(&mut self, scale: f32) {
-        if let Camera::Flat { zoom, .. } = &mut self.camera {
+        if let Camera::Flat { zoom, .. } = &mut self.target {
             *zoom = scale.max(flat_zoom_min());
         }
     }
 
-    /// Set panorama FOV to an absolute degrees value (clamped). No-op on `Flat`.
+    /// Set the absolute panorama FOV target — eased. No-op on `Flat`.
     pub fn set_fov(&mut self, fov: f32) {
-        if let Camera::Pano { fov_deg, .. } = &mut self.camera {
+        if let Camera::Pano { fov_deg, .. } = &mut self.target {
             *fov_deg = fov.clamp(MIN_FOV_DEG, PANORAMA_MAX_FOV_DEG);
         }
     }
 
     /// Switch projection mode, preserving the screen-centre pixel and zoom level
-    /// across the transition (§10).
+    /// across the transition (§10). Instant: both `camera` and `target` convert.
     pub fn set_mode(&mut self, panorama: bool) {
         if panorama == self.is_panorama() {
             return;
         }
-        let uv = self.camera.center_uv();
-        self.camera = if panorama {
-            let (yaw_rad, pitch_rad) = uv_to_yaw_pitch(uv);
-            let fov_deg = match self.camera {
-                Camera::Flat { zoom, .. } => {
-                    zoom_to_fov_deg(zoom).clamp(MIN_FOV_DEG, PANORAMA_MAX_FOV_DEG)
-                }
-                _ => DEFAULT_PANO_FOV_DEG,
-            };
-            Camera::Pano {
-                yaw_rad,
-                pitch_rad,
-                fov_deg,
+        self.camera = switched(self.camera, panorama);
+        self.target = switched(self.target, panorama);
+    }
+
+    /// Ease the rendered camera toward `target` by `dt` seconds. Returns true
+    /// while still moving, so the event loop keeps scheduling frames (and stops
+    /// — returning to `ControlFlow::Wait` — once settled). Frame-rate
+    /// independent: the per-frame fraction is `1 - exp(-dt/EASE_TAU)`.
+    pub fn animate(&mut self, dt: f32) -> bool {
+        let k = 1.0 - (-dt / EASE_TAU).exp();
+        match (&mut self.camera, self.target) {
+            (Camera::Flat { pan, zoom }, Camera::Flat { pan: tp, zoom: tz }) => {
+                // Zoom eases in log space so it feels uniform across magnitudes.
+                let nz = (zoom.ln() + (tz.ln() - zoom.ln()) * k).exp();
+                let np = *pan + (tp - *pan) * k;
+                let zoom_settled = (nz - tz).abs() <= tz * 1e-3;
+                let pan_settled = (tp - np).length() <= 1e-4;
+                *zoom = if zoom_settled { tz } else { nz };
+                *pan = if pan_settled { tp } else { np };
+                !(zoom_settled && pan_settled)
             }
-        } else {
-            let pan = Vec2::new(uv.x - 0.5, uv.y - 0.5);
-            let zoom = match self.camera {
-                Camera::Pano { fov_deg, .. } => fov_to_zoom(fov_deg),
-                _ => 1.0,
-            };
-            Camera::Flat { pan, zoom }
+            (
+                Camera::Pano {
+                    yaw_rad,
+                    pitch_rad,
+                    fov_deg,
+                },
+                Camera::Pano {
+                    yaw_rad: ty,
+                    pitch_rad: tpi,
+                    fov_deg: tf,
+                },
+            ) => {
+                // The look angle is instant (already kept equal); only FOV eases.
+                *yaw_rad = ty;
+                *pitch_rad = tpi;
+                let nf = *fov_deg + (tf - *fov_deg) * k;
+                let settled = (nf - tf).abs() <= 1e-2;
+                *fov_deg = if settled { tf } else { nf };
+                !settled
+            }
+            // Mode mismatch never happens (set_mode converts both); nothing to do.
+            _ => false,
+        }
+    }
+}
+
+/// Convert a camera to the other projection mode, preserving the screen-centre
+/// pixel and the zoom/FOV equivalence (§10).
+fn switched(cam: Camera, panorama: bool) -> Camera {
+    let uv = cam.center_uv();
+    if panorama {
+        let (yaw_rad, pitch_rad) = uv_to_yaw_pitch(uv);
+        let fov_deg = match cam {
+            Camera::Flat { zoom, .. } => {
+                zoom_to_fov_deg(zoom).clamp(MIN_FOV_DEG, PANORAMA_MAX_FOV_DEG)
+            }
+            _ => DEFAULT_PANO_FOV_DEG,
         };
+        Camera::Pano {
+            yaw_rad,
+            pitch_rad,
+            fov_deg,
+        }
+    } else {
+        let pan = Vec2::new(uv.x - 0.5, uv.y - 0.5);
+        let zoom = match cam {
+            Camera::Pano { fov_deg, .. } => fov_to_zoom(fov_deg),
+            _ => 1.0,
+        };
+        Camera::Flat { pan, zoom }
     }
 }
 
@@ -275,7 +402,7 @@ mod tests {
                     pitch_rad: pitch,
                     fov_deg: 100.0,
                 },
-                reset: Camera::Flat {
+                target: Camera::Flat {
                     pan: Vec2::ZERO,
                     zoom: 1.0,
                 },
@@ -306,7 +433,7 @@ mod tests {
         for pan in pans {
             let mut c = CameraController {
                 camera: Camera::Flat { pan, zoom: 1.5 },
-                reset: Camera::Flat {
+                target: Camera::Flat {
                     pan: Vec2::ZERO,
                     zoom: 1.0,
                 },

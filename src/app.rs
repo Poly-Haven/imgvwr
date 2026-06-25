@@ -257,6 +257,13 @@ pub struct App {
     pending: Option<PendingAdopt>,
     /// Upload fraction (0..1) while `pending`, for the progress bar.
     upload_progress: f32,
+
+    /// Timestamp of the previous rendered frame, for frame-rate-independent
+    /// easing (`None` until the first frame).
+    last_frame: Option<Instant>,
+    /// True while the camera is easing toward its target, so `about_to_wait`
+    /// keeps scheduling frames (and stops, returning to `Wait`, once settled).
+    animating: bool,
 }
 
 impl App {
@@ -341,6 +348,8 @@ impl App {
             metadata_hide_deadline: None,
             pending: None,
             upload_progress: 0.0,
+            last_frame: None,
+            animating: false,
         }
     }
 
@@ -629,17 +638,19 @@ impl App {
         self.resize_window_centered(PhysicalSize::new(w, h));
     }
 
-    /// While zooming a 2D image, grow/shrink the window so it keeps framing the
-    /// image at the current on-screen scale — until it would exceed
+    /// When the 2D zoom *target* changes, grow/shrink the window once so it keeps
+    /// framing the image at the target on-screen scale — until it would exceed
     /// [`FILL_FRACTION`] of the monitor, after which the window caps there and the
-    /// image overflows (panned into). The zoom is re-derived from the (capped)
-    /// window height so the on-screen pixel scale the user dialled in is kept.
-    /// No-op in panorama mode, when maximized/fullscreen, or after a manual resize.
+    /// image overflows (panned into). The target zoom is re-derived from the
+    /// (capped) window height so the dialled-in pixel scale is kept, and the
+    /// rendered zoom then *eases* toward it within the (already-resized) window —
+    /// the window is never resized per animation frame. No-op in panorama mode,
+    /// when maximized/fullscreen, or after a manual resize.
     fn follow_zoom_with_window(&mut self) {
         if self.manual_window || self.fullscreen {
             return;
         }
-        let Camera::Flat { zoom, .. } = self.camera.camera else {
+        let Some(zoom) = self.camera.target_zoom() else {
             return;
         };
         let (img_w, img_h) = (self.file_info.width, self.file_info.height);
@@ -652,15 +663,16 @@ impl App {
             None => return,
         };
         let (_, vh) = self.viewport();
-        // On-screen scale: device pixels per image pixel (100% == 1.0).
+        // Target on-screen scale: device pixels per image pixel (100% == 1.0).
         let scale = zoom * vh / img_h as f32;
         // Frame the image at `scale`, scaled down uniformly (keeping the image's
         // aspect) so it never exceeds FILL_FRACTION of the monitor in any axis.
         let (win_w, win_h) =
             fit_to_monitor(img_w as f32 * scale, img_h as f32 * scale, mon.as_ref());
-        // Preserve the on-screen scale after the window-height change: uncapped
-        // this lands on ~1.0 (image fills the window); capped, zoom > 1 so the
-        // image overflows the window uniformly and can be panned into.
+        // Re-target the zoom to preserve the on-screen scale after the
+        // window-height change: uncapped this lands on ~1.0 (image fills the
+        // window); capped, the target zoom > 1 so the image overflows the window
+        // uniformly and can be panned into. The rendered zoom eases to this.
         self.camera.set_zoom(scale * img_h as f32 / win_h as f32);
         self.resize_window_centered(PhysicalSize::new(win_w, win_h));
     }
@@ -904,6 +916,9 @@ impl App {
         self.cache_insert(data);
         // Match on-screen pixel scale for a comparator swap (native resolution).
         self.preserve_native_scale(old_scale);
+        // The new image starts settled — freeze the easing target at the camera
+        // we just configured (incl. any debug override) so it doesn't animate in.
+        self.camera.settle();
         self.request_redraw();
     }
 
@@ -982,7 +997,8 @@ impl App {
     fn preserve_native_scale(&mut self, old: Option<(f32, f32)>) {
         if let (Some((old_zoom, old_h)), Camera::Flat { .. }) = (old, self.camera.camera) {
             let new_h = self.file_info.height.max(1) as f32;
-            self.camera.set_zoom(old_zoom * new_h / old_h);
+            // Instant (no easing) — a comparator A/B should snap, not animate.
+            self.camera.set_zoom_now(old_zoom * new_h / old_h);
         }
     }
 
@@ -1043,11 +1059,14 @@ impl App {
         self.load_path(target);
     }
 
-    /// Home: reset pan+zoom to the fit view (2D) or default look (panorama).
+    /// Home: ease pan+zoom back to the fit view (2D) or default FOV (panorama).
     /// Tone adjustments are intentionally left alone (Ctrl+R resets those).
     fn reset_view_full(&mut self) {
         if self.camera.is_panorama() {
-            self.camera = CameraController::for_image(true);
+            // Snap the look back to centre (easing a spun-around yaw would whirl
+            // back), ease the FOV to the default.
+            self.camera.snap_look(0.0, 0.0);
+            self.camera.set_fov(crate::camera::DEFAULT_PANO_FOV_DEG);
         } else {
             let (vw, vh) = self.viewport();
             let aspect = self
@@ -1055,14 +1074,14 @@ impl App {
                 .as_ref()
                 .and_then(|g| g.renderer.image_aspect())
                 .unwrap_or(1.0);
-            // Contain-fit: largest zoom that still shows the whole image.
+            // Contain-fit: largest zoom that still shows the whole image. Ease
+            // zoom and pan toward it within the current window (Home doesn't
+            // re-frame the window).
             let fit = (vw / vh / aspect.max(1e-4)).min(1.0);
-            self.camera.camera = Camera::Flat {
-                pan: Vec2::ZERO,
-                zoom: 1.0,
-            };
             self.camera.set_zoom(fit);
+            self.camera.set_pan_target(Vec2::ZERO);
         }
+        self.request_redraw();
     }
 
     // ---- toast HUD -------------------------------------------------------
@@ -1109,7 +1128,9 @@ impl App {
     }
 
     fn show_zoom_toast(&mut self) {
-        let text = match self.camera.camera {
+        // Report the target (where the ease is heading), not the mid-animation
+        // value, so the toast shows the level the user dialled in.
+        let text = match self.camera.target() {
             Camera::Pano { fov_deg, .. } => format!("FOV {}°", fov_deg.round() as i32),
             Camera::Flat { .. } => match self.flat_zoom_percent() {
                 Some(p) => format!("{}%", p.round() as i32),
@@ -1119,13 +1140,13 @@ impl App {
         self.show_toast(text);
     }
 
-    /// Current 2D zoom as a percentage where 100% == 1 image px : 1 monitor px.
+    /// Target 2D zoom as a percentage where 100% == 1 image px : 1 monitor px.
     fn flat_zoom_percent(&self) -> Option<f32> {
         let img_h = self.file_info.height;
         if img_h == 0 {
             return None;
         }
-        if let Camera::Flat { zoom, .. } = self.camera.camera {
+        if let Camera::Flat { zoom, .. } = self.camera.target() {
             let (_, vh) = self.viewport();
             Some(zoom * vh / img_h as f32 * 100.0)
         } else {
@@ -1317,10 +1338,11 @@ impl App {
                 let sx = inv_zoom * (vw / vh) / image_aspect.max(1e-4);
                 let sy = inv_zoom;
                 let k = 0.15 * steps;
+                // Eased (wheel) pan — eases to target, unlike a direct drag.
                 if horizontal {
-                    self.camera.pan(Vec2::new(k * sx, 0.0));
+                    self.camera.pan_target(Vec2::new(k * sx, 0.0));
                 } else {
-                    self.camera.pan(Vec2::new(0.0, -k * sy));
+                    self.camera.pan_target(Vec2::new(0.0, -k * sy));
                 }
             }
         }
@@ -1798,6 +1820,17 @@ impl App {
         if self.pending.is_some() {
             self.pump_upload();
         }
+        // Advance the zoom/pan easing toward the target (frame-rate independent;
+        // dt is clamped so a long idle gap can't cause a jump). `animating`
+        // drives the redraw scheduling in `about_to_wait`.
+        let now = Instant::now();
+        let dt = self
+            .last_frame
+            .replace(now)
+            .map(|prev| now.saturating_duration_since(prev).as_secs_f32())
+            .unwrap_or(0.0)
+            .min(0.1);
+        self.animating = self.camera.animate(dt);
         self.tick_toolbar();
         self.tick_metadata();
 
@@ -2039,8 +2072,9 @@ impl ApplicationHandler<UserEvent> for App {
             // Drive frames while decoding (spinner) or uploading (pump + bar).
             event_loop.set_control_flow(ControlFlow::Poll);
             self.request_redraw();
-        } else if self.toast_active() {
-            // Drive ~60 fps so the bottom-right toast can animate its fade-out.
+        } else if self.toast_active() || self.animating {
+            // Drive ~60 fps while the toast fades or the zoom/pan eases. Both
+            // settle quickly, after which we fall through to `Wait` (idle 0% CPU).
             let next = Instant::now() + Duration::from_millis(16);
             event_loop.set_control_flow(ControlFlow::WaitUntil(next));
             self.request_redraw();

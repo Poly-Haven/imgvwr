@@ -20,11 +20,12 @@ for Windows.
 |---|---|
 | Left / middle mouse drag | Pan (2D) or look around (panorama) |
 | Mouse wheel | Zoom (2D) or FOV (panorama) |
-| `Ctrl` + wheel | Exposure ±0.05 stops per notch |
+| `Shift` + wheel | Pan horizontally |
+| `Ctrl` + wheel | Pan vertically |
 | `,` / `.` | Exposure −/+ 0.5 stops |
 | `Ctrl + ,` / `Ctrl + .` | Gamma −/+ 0.1 |
 | `Ctrl + R` | Reset exposure & gamma |
-| Numpad `1`–`9` | Exact zoom: `100/N %` (with `Ctrl`: `N×100 %`) |
+| Numpad `1`–`9` | Zoom in `2^(N-1)×` (1=100%, 2=200%, 3=400%…); with `Ctrl`, zoom out |
 | `←` / `→` | Previous / next image in the folder (alphabetical) |
 | `L` | Lock zoom/pan across images |
 | `P` | Toggle 2D ↔ panorama mode |

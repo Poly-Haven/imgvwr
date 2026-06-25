@@ -32,13 +32,13 @@ pub struct RenderParams {
     pub viewport: (i32, i32),
     pub exposure: f32,
     pub gamma: f32,
-    /// 0 = equirectangular panorama, 1 = 2-D pan/zoom.
+    /// 0 = equirectangular panorama, 1 = 2D pan/zoom.
     pub projection_mode: i32,
     pub yaw: f32,
     pub pitch: f32,
     pub half_fov_radians: f32,
     pub tan_half_fov: f32,
-    /// 2-D mode: repeat the image (GL_REPEAT both axes) instead of clamping.
+    /// 2D mode: repeat the image (GL_REPEAT both axes) instead of clamping.
     pub wrap_2d: bool,
 }
 

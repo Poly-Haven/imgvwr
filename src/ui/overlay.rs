@@ -148,10 +148,15 @@ fn toast(ctx: &egui::Context, text: &str, alpha: f32) {
                 ..Default::default()
             };
             frame.show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(text)
-                        .color(egui::Color32::from_rgba_unmultiplied(fg, fg, fg, fg))
-                        .size(16.0),
+                // Extend (never wrap) so short values like "-2.50 EV" stay on one
+                // line regardless of the anchored area's narrow default width.
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(text)
+                            .color(egui::Color32::from_rgba_unmultiplied(fg, fg, fg, fg))
+                            .size(16.0),
+                    )
+                    .wrap_mode(egui::TextWrapMode::Extend),
                 );
             });
         });
@@ -160,17 +165,18 @@ fn toast(ctx: &egui::Context, text: &str, alpha: f32) {
 /// Centred hotkey reference (toggled with H, dismissed with H/Esc/Close).
 fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
     const KEYS: &[(&str, &str)] = &[
-        ("Drag (L/M mouse)", "Pan (2-D) / look around (pano)"),
-        ("Mouse wheel", "Zoom (2-D) / FOV (pano)"),
-        ("Ctrl + wheel", "Exposure"),
+        ("Drag (L/M mouse)", "Pan (2D) / look around (pano)"),
+        ("Mouse wheel", "Zoom (2D) / FOV (pano)"),
+        ("Shift + wheel", "Pan horizontally"),
+        ("Ctrl + wheel", "Pan vertically"),
         (", / .", "Exposure −/+"),
         ("Ctrl + , / .", "Gamma −/+"),
         ("Ctrl + R", "Reset exposure & gamma"),
-        ("Numpad 1–9", "Exact zoom (100/N %); Ctrl = N×100 %"),
+        ("Numpad 1–9", "Zoom in 2^(N-1)× (Ctrl = zoom out)"),
         ("← / →", "Previous / next image in folder"),
         ("L", "Lock zoom/pan across images"),
-        ("P", "Toggle 2-D / panorama"),
-        ("W", "Toggle 2-D tiled wrap"),
+        ("P", "Toggle 2D / panorama"),
+        ("W", "Toggle 2D tiled wrap"),
         ("T", "Toggle Standard / last view transform"),
         ("O", "Open file…"),
         ("F2", "Metadata overlay"),

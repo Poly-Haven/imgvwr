@@ -1,0 +1,19 @@
+{
+  "// note": "Keep build output and vendored deps out of search / file watching.",
+  "search.exclude": {
+    "**/target": true,
+    "**/dist": true,
+    "**/vcpkg_installed": true,
+    "**/_standalone_test": true,
+    "Cargo.lock": true,
+    "**/*.rs.bk": true
+  },
+  "files.watcherExclude": {
+    "**/target/**": true,
+    "**/dist/**": true,
+    "**/vcpkg_installed/**": true
+  },
+  "files.exclude": {
+    "**/_standalone_test": true
+  }
+}

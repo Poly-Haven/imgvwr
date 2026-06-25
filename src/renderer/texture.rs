@@ -15,7 +15,7 @@ use crate::image_loader::{ImageData, PixelBuffer};
 
 /// `__IMAGE_SAMPLER__` for the single-texture path.
 ///
-/// `sample_image` uses implicit derivatives (correct for the continuous 2-D
+/// `sample_image` uses implicit derivatives (correct for the continuous 2D
 /// coordinate); `sample_image_grad` takes explicit, seam-corrected derivatives
 /// for the equirectangular path (see the pano branch in the fragment template).
 pub const SINGLE_TEXTURE_SAMPLER: &str = "\

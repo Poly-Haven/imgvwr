@@ -10,10 +10,10 @@ uniform float u_tan_half_fov;
 uniform float u_aspect;
 uniform float u_exposure;            // stops; applied in scene-linear BEFORE the view transform
 uniform float u_gamma;               // output tweak; applied ONCE after the display transform (default 1.0)
-uniform int   u_projection_mode;     // 0 = equirectangular panorama, 1 = 2-D pan/zoom
+uniform int   u_projection_mode;     // 0 = equirectangular panorama, 1 = 2D pan/zoom
 uniform float u_image_aspect;
 uniform bool  u_input_is_encoded_srgb;  // true when source pixels are sRGB-encoded (JPEG / LDR PNG)
-uniform bool  u_wrap_2d;             // 2-D mode: repeat the image instead of clamping
+uniform bool  u_wrap_2d;             // 2D mode: repeat the image instead of clamping
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -52,7 +52,7 @@ void main() {
     vec3 color;
 
     if (u_projection_mode == 1) {
-        // -- 2-D pan / zoom ----------------------------------------------
+        // -- 2D pan / zoom ----------------------------------------------
         float inv_zoom = max(u_tan_half_fov, 0.02);
         vec2 centered = v_uv - vec2(0.5);
         float pan_u = u_yaw  / (2.0 * PI);
@@ -68,7 +68,7 @@ void main() {
             return;
         }
         // When wrapping, GL_REPEAT on both axes tiles the image seamlessly.
-        // The 2-D coordinate is screen-space-continuous, so implicit-derivative
+        // The 2D coordinate is screen-space-continuous, so implicit-derivative
         // sampling (and its mip LOD) is correct here.
         uv = raw_uv;
         color = sample_image(uv);

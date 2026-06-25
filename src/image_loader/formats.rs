@@ -177,24 +177,60 @@ pub fn load_raw(path: &Path) -> Result<ImageData> {
 
 /// Read a RAW file's EXIF orientation as `(transpose, flip_h, flip_v)`.
 ///
-/// rawler does not expose orientation on the developed image, so this re-opens
-/// the file via the lower-level decoder API to read `exif.orientation`. Returns
-/// `None` when there is no orientation, it is identity, or metadata is
-/// unreadable. The extra metadata parse is cheap next to demosaic+develop.
+/// rawler develops pixels in sensor order and its higher-level metadata parse is
+/// brittle (it rejects some otherwise-decodable files on unrelated tags), so we
+/// read the TIFF Orientation tag (0x0112 in IFD0) directly. This covers the
+/// TIFF-based raws (NEF/CR2/DNG/ARW/ORF/RW2/PEF/SR2/NRW/RWL); non-TIFF raws fall
+/// through to `None` (no rotation), matching the previous behaviour. Returns
+/// `None` for missing/identity orientation.
 fn raw_orientation_flips(path: &Path) -> Option<(bool, bool, bool)> {
-    use rawler::decoders::RawDecodeParams;
-    use rawler::{get_decoder, Orientation, RawFile};
-    use std::fs::File;
-    use std::io::BufReader;
-
-    let file = File::open(path).ok()?;
-    let mut rawfile = RawFile::new(path, BufReader::new(file));
-    let decoder = get_decoder(&mut rawfile).ok()?;
-    let meta = decoder
-        .raw_metadata(&mut rawfile, RawDecodeParams::default())
-        .ok()?;
-    let flips = Orientation::from_u16(meta.exif.orientation?).to_flips();
+    let orientation = read_tiff_orientation(path)?;
+    let flips = rawler::Orientation::from_u16(orientation).to_flips();
     (flips != (false, false, false)).then_some(flips)
+}
+
+/// Read the IFD0 Orientation tag (0x0112) from a little/big-endian TIFF-based
+/// file. Returns the raw EXIF orientation value (1..=8), or `None`.
+fn read_tiff_orientation(path: &Path) -> Option<u16> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut hdr = [0u8; 8];
+    f.read_exact(&mut hdr).ok()?;
+    let le = match &hdr[0..2] {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let u16f = |b: &[u8]| {
+        if le {
+            u16::from_le_bytes([b[0], b[1]])
+        } else {
+            u16::from_be_bytes([b[0], b[1]])
+        }
+    };
+    let u32f = |b: &[u8]| {
+        if le {
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        }
+    };
+    if u16f(&hdr[2..4]) != 42 {
+        return None; // not a TIFF magic
+    }
+    f.seek(SeekFrom::Start(u32f(&hdr[4..8]) as u64)).ok()?;
+    let mut cnt = [0u8; 2];
+    f.read_exact(&mut cnt).ok()?;
+    let mut entry = [0u8; 12];
+    for _ in 0..u16f(&cnt) {
+        f.read_exact(&mut entry).ok()?;
+        if u16f(&entry[0..2]) == 0x0112 {
+            // SHORT value lives in the first two bytes of the value field.
+            return Some(u16f(&entry[8..10]));
+        }
+    }
+    None
 }
 
 /// Apply EXIF flips/transpose to an interleaved RGBA-f32 buffer in place,

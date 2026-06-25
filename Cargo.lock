@@ -1592,6 +1592,7 @@ dependencies = [
  "serde_json",
  "simplelog",
  "time",
+ "windows-sys 0.59.0",
  "winit",
  "winresource",
 ]

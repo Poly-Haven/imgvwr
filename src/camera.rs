@@ -1,7 +1,7 @@
 //! Camera state and controller (see plans/rewrite.md §10).
 //!
 //! The camera is an enum, not a single struct with overloaded fields. Panorama
-//! and 2-D are genuinely different state with different ranges and semantics;
+//! and 2D are genuinely different state with different ranges and semantics;
 //! conflating them (reusing yaw/pitch as pan) is a known bug magnet, especially
 //! across the P-key transition. We keep them distinct and convert explicitly.
 
@@ -15,7 +15,7 @@ pub const MIN_FOV_DEG: f32 = 5.0;
 /// Rectilinear maximum, set on entering panorama mode.
 pub const PANORAMA_MAX_FOV_DEG: f32 = 140.0;
 pub const FLAT_MAX_FOV_DEG: f32 = 170.0;
-/// Default zoom when an image first opens in 2-D mode (90° => tan_half_fov 1.0).
+/// Default zoom when an image first opens in 2D mode (90° => tan_half_fov 1.0).
 pub const FLAT_FIT_FOV_DEG: f32 = 90.0;
 /// Default field of view when an image first opens in panorama mode.
 pub const DEFAULT_PANO_FOV_DEG: f32 = 100.0;
@@ -28,7 +28,7 @@ pub enum Camera {
         pitch_rad: f32,
         fov_deg: f32,
     },
-    /// 2-D pan / zoom. `pan` is the screen-centre UV offset (added to 0.5);
+    /// 2D pan / zoom. `pan` is the screen-centre UV offset (added to 0.5);
     /// `zoom` is a scale factor (1.0 = fit, larger = zoomed in).
     Flat { pan: Vec2, zoom: f32 },
 }
@@ -38,7 +38,7 @@ impl Camera {
     pub fn yaw(&self) -> f32 {
         match self {
             Camera::Pano { yaw_rad, .. } => *yaw_rad,
-            // 2-D pan_u = u_yaw / 2π  =>  u_yaw = pan.x * 2π.
+            // 2D pan_u = u_yaw / 2π  =>  u_yaw = pan.x * 2π.
             Camera::Flat { pan, .. } => pan.x * TAU,
         }
     }
@@ -46,12 +46,12 @@ impl Camera {
     pub fn pitch(&self) -> f32 {
         match self {
             Camera::Pano { pitch_rad, .. } => *pitch_rad,
-            // 2-D pan_v = -u_pitch / π  =>  u_pitch = -pan.y * π.
+            // 2D pan_v = -u_pitch / π  =>  u_pitch = -pan.y * π.
             Camera::Flat { pan, .. } => -pan.y * PI,
         }
     }
 
-    /// `u_tan_half_fov` (panorama: tan of half FOV; 2-D: inverse zoom).
+    /// `u_tan_half_fov` (panorama: tan of half FOV; 2D: inverse zoom).
     pub fn tan_half_fov(&self) -> f32 {
         match self {
             Camera::Pano { fov_deg, .. } => (fov_deg.to_radians() * 0.5).tan(),
@@ -63,7 +63,7 @@ impl Camera {
         self.tan_half_fov().atan()
     }
 
-    /// 0 = equirectangular panorama, 1 = 2-D pan/zoom.
+    /// 0 = equirectangular panorama, 1 = 2D pan/zoom.
     pub fn projection_mode(&self) -> i32 {
         match self {
             Camera::Pano { .. } => 0,
@@ -130,7 +130,7 @@ impl CameraController {
         }
     }
 
-    /// Pan in 2-D mode by a UV delta. No-op on `Pano`.
+    /// Pan in 2D mode by a UV delta. No-op on `Pano`.
     pub fn pan(&mut self, d_uv: Vec2) {
         if let Camera::Flat { pan, .. } = &mut self.camera {
             *pan += d_uv;
@@ -144,18 +144,19 @@ impl CameraController {
         }
     }
 
-    /// Multiply 2-D zoom by `factor` (clamped to the FOV range). No-op on `Pano`.
+    /// Multiply 2D zoom by `factor`. No-op on `Pano`. Zoom-in is uncapped; only
+    /// the zoom-out (minimum) bound is enforced.
     pub fn adjust_zoom(&mut self, factor: f32) {
         if let Camera::Flat { zoom, .. } = &mut self.camera {
-            *zoom = (*zoom * factor).clamp(flat_zoom_min(), flat_zoom_max());
+            *zoom = (*zoom * factor).max(flat_zoom_min());
         }
     }
 
-    /// Set 2-D zoom to an absolute scale (clamped to the FOV range). No-op on
-    /// `Pano`. Used by the numpad exact-zoom keys.
+    /// Set 2D zoom to an absolute scale (zoom-in uncapped). No-op on `Pano`.
+    /// Used by the numpad exact-zoom keys.
     pub fn set_zoom(&mut self, scale: f32) {
         if let Camera::Flat { zoom, .. } = &mut self.camera {
-            *zoom = scale.clamp(flat_zoom_min(), flat_zoom_max());
+            *zoom = scale.max(flat_zoom_min());
         }
     }
 
@@ -228,7 +229,7 @@ fn uv_to_yaw_pitch(uv: Vec2) -> (f32, f32) {
     (yaw, pitch)
 }
 
-/// 2-D zoom (scale) <-> equivalent FOV. inv_zoom = tan(fov/2) = 1/zoom.
+/// 2D zoom (scale) <-> equivalent FOV. inv_zoom = tan(fov/2) = 1/zoom.
 fn zoom_to_fov_deg(zoom: f32) -> f32 {
     (1.0 / zoom.max(1e-4)).atan().to_degrees() * 2.0
 }
@@ -237,12 +238,10 @@ fn fov_to_zoom(fov_deg: f32) -> f32 {
     1.0 / (fov_deg.to_radians() * 0.5).tan().max(1e-4)
 }
 
-/// 2-D zoom clamp bounds (mirroring the panorama-equivalent FOV range).
+/// 2D zoom-out bound (the most zoomed-out / widest equivalent FOV). Zoom-in is
+/// intentionally uncapped.
 fn flat_zoom_min() -> f32 {
     fov_to_zoom(FLAT_MAX_FOV_DEG)
-}
-fn flat_zoom_max() -> f32 {
-    fov_to_zoom(MIN_FOV_DEG)
 }
 
 #[cfg(test)]

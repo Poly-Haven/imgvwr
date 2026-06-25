@@ -16,7 +16,9 @@
 # IDE
 *.iml
 .idea/
-.vscode/
+.vscode/*
+# ...but keep the shared search/watch excludes.
+!.vscode/settings.json
 
 # Planning docs (local only)
 /plans/

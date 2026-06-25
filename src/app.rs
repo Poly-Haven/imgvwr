@@ -18,7 +18,7 @@
 //! / exposure state right after load so the visual outcome can be captured:
 //!   * `IMGVWR_DEBUG_EXPOSURE` / `_GAMMA`
 //!   * `IMGVWR_DEBUG_YAW` / `_PITCH` / `_FOV` (panorama, degrees)
-//!   * `IMGVWR_DEBUG_ZOOM` (2-D)
+//!   * `IMGVWR_DEBUG_ZOOM` (2D)
 //!   * `IMGVWR_DEBUG_PROJECTION` = `pano` | `flat`
 //!   * `IMGVWR_DEBUG_WRAP` = `1`
 
@@ -95,6 +95,11 @@ const TOAST_FADE: Duration = Duration::from_millis(600);
 /// Cursor travel (device px) during a double-click that suppresses the
 /// fullscreen toggle (so a double-click-and-drag is treated as a drag).
 const DBLCLICK_DRAG_TOL: f32 = 6.0;
+
+/// Max decoded images kept in memory for instant navigation (current + a
+/// previous + a next, plus one spare so back-and-forth stays cached). Each entry
+/// can be several GB for 24k+ images, so this is deliberately small.
+const IMAGE_CACHE_CAP: usize = 4;
 
 /// Result of a background decode, tagged with its generation id.
 struct LoadResult {
@@ -212,8 +217,10 @@ pub struct App {
     preload_tx: Sender<PreloadResult>,
     preload_rx: Receiver<PreloadResult>,
     preload_gen: u64,
-    /// A decoded neighbour waiting to be adopted instantly on the next nav.
-    preload_cache: Option<ImageData>,
+    /// Recently-seen decoded images (current + previous + next look-ahead), most-
+    /// recent first, so back-and-forth navigation is instant. Capped at
+    /// [`IMAGE_CACHE_CAP`]; for very large images this holds several GB.
+    image_cache: Vec<ImageData>,
 
     /// Transient bottom-right status toast.
     toast: Option<Toast>,
@@ -291,7 +298,7 @@ impl App {
             preload_tx,
             preload_rx,
             preload_gen: 0,
-            preload_cache: None,
+            image_cache: Vec::new(),
             toast: None,
         }
     }
@@ -341,30 +348,41 @@ impl App {
                 log::info!("view transform -> {}/{}", active.display, view);
                 self.rebuild_ocio();
                 self.persist_view_if_panorama();
+                self.show_toast(view.clone());
             }
         }
     }
 
-    /// Pick the OCIO view for a freshly-loaded image (§13). Panoramas restore the
-    /// saved per-extension view; 2-D images always use Standard.
+    /// Pick the OCIO view for a freshly-loaded image (§13). A saved per-extension
+    /// view (panoramas) wins; otherwise HDRIs (2:1 EXR/HDR) default to Filmic and
+    /// everything else to Standard.
     fn select_view_for_load(&mut self, panorama: bool, path: &Path) {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
         let applied = if panorama {
-            path.extension()
-                .and_then(|e| e.to_str())
-                .and_then(|ext| self.prefs.preferred_view(ext).cloned())
+            self.prefs
+                .preferred_view(&ext)
+                .cloned()
                 .map(|pv| self.ocio.set_active(&pv.display, &pv.view))
                 .unwrap_or(false)
         } else {
             false
         };
         if !applied {
-            self.select_standard_view();
+            let is_hdri = panorama && matches!(ext.as_str(), "exr" | "hdr" | "pic");
+            if !(is_hdri && self.select_view_named("filmic")) {
+                self.select_standard_view();
+            }
         }
         self.rebuild_ocio();
     }
 
-    /// Select a "Standard" view (preferring the current display), if available.
-    fn select_standard_view(&mut self) {
+    /// Select a view by name (case-insensitive), preferring the current display.
+    /// Returns true if a matching view was found and applied.
+    fn select_view_named(&mut self, name: &str) -> bool {
         let current_display = self.ocio.active().map(|dv| dv.display.clone());
         let pairs: Vec<(String, String)> = self
             .ocio
@@ -376,17 +394,24 @@ impl App {
         if let Some(display) = &current_display {
             if let Some((d, v)) = pairs
                 .iter()
-                .find(|(d, v)| d == display && v.eq_ignore_ascii_case("standard"))
+                .find(|(d, v)| d == display && v.eq_ignore_ascii_case(name))
             {
                 self.ocio.set_active(d, v);
-                return;
+                return true;
             }
         }
-        if let Some((d, v)) = pairs
-            .iter()
-            .find(|(_, v)| v.eq_ignore_ascii_case("standard"))
-        {
+        if let Some((d, v)) = pairs.iter().find(|(_, v)| v.eq_ignore_ascii_case(name)) {
             self.ocio.set_active(d, v);
+            return true;
+        }
+        false
+    }
+
+    /// Select a "Standard" view (preferring the current display), falling back
+    /// to "Raw" if there is no Standard.
+    fn select_standard_view(&mut self) {
+        if !self.select_view_named("standard") {
+            self.select_view_named("raw");
         }
     }
 
@@ -418,13 +443,14 @@ impl App {
     }
 
     fn create_gfx(&mut self, event_loop: &ActiveEventLoop) -> Result<Gfx> {
-        let mut window_attributes = Window::default_attributes()
+        // No winit window icon: it takes a single bitmap and Windows scales it
+        // badly for both the title bar and taskbar. We instead set crisp
+        // native-size icons from the multi-resolution .ico after creation
+        // (`set_window_icons`), backed by the icon embedded in the .exe.
+        let window_attributes = Window::default_attributes()
             .with_title("imgvwr")
             .with_inner_size(LogicalSize::new(1280.0, 720.0))
             .with_min_inner_size(LogicalSize::new(170.0, 170.0));
-        if let Some(icon) = load_window_icon() {
-            window_attributes = window_attributes.with_window_icon(Some(icon));
-        }
 
         let template = ConfigTemplateBuilder::new()
             .with_alpha_size(8)
@@ -498,7 +524,8 @@ impl App {
         let egui = egui_glow::EguiGlow::new(event_loop, gl.clone(), None, None, false);
         install_ui_font(&egui.egui_ctx);
 
-        // Open centred on the current monitor.
+        // Crisp multi-resolution title-bar + taskbar icon, then centre.
+        set_window_icons(&window);
         center_window(&window);
 
         Ok(Gfx {
@@ -520,7 +547,7 @@ impl App {
         }
     }
 
-    /// On the first successful 2-D load, size the window to the image (clamped to
+    /// On the first successful 2D load, size the window to the image (clamped to
     /// the monitor) unless the user has already resized it (§16 Commit 10).
     fn maybe_autosize(&mut self, width: u32, height: u32) {
         if self.user_resized || self.auto_resized_done {
@@ -552,10 +579,10 @@ impl App {
         self.load_start = Instant::now();
         self.pending_name = path.file_name().map(|s| s.to_string_lossy().into_owned());
 
-        // Preload hit: the neighbour is already decoded — adopt it immediately,
-        // skipping the loading state and the decode thread.
-        if let Some(data) = self.preload_cache.take_if(|d| d.path == path) {
-            log::info!("adopting preloaded {}", path.display());
+        // Cache hit (preloaded next, or a previously-viewed image): adopt it
+        // immediately, skipping the loading state and the decode thread.
+        if let Some(data) = self.cache_take(&path) {
+            log::info!("adopting cached {}", path.display());
             self.adopt_loaded(data);
             self.request_redraw();
             return;
@@ -617,7 +644,7 @@ impl App {
             data.height,
             data.channels,
             data.dtype_name,
-            if equirect { "[panorama]" } else { "[2-D]" },
+            if equirect { "[panorama]" } else { "[2D]" },
             data.path.display()
         );
         if let Some(gfx) = &mut self.gfx {
@@ -630,7 +657,7 @@ impl App {
         );
 
         // L lock: keep the current zoom/pan/exposure when the projection mode
-        // matches the previous image; a 2-D <-> panorama change resets to the
+        // matches the previous image; a 2D <-> panorama change resets to the
         // per-image default.
         let keep_view =
             self.locked && self.loaded_path.is_some() && self.camera.is_panorama() == equirect;
@@ -658,9 +685,9 @@ impl App {
         self.load_state = LoadState::Loaded;
         self.update_window_title();
         // Choose the OCIO view: panoramas restore the saved view for their
-        // extension; 2-D images always default to Standard.
+        // extension; 2D images always default to Standard.
         self.select_view_for_load(equirect, &data.path);
-        // Size the window to the first 2-D image (panoramas, locked views, and
+        // Size the window to the first 2D image (panoramas, locked views, and
         // subsequent images keep the current window).
         if !equirect && !self.locked {
             self.maybe_autosize(data.width, data.height);
@@ -674,12 +701,31 @@ impl App {
                 self.start_preload(next);
             }
         }
+
+        // Retain the decoded image so navigating back to it is instant.
+        self.cache_insert(data);
     }
 
-    /// Decode `path` in the background and stash it in `preload_cache`.
+    /// Take the cached decoded image for `path`, removing it from the cache.
+    fn cache_take(&mut self, path: &Path) -> Option<ImageData> {
+        self.image_cache
+            .iter()
+            .position(|d| d.path == path)
+            .map(|i| self.image_cache.remove(i))
+    }
+
+    /// Insert `data` at the front (most-recent), de-duplicating by path and
+    /// evicting the oldest beyond [`IMAGE_CACHE_CAP`].
+    fn cache_insert(&mut self, data: ImageData) {
+        self.image_cache.retain(|d| d.path != data.path);
+        self.image_cache.insert(0, data);
+        self.image_cache.truncate(IMAGE_CACHE_CAP);
+    }
+
+    /// Decode `path` in the background and stash it in the image cache.
     fn start_preload(&mut self, path: PathBuf) {
         // Skip if it is already cached or is the current image.
-        if self.preload_cache.as_ref().is_some_and(|d| d.path == path)
+        if self.image_cache.iter().any(|d| d.path == path)
             || self.loaded_path.as_deref() == Some(path.as_path())
         {
             return;
@@ -713,7 +759,7 @@ impl App {
             match msg.result {
                 Ok(data) => {
                     log::debug!("preloaded {}", data.path.display());
-                    self.preload_cache = Some(data);
+                    self.cache_insert(data);
                 }
                 Err(e) => log::debug!("preload failed: {e}"),
             }
@@ -733,7 +779,7 @@ impl App {
         self.load_path(target);
     }
 
-    /// Home: reset pan+zoom to the fit view (2-D) or default look (panorama).
+    /// Home: reset pan+zoom to the fit view (2D) or default look (panorama).
     /// Tone adjustments are intentionally left alone (Ctrl+R resets those).
     fn reset_view_full(&mut self) {
         if self.camera.is_panorama() {
@@ -809,7 +855,7 @@ impl App {
         self.show_toast(text);
     }
 
-    /// Current 2-D zoom as a percentage where 100% == 1 image px : 1 monitor px.
+    /// Current 2D zoom as a percentage where 100% == 1 image px : 1 monitor px.
     fn flat_zoom_percent(&self) -> Option<f32> {
         let img_h = self.file_info.height;
         if img_h == 0 {
@@ -823,17 +869,16 @@ impl App {
         }
     }
 
-    /// Numpad exact zoom: digit `d` → `100/d %` (plain) or `d*100 %` (Ctrl).
-    /// Exact 1:1 device pixels for 2-D; an FOV approximation for panoramas.
+    /// Numpad exact zoom. Each digit doubles the previous: plain `d` zooms in to
+    /// `2^(d-1) ×` (1=100%, 2=200%, 3=400%…); Ctrl zooms out to `1/2^(d-1)`
+    /// (Ctrl+2=50%, Ctrl+3=25%…). Exact 1:1 device pixels for 2D; an FOV
+    /// approximation for panoramas.
     fn set_exact_zoom(&mut self, digit: u32, ctrl: bool) {
         if digit == 0 {
             return;
         }
-        let pct = if ctrl {
-            100.0 * digit as f32
-        } else {
-            100.0 / digit as f32
-        };
+        let mult = 2f32.powi(digit as i32 - 1);
+        let pct = if ctrl { 100.0 / mult } else { 100.0 * mult };
         let (_, vh) = self.viewport();
         let img_h = self.file_info.height.max(1) as f32;
         let zoom = (pct / 100.0) * (img_h / vh);
@@ -953,10 +998,10 @@ impl App {
             return;
         }
 
-        if self.ctrl() {
-            // Ctrl + wheel: exposure (half-strength steps).
-            self.exposure += steps * 0.05;
-            self.show_exposure_toast();
+        // Shift = horizontal pan, Ctrl = vertical pan (both 2D and panorama).
+        let shift = self.modifiers.shift_key();
+        if shift || self.ctrl() {
+            self.wheel_pan(steps, shift);
             self.request_redraw();
             return;
         }
@@ -974,6 +1019,38 @@ impl App {
         }
         self.show_zoom_toast();
         self.request_redraw();
+    }
+
+    /// Wheel pan: `horizontal` pans left/right (yaw in panorama), otherwise
+    /// up/down (pitch). Scroll-up pans right / up.
+    fn wheel_pan(&mut self, steps: f32, horizontal: bool) {
+        let (vw, vh) = self.viewport();
+        match self.camera.camera {
+            Camera::Pano { .. } => {
+                let step = self.camera.camera.half_fov_radians() * 0.25 * steps;
+                if horizontal {
+                    self.camera.rotate(step, 0.0);
+                } else {
+                    self.camera.rotate(0.0, -step);
+                }
+            }
+            Camera::Flat { .. } => {
+                let inv_zoom = self.camera.camera.tan_half_fov();
+                let image_aspect = self
+                    .gfx
+                    .as_ref()
+                    .and_then(|g| g.renderer.image_aspect())
+                    .unwrap_or(1.0);
+                let sx = inv_zoom * (vw / vh) / image_aspect.max(1e-4);
+                let sy = inv_zoom;
+                let k = 0.15 * steps;
+                if horizontal {
+                    self.camera.pan(Vec2::new(k * sx, 0.0));
+                } else {
+                    self.camera.pan(Vec2::new(0.0, -k * sy));
+                }
+            }
+        }
     }
 
     fn on_key(&mut self, event_loop: &ActiveEventLoop, key: &Key, is_char: Option<&str>) {
@@ -1011,7 +1088,7 @@ impl App {
                     if self.camera.is_panorama() {
                         "panorama"
                     } else {
-                        "2-D"
+                        "2D"
                     }
                 );
             }
@@ -1020,7 +1097,7 @@ impl App {
                 if !self.wrap_2d {
                     self.normalize_pan_to_canonical();
                 }
-                log::info!("2-D wrap -> {}", self.wrap_2d);
+                log::info!("2D wrap -> {}", self.wrap_2d);
             }
             (_, Some("t")) | (_, Some("T")) => self.toggle_view_transform(),
             (_, Some("o")) | (_, Some("O")) => self.open_file_dialog(),
@@ -1244,7 +1321,7 @@ impl App {
                 if fi.panorama {
                     "Panorama".into()
                 } else {
-                    "2-D".into()
+                    "2D".into()
                 },
             ),
             ("View".into(), view),
@@ -1301,6 +1378,7 @@ impl App {
                     }
                     self.rebuild_ocio();
                     self.persist_view_if_panorama();
+                    self.show_toast(view.clone());
                 }
             }
             UiAction::DismissError => {
@@ -1321,7 +1399,7 @@ impl App {
         if let Some(path) = file {
             // A manual open ends any arrow-nav preload chain.
             self.preload_armed = false;
-            self.preload_cache = None;
+            self.image_cache.clear();
             self.load_path(path);
         }
     }
@@ -1526,7 +1604,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::DroppedFile(path) => {
                 // A manually-dropped file ends any arrow-nav preload chain.
                 self.preload_armed = false;
-                self.preload_cache = None;
+                self.image_cache.clear();
                 self.load_path(path);
             }
             WindowEvent::KeyboardInput { event, .. }
@@ -1686,13 +1764,60 @@ fn digit_from_physical(key: &PhysicalKey) -> Option<u32> {
     })
 }
 
-/// Load the bundled app icon as a winit window icon (title-bar / taskbar).
-fn load_window_icon() -> Option<winit::window::Icon> {
-    let path = resolve_resources_dir().join("icons").join("app_icon.png");
-    let img = image::open(&path).ok()?.into_rgba8();
-    let (w, h) = img.dimensions();
-    winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+/// Set the window's title-bar (small) and taskbar (big) icons from the bundled
+/// multi-resolution `app_icon.ico`, picking the exact native pixel sizes so they
+/// stay crisp instead of being scaled from a single bitmap (as winit would).
+#[cfg(windows)]
+fn set_window_icons(window: &Window) {
+    use std::os::windows::ffi::OsStrExt;
+
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, LoadImageW, SendMessageW, ICON_BIG, ICON_SMALL, IMAGE_ICON,
+        LR_LOADFROMFILE, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, WM_SETICON,
+    };
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = h.hwnd.get() as *mut core::ffi::c_void;
+
+    let ico = resolve_resources_dir().join("icons").join("app_icon.ico");
+    let wide: Vec<u16> = ico
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: `wide` is a valid NUL-terminated path; LoadImageW returns null on
+    // failure (guarded), and the resulting HICON is owned by the window.
+    unsafe {
+        let load = |cx: i32, cy: i32| {
+            LoadImageW(
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+                IMAGE_ICON,
+                cx,
+                cy,
+                LR_LOADFROMFILE,
+            )
+        };
+        let big = load(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+        if !big.is_null() {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, big as isize);
+        }
+        let small = load(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+        if !small.is_null() {
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, small as isize);
+        }
+    }
 }
+
+#[cfg(not(windows))]
+fn set_window_icons(_window: &Window) {}
 
 /// Locate the bundled `resources/` directory: next to the exe (packaged), the
 /// current working dir (dev), or the compile-time manifest dir (fallback).

@@ -100,6 +100,10 @@ const FILL_FRACTION: f32 = 0.9;
 /// Smallest window dimension (physical px); matches `with_min_inner_size`.
 const MIN_DIM: u32 = 170;
 
+/// Time constant (seconds) for easing the window geometry toward its follow
+/// target. Snappy so the window settles quickly (then the loop returns to Wait).
+const WINDOW_EASE_TAU: f32 = 0.045;
+
 /// Result of a background decode, tagged with its generation id.
 struct LoadResult {
     gen: u64,
@@ -237,6 +241,10 @@ pub struct App {
     should_exit: bool,
     /// The app icon as an egui texture, shown in the titlebar (loaded once).
     titlebar_icon: Option<egui::TextureHandle>,
+    /// Target outer (position, size) the window geometry eases toward, so a
+    /// window-follow resize animates smoothly instead of snapping. `None` =
+    /// settled.
+    window_anim_target: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
 
     // Folder navigation, look-ahead preload, and view lock.
     /// L lock: carry zoom/pan/exposure to the next image and skip auto-resize.
@@ -375,6 +383,7 @@ impl App {
             window_drag_motion: 0.0,
             should_exit: false,
             titlebar_icon: None,
+            window_anim_target: None,
         }
     }
 
@@ -735,40 +744,86 @@ impl App {
     /// so per-notch zooming doesn't thrash once the window is capped. Records the
     /// resize so the resulting `Resized` event isn't mistaken for a manual drag.
     fn resize_window_centered(&mut self, target: PhysicalSize<u32>) {
-        let mut did = false;
-        if let Some(gfx) = &self.gfx {
+        // Compute the target OUTER rect (centred on the current centre, clamped
+        // on-screen) and hand it to the geometry easing (`ease_window`) rather
+        // than snapping there immediately.
+        let computed = self.gfx.as_ref().and_then(|gfx| {
             let cur = gfx.window.inner_size();
             let close = (cur.width as i32 - target.width as i32).abs() <= 2
                 && (cur.height as i32 - target.height as i32).abs() <= 2;
-            if !close {
-                if let Ok(op) = gfx.window.outer_position() {
-                    let outer = gfx.window.outer_size();
-                    // Carry the decoration delta so the centre is computed in
-                    // outer-frame coordinates.
-                    let dx = outer.width.saturating_sub(cur.width);
-                    let dy = outer.height.saturating_sub(cur.height);
-                    let new_outer_w = target.width + dx;
-                    let new_outer_h = target.height + dy;
-                    let cx = op.x + outer.width as i32 / 2;
-                    let cy = op.y + outer.height as i32 / 2;
-                    let mut x = cx - new_outer_w as i32 / 2;
-                    let mut y = cy - new_outer_h as i32 / 2;
-                    if let Some(m) = gfx.window.current_monitor() {
-                        let (mp, ms) = (m.position(), m.size());
-                        x = x.clamp(mp.x, mp.x + (ms.width as i32 - new_outer_w as i32).max(0));
-                        y = y.clamp(mp.y, mp.y + (ms.height as i32 - new_outer_h as i32).max(0));
-                    }
-                    // Move and resize in a single OS call so the frame doesn't
-                    // visibly jump in two steps (set_outer_position then
-                    // request_inner_size would). `target` is the inner size we
-                    // want; SetWindowPos takes the outer rect.
-                    did = set_window_outer_rect(&gfx.window, x, y, new_outer_w, new_outer_h);
-                }
+            if close {
+                return None;
             }
+            let op = gfx.window.outer_position().ok()?;
+            let outer = gfx.window.outer_size();
+            // Carry the decoration delta so the centre is in outer-frame coords.
+            let dx = outer.width.saturating_sub(cur.width);
+            let dy = outer.height.saturating_sub(cur.height);
+            let new_outer_w = target.width + dx;
+            let new_outer_h = target.height + dy;
+            let cx = op.x + outer.width as i32 / 2;
+            let cy = op.y + outer.height as i32 / 2;
+            let mut x = cx - new_outer_w as i32 / 2;
+            let mut y = cy - new_outer_h as i32 / 2;
+            if let Some(m) = gfx.window.current_monitor() {
+                let (mp, ms) = (m.position(), m.size());
+                x = x.clamp(mp.x, mp.x + (ms.width as i32 - new_outer_w as i32).max(0));
+                y = y.clamp(mp.y, mp.y + (ms.height as i32 - new_outer_h as i32).max(0));
+            }
+            Some((
+                PhysicalPosition::new(x, y),
+                PhysicalSize::new(new_outer_w, new_outer_h),
+            ))
+        });
+        if computed.is_some() {
+            self.window_anim_target = computed;
+            self.request_redraw();
         }
-        if did {
-            // Cover both the move and resize events the OS will deliver.
-            self.suppress_manual_until = Some(Instant::now() + Duration::from_millis(250));
+    }
+
+    /// Ease the window's outer rect toward `window_anim_target` (set by the
+    /// window-follow), one step per frame, so the geometry change looks smooth
+    /// instead of snapping. Returns true while still moving. The per-frame OS
+    /// resize is bounded to this short animation, after which the loop returns to
+    /// `Wait`. Move + resize go through a single atomic `SetWindowPos`.
+    fn ease_window(&mut self, dt: f32) -> bool {
+        let Some((tpos, tsize)) = self.window_anim_target else {
+            return false;
+        };
+        let result = self.gfx.as_ref().and_then(|gfx| {
+            let cur_pos = gfx.window.outer_position().ok()?;
+            let cur = gfx.window.outer_size();
+            let k = 1.0 - (-dt / WINDOW_EASE_TAU).exp();
+            let li = |a: i32, b: i32| (a as f32 + (b - a) as f32 * k).round() as i32;
+            let lu = |a: u32, b: u32| {
+                ((a as f32 + (b as f32 - a as f32) * k).round() as i32).max(MIN_DIM as i32) as u32
+            };
+            let (nx, ny) = (li(cur_pos.x, tpos.x), li(cur_pos.y, tpos.y));
+            let (nw, nh) = (lu(cur.width, tsize.width), lu(cur.height, tsize.height));
+            let settled = (nx - tpos.x).abs() <= 1
+                && (ny - tpos.y).abs() <= 1
+                && (nw as i32 - tsize.width as i32).abs() <= 1
+                && (nh as i32 - tsize.height as i32).abs() <= 1;
+            let (x, y, w, h) = if settled {
+                (tpos.x, tpos.y, tsize.width, tsize.height)
+            } else {
+                (nx, ny, nw, nh)
+            };
+            set_window_outer_rect(&gfx.window, x, y, w, h);
+            Some(settled)
+        });
+        match result {
+            Some(settled) => {
+                self.suppress_manual_until = Some(Instant::now() + Duration::from_millis(120));
+                if settled {
+                    self.window_anim_target = None;
+                }
+                !settled
+            }
+            None => {
+                self.window_anim_target = None;
+                false
+            }
         }
     }
 
@@ -2159,9 +2214,12 @@ impl App {
         if tb_settled {
             self.titlebar_alpha = tb_target;
         }
-        // Keep scheduling frames while the camera or the titlebar is still
-        // moving; both settle, after which about_to_wait returns to Wait (idle).
-        self.animating = cam_moving || !tb_settled;
+        // Advance the window-geometry ease (the window-follow animates its size
+        // smoothly rather than snapping).
+        let win_moving = self.ease_window(dt);
+        // Keep scheduling frames while the camera, titlebar, or window geometry
+        // is still moving; all settle, after which about_to_wait returns to Wait.
+        self.animating = cam_moving || !tb_settled || win_moving;
         // Dev-only: force the settings dialog open for headless verification.
         #[cfg(debug_assertions)]
         if self.force_overlay.as_deref() == Some("settings") {
@@ -2316,10 +2374,14 @@ impl ApplicationHandler<UserEvent> for App {
                         gfx.gl_surface.resize(&gfx.gl_context, w, h);
                     }
                 }
-                // Redraw synchronously rather than via request_redraw so the new
-                // surface size is presented this frame — otherwise the previous
-                // frame is shown stretched to the new size until the next redraw.
-                if matches!(self.render(), RenderOutcome::Captured) {
+                // Redraw synchronously so the new surface size is presented this
+                // frame (otherwise the previous frame shows stretched). During a
+                // window-geometry ease the per-frame loop already redraws, so skip
+                // it here to avoid a resize storm (each render would post another
+                // resize).
+                if self.window_anim_target.is_none()
+                    && matches!(self.render(), RenderOutcome::Captured)
+                {
                     event_loop.exit();
                 }
                 // A resize we didn't initiate (outside the suppression window),

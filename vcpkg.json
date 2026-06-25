@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "builtin-baseline": "cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3",
   "dependencies": [
-    { "name": "opencolorio", "version>=": "2.3.2" },
-    { "name": "lcms" },
-    { "name": "openexr" }
+    "opencolorio",
+    "lcms",
+    "openexr"
   ]
 }

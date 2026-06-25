@@ -19,6 +19,8 @@ for Windows.
 | Input | Action |
 |---|---|
 | Left / middle mouse drag | Pan (2D) or look around (panorama) |
+| `Alt` + drag · titlebar drag · 2D-fit body drag | Move the (borderless) window |
+| Drag a window edge / corner | Resize |
 | Mouse wheel | Zoom (2D) or FOV (panorama) |
 | `Shift` + wheel | Pan horizontally |
 | `Ctrl` + wheel | Pan vertically |

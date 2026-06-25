@@ -50,7 +50,7 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::monitor::MonitorHandle;
-use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
+use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, ResizeDirection, Window, WindowId};
 
 use crate::camera::{Camera, CameraController};
 use crate::image_loader::{
@@ -220,6 +220,19 @@ pub struct App {
     pending_dblclick: bool,
     dblclick_motion: f32,
 
+    // Borderless window interaction.
+    /// True while the cursor is inside the window, driving the titlebar fade.
+    cursor_in_window: bool,
+    /// Eased 0..1 opacity of the auto-hiding titlebar.
+    titlebar_alpha: f32,
+    /// A left-press landed in a window-move zone (Alt anywhere, or a 2D-fit
+    /// body): it becomes an OS move on the first motion, or a click on release.
+    window_drag_armed: bool,
+    /// Pointer travel since `window_drag_armed`, to tell a click from a drag.
+    window_drag_motion: f32,
+    /// Set by the titlebar Close button; honoured in `about_to_wait`.
+    should_exit: bool,
+
     // Folder navigation, look-ahead preload, and view lock.
     /// L lock: carry zoom/pan/exposure to the next image and skip auto-resize.
     locked: bool,
@@ -350,6 +363,11 @@ impl App {
             upload_progress: 0.0,
             last_frame: None,
             animating: false,
+            cursor_in_window: false,
+            titlebar_alpha: 0.0,
+            window_drag_armed: false,
+            window_drag_motion: 0.0,
+            should_exit: false,
         }
     }
 
@@ -499,6 +517,10 @@ impl App {
         // (`set_window_icons`), backed by the icon embedded in the .exe.
         let mut window_attributes = Window::default_attributes()
             .with_title("imgvwr")
+            // Borderless: the image *is* the window. Move/resize/close are
+            // provided by the custom titlebar, body-drag, and edge hit-zones.
+            // (DWM drop-shadow / Aero-snap polish is a follow-up.)
+            .with_decorations(false)
             .with_min_inner_size(LogicalSize::new(MIN_DIM as f64, MIN_DIM as f64));
         // Probe the initial image's dimensions from its header (cheap, no decode)
         // so the window opens already framing it — eliminating the size/position
@@ -1459,6 +1481,63 @@ impl App {
         }
     }
 
+    /// True in 2D when the whole image is visible (zoom ≤ contain-fit), so it
+    /// doesn't overflow the viewport — a body left-drag then moves the window
+    /// rather than panning. Always false in panorama mode.
+    fn image_fits_viewport(&self) -> bool {
+        let Camera::Flat { zoom, .. } = self.camera.camera else {
+            return false;
+        };
+        let (vw, vh) = self.viewport();
+        let aspect = self
+            .gfx
+            .as_ref()
+            .and_then(|g| g.renderer.image_aspect())
+            .unwrap_or(1.0);
+        let fit = (vw / vh / aspect.max(1e-4)).min(1.0);
+        zoom <= fit * 1.001
+    }
+
+    /// The resize direction for the window edge/corner under the cursor, within a
+    /// DPI-scaled hit band; `None` in the interior or when maximized/fullscreen.
+    /// The top edge is intentionally excluded — the titlebar owns it (a proper
+    /// top/border resize comes with the DWM follow-up).
+    fn resize_edge_at_cursor(&self) -> Option<ResizeDirection> {
+        let gfx = self.gfx.as_ref()?;
+        if self.fullscreen || gfx.window.is_maximized() {
+            return None;
+        }
+        let band = 6.0 * gfx.window.scale_factor();
+        let size = gfx.window.inner_size();
+        let (w, h) = (size.width as f64, size.height as f64);
+        let (x, y) = (self.cursor_pos.x, self.cursor_pos.y);
+        if x < 0.0 || y < 0.0 || x > w || y > h {
+            return None;
+        }
+        let west = x <= band;
+        let east = x >= w - band;
+        let south = y >= h - band;
+        Some(match (south, west, east) {
+            (true, true, _) => ResizeDirection::SouthWest,
+            (true, _, true) => ResizeDirection::SouthEast,
+            (true, _, _) => ResizeDirection::South,
+            (_, true, _) => ResizeDirection::West,
+            (_, _, true) => ResizeDirection::East,
+            _ => return None,
+        })
+    }
+
+    /// Begin an OS resize drag if the cursor is on an edge/corner; returns
+    /// whether one started.
+    fn start_edge_resize(&mut self) -> bool {
+        let Some(dir) = self.resize_edge_at_cursor() else {
+            return false;
+        };
+        self.gfx
+            .as_ref()
+            .is_some_and(|g| g.window.drag_resize_window(dir).is_ok())
+    }
+
     fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
         // Don't begin a pan/look gesture when pressing inside the metadata box,
         // so its text stays selectable.
@@ -1472,10 +1551,17 @@ impl App {
                     .last_left_press
                     .is_some_and(|t| now.duration_since(t) < DOUBLE_CLICK);
                 self.last_left_press = Some(now);
-                // Always begin a drag so look-around/pan works; on a double-click
-                // also arm a deferred fullscreen toggle (resolved on release) so a
-                // double-click-and-drag is a drag, not a fullscreen flip.
-                self.start_drag();
+                // Move the window when Alt is held (anywhere) or, in 2D, when the
+                // whole image is visible (so a body-drag relocates the window like
+                // a titlebar); otherwise pan/look. The window move is deferred to
+                // the first motion (see `device_event`) so a stationary click can
+                // still toggle fullscreen on a double-click.
+                if !self.fullscreen && (self.modifiers.alt_key() || self.image_fits_viewport()) {
+                    self.window_drag_armed = true;
+                    self.window_drag_motion = 0.0;
+                } else {
+                    self.start_drag();
+                }
                 if double {
                     self.pending_dblclick = true;
                     self.dblclick_motion = 0.0;
@@ -1483,10 +1569,21 @@ impl App {
             }
             (ElementState::Pressed, MouseButton::Middle) => self.start_drag(),
             (ElementState::Released, MouseButton::Left) => {
-                self.end_drag();
+                let was_window_drag = self.window_drag_armed;
+                self.window_drag_armed = false;
+                if !was_window_drag {
+                    self.end_drag();
+                }
+                // A stationary click (window-move armed but never moved, or a
+                // pan/look that didn't travel) on a double-click toggles fullscreen.
                 if self.pending_dblclick {
                     self.pending_dblclick = false;
-                    if self.dblclick_motion < DBLCLICK_DRAG_TOL {
+                    let moved = if was_window_drag {
+                        self.window_drag_motion
+                    } else {
+                        self.dblclick_motion
+                    };
+                    if moved < DBLCLICK_DRAG_TOL {
                         self.toggle_fullscreen();
                         self.request_redraw();
                     }
@@ -1616,6 +1713,15 @@ impl App {
             toast: self.toast_render(),
             slot_labels: self.slot_labels(),
             active_slot: self.active_slot,
+            titlebar_alpha: if self.fullscreen {
+                0.0
+            } else if forced == Some("titlebar") {
+                1.0
+            } else {
+                self.titlebar_alpha
+            },
+            title: self.file_info.name.clone(),
+            is_maximized: self.gfx.as_ref().is_some_and(|g| g.window.is_maximized()),
         }
     }
 
@@ -1774,6 +1880,25 @@ impl App {
                     self.show_toast("Could not set default".to_string());
                 }
             },
+            // Borderless titlebar controls.
+            UiAction::DragWindow => {
+                if let Some(gfx) = &self.gfx {
+                    let _ = gfx.window.drag_window();
+                }
+            }
+            UiAction::Minimize => {
+                if let Some(gfx) = &self.gfx {
+                    gfx.window.set_minimized(true);
+                }
+            }
+            UiAction::ToggleMaximize => {
+                if let Some(gfx) = &self.gfx {
+                    let max = gfx.window.is_maximized();
+                    gfx.window.set_maximized(!max);
+                }
+            }
+            UiAction::ToggleFullscreen => self.toggle_fullscreen(),
+            UiAction::Close => self.should_exit = true,
         }
     }
 
@@ -1830,9 +1955,27 @@ impl App {
             .map(|prev| now.saturating_duration_since(prev).as_secs_f32())
             .unwrap_or(0.0)
             .min(0.1);
-        self.animating = self.camera.animate(dt);
+        let cam_moving = self.camera.animate(dt);
+        // Ease the titlebar opacity toward shown/hidden by cursor presence.
+        let tb_target = if self.cursor_in_window { 1.0 } else { 0.0 };
+        let tb_k = 1.0 - (-dt / 0.10).exp();
+        self.titlebar_alpha += (tb_target - self.titlebar_alpha) * tb_k;
+        let tb_settled = (self.titlebar_alpha - tb_target).abs() <= 0.01;
+        if tb_settled {
+            self.titlebar_alpha = tb_target;
+        }
+        // Keep scheduling frames while the camera or the titlebar is still
+        // moving; both settle, after which about_to_wait returns to Wait (idle).
+        self.animating = cam_moving || !tb_settled;
         self.tick_toolbar();
         self.tick_metadata();
+
+        // Resize cursor for the borderless edges (applied after egui paints, so
+        // it overrides egui's own cursor at the very border).
+        let resize_cursor = (!self.dragging && !self.window_drag_armed)
+            .then(|| self.resize_edge_at_cursor())
+            .flatten()
+            .map(resize_cursor_icon);
 
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();
@@ -1876,6 +2019,10 @@ impl App {
                 ui::build(ctx, &inputs, ui_state, &mut actions);
             });
             gfx.egui.paint(&gfx.window);
+            // Override egui's cursor with the resize cursor on the window edges.
+            if let Some(icon) = resize_cursor {
+                gfx.window.set_cursor(icon);
+            }
 
             if capture_ready {
                 let mut buf = vec![0u8; (w * h * 4) as usize];
@@ -2006,13 +2153,31 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = position;
+                self.cursor_in_window = true;
                 self.tick_toolbar();
                 self.tick_metadata();
                 self.request_redraw();
             }
-            // egui-consumed pointer/wheel/key events fall through to `_ => {}`.
-            WindowEvent::MouseInput { state, button, .. } if !egui_consumed => {
-                self.on_mouse_button(state, button)
+            WindowEvent::CursorEntered { .. } => {
+                self.cursor_in_window = true;
+                self.request_redraw();
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.cursor_in_window = false;
+                self.request_redraw();
+            }
+            // A press on a borderless edge/corner hit-zone starts the OS resize
+            // loop — checked before egui so it wins over the toolbar/titlebar that
+            // overlap the window border. Otherwise egui-consumed events fall
+            // through to `_ => {}`.
+            WindowEvent::MouseInput { state, button, .. } => {
+                let resized = state == ElementState::Pressed
+                    && button == MouseButton::Left
+                    && !self.fullscreen
+                    && self.start_edge_resize();
+                if !resized && !egui_consumed {
+                    self.on_mouse_button(state, button);
+                }
             }
             // Block wheel input when the toolbar is hovered (§11.3).
             WindowEvent::MouseWheel { delta, .. } if !egui_consumed => self.on_wheel(delta),
@@ -2057,11 +2222,26 @@ impl ApplicationHandler<UserEvent> for App {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.dragging {
                 self.on_drag_motion(delta.0 as f32, delta.1 as f32);
+            } else if self.window_drag_armed {
+                // Past the click threshold, hand off to the OS move loop (so
+                // Aero Snap works); a smaller travel stays a click.
+                self.window_drag_motion += (delta.0 * delta.0 + delta.1 * delta.1).sqrt() as f32;
+                if self.window_drag_motion >= DBLCLICK_DRAG_TOL {
+                    self.window_drag_armed = false;
+                    self.pending_dblclick = false;
+                    if let Some(gfx) = &self.gfx {
+                        let _ = gfx.window.drag_window();
+                    }
+                }
             }
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.should_exit {
+            event_loop.exit();
+            return;
+        }
         if self.capture_active() {
             // Drive continuous frames while a capture is pending.
             event_loop.set_control_flow(ControlFlow::Poll);
@@ -2391,6 +2571,16 @@ fn toprow_digit(key: &PhysicalKey) -> Option<u32> {
         KeyCode::Digit9 => 9,
         _ => return None,
     })
+}
+
+/// The cursor icon for a window-resize direction.
+fn resize_cursor_icon(dir: ResizeDirection) -> CursorIcon {
+    match dir {
+        ResizeDirection::East | ResizeDirection::West => CursorIcon::EwResize,
+        ResizeDirection::North | ResizeDirection::South => CursorIcon::NsResize,
+        ResizeDirection::NorthEast | ResizeDirection::SouthWest => CursorIcon::NeswResize,
+        ResizeDirection::NorthWest | ResizeDirection::SouthEast => CursorIcon::NwseResize,
+    }
 }
 
 /// Atomically move and resize the window to the given OUTER rect (physical px)

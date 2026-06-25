@@ -7,6 +7,10 @@ use super::{clickable, UiAction, UiInputs, UiState};
 /// Accent colour (active comparator slot flag, progress bar).
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(190, 111, 255);
 
+/// Height of the borderless custom titlebar; the top strip is reserved for it so
+/// the slot flags / metadata box never sit under the window controls.
+const TITLEBAR_H: f32 = 30.0;
+
 fn overlay_frame() -> egui::Frame {
     egui::Frame {
         // Near-opaque: anti-aliased text over a flat dark fill stays crisp,
@@ -49,6 +53,91 @@ pub fn build_overlays(
     if inputs.show_help {
         help_dialog(ctx, actions);
     }
+
+    // Auto-hiding borderless titlebar, drawn last so its controls sit on top.
+    titlebar(ctx, inputs, actions);
+}
+
+/// The auto-hiding borderless titlebar: a drag strip showing the filename, plus
+/// minimize / maximize / close controls. Opacity is `inputs.titlebar_alpha`
+/// (eased by the cursor entering/leaving the window). Dragging the strip moves
+/// the window (OS loop → Aero Snap); double-clicking it toggles fullscreen.
+fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
+    let a = inputs.titlebar_alpha.clamp(0.0, 1.0);
+    if a <= 0.01 {
+        return;
+    }
+    let alpha = |c: u8| (c as f32 * a) as u8;
+    let bg = egui::Color32::from_rgba_unmultiplied(18, 18, 18, alpha(238));
+    let fg = egui::Color32::from_rgba_unmultiplied(220, 220, 220, alpha(255));
+
+    egui::TopBottomPanel::top("imgvwr_titlebar")
+        .exact_height(TITLEBAR_H)
+        .frame(egui::Frame::NONE.fill(bg))
+        .show(ctx, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Window controls (laid out right-to-left): close, maximize, min.
+                if titlebar_button(ui, "×", a, true).clicked() {
+                    actions.push(UiAction::Close);
+                }
+                let max_glyph = if inputs.is_maximized { "❐" } else { "□" };
+                if titlebar_button(ui, max_glyph, a, false).clicked() {
+                    actions.push(UiAction::ToggleMaximize);
+                }
+                if titlebar_button(ui, "—", a, false).clicked() {
+                    actions.push(UiAction::Minimize);
+                }
+                // The remaining strip is the drag region (move / double-click
+                // fullscreen) and carries the filename.
+                let rect = ui.available_rect_before_wrap();
+                let drag = ui.interact(
+                    rect,
+                    ui.id().with("titlebar_drag"),
+                    egui::Sense::click_and_drag(),
+                );
+                if drag.drag_started() {
+                    actions.push(UiAction::DragWindow);
+                }
+                if drag.double_clicked() {
+                    actions.push(UiAction::ToggleFullscreen);
+                }
+                let name = if inputs.title.is_empty() {
+                    "imgvwr"
+                } else {
+                    inputs.title.as_str()
+                };
+                ui.painter().text(
+                    rect.left_center() + egui::vec2(10.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    name,
+                    egui::FontId::proportional(13.0),
+                    fg,
+                );
+            });
+        });
+}
+
+/// A single titlebar control glyph with a hover highlight (red for Close).
+fn titlebar_button(ui: &mut egui::Ui, glyph: &str, a: f32, danger: bool) -> egui::Response {
+    let size = egui::vec2(34.0, ui.available_height());
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    if resp.hovered() {
+        let hover = if danger {
+            egui::Color32::from_rgba_unmultiplied(232, 17, 35, (255.0 * a) as u8)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, (38.0 * a) as u8)
+        };
+        ui.painter().rect_filled(rect, 0.0, hover);
+    }
+    let fg = egui::Color32::from_rgba_unmultiplied(230, 230, 230, (255.0 * a) as u8);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(15.0),
+        fg,
+    );
+    super::clickable(resp)
 }
 
 /// Small numbered flags hanging from the top-right edge for saved comparator
@@ -59,8 +148,8 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction
         return;
     }
     egui::Area::new(egui::Id::new("imgvwr_slots"))
-        // Touch the top edge of the screen (y = 0).
-        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-10.0, 0.0))
+        // Hang from just below the reserved titlebar strip.
+        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-10.0, TITLEBAR_H))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
@@ -230,7 +319,10 @@ fn hint(ctx: &egui::Context) {
 fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs) -> bool {
     // Below the slot-flag row so the two never overlap.
     let resp = egui::Area::new(egui::Id::new("imgvwr_metadata"))
-        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::new(-10.0, 40.0))
+        .anchor(
+            egui::Align2::RIGHT_TOP,
+            egui::Vec2::new(-10.0, 40.0 + TITLEBAR_H),
+        )
         .show(ctx, |ui| {
             let frame = egui::Frame {
                 // Near-opaque so the selectable metadata text stays crisp over
@@ -318,6 +410,8 @@ fn toast(ctx: &egui::Context, text: &str, alpha: f32) {
 fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
     const KEYS: &[(&str, &str)] = &[
         ("Drag (L/M mouse)", "Pan (2D) / look around (pano)"),
+        ("Alt + drag", "Move window (also titlebar / 2D-fit body)"),
+        ("Window edges", "Drag to resize"),
         ("Mouse wheel", "Zoom (2D) / FOV (pano)"),
         ("Shift + wheel", "Pan horizontally"),
         ("Ctrl + wheel", "Pan vertically"),

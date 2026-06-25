@@ -51,6 +51,14 @@ pub struct UiInputs {
     pub slot_labels: [Option<String>; 9],
     /// The slot whose image is currently displayed (for flag highlighting).
     pub active_slot: Option<usize>,
+
+    // Borderless custom titlebar.
+    /// Eased 0..1 opacity of the auto-hiding titlebar (0 = fully hidden).
+    pub titlebar_alpha: f32,
+    /// Filename shown in the titlebar (empty when no image is loaded).
+    pub title: String,
+    /// Whether the window is maximized (drives the maximize/restore glyph).
+    pub is_maximized: bool,
 }
 
 impl UiInputs {
@@ -102,4 +110,11 @@ pub enum UiAction {
     RecallSlot(usize),
     /// Register imgvwr as the default app for supported file types.
     SetDefaultApp,
+    // Borderless titlebar controls.
+    /// Start an OS window move (titlebar drag).
+    DragWindow,
+    Minimize,
+    ToggleMaximize,
+    ToggleFullscreen,
+    Close,
 }

@@ -235,10 +235,12 @@ pub struct App {
     /// Active Alt+right-drag resize: the edge(s) being dragged. Resized manually
     /// (not via the OS loop, which is left-button only) so it ends on release.
     alt_resize: Option<ResizeDirection>,
-    /// Mouse motion accumulated since the last frame during an Alt-resize, so the
-    /// window is resized once per frame rather than once per (high-frequency) raw
-    /// motion event.
-    alt_resize_delta: (f32, f32),
+    /// Window outer rect `(x, y, w, h)` at the start of an Alt-resize.
+    alt_resize_origin: (i32, i32, u32, u32),
+    /// Cursor *screen* position at the start of an Alt-resize. The resize tracks
+    /// the cursor's screen movement (DPI/ballistics-accurate), not raw device
+    /// motion (which doesn't match the visible cursor 1:1).
+    alt_resize_press: (f64, f64),
     /// A left-press landed in a window-move zone (Alt anywhere, or a 2D-fit
     /// body): it becomes an OS move on the first motion, or a click on release.
     window_drag_armed: bool,
@@ -387,7 +389,8 @@ impl App {
             cursor_in_window: false,
             titlebar_alpha: 0.0,
             alt_resize: None,
-            alt_resize_delta: (0.0, 0.0),
+            alt_resize_origin: (0, 0, 0, 0),
+            alt_resize_press: (0.0, 0.0),
             window_drag_armed: false,
             window_drag_motion: 0.0,
             should_exit: false,
@@ -1810,22 +1813,36 @@ impl App {
         })
     }
 
-    /// Arm an Alt+right-drag resize from the cursor's third (applied manually in
-    /// `apply_alt_resize` as the mouse moves, ended on release). Returns whether
-    /// one was armed.
+    /// Arm an Alt+right-drag resize from the cursor's third (applied in
+    /// `update_alt_resize` as the mouse moves, ended on release). Captures the
+    /// origin window rect and cursor screen position. Returns whether armed.
     fn start_third_resize(&mut self) -> bool {
         let Some(dir) = self.resize_third_at_cursor() else {
             return false;
         };
+        let Some(gfx) = &self.gfx else {
+            return false;
+        };
+        let Ok(op) = gfx.window.outer_position() else {
+            return false;
+        };
+        let s = gfx.window.outer_size();
+        self.alt_resize_origin = (op.x, op.y, s.width, s.height);
+        self.alt_resize_press = (
+            op.x as f64 + self.cursor_pos.x,
+            op.y as f64 + self.cursor_pos.y,
+        );
         self.alt_resize = Some(dir);
         // Cut any in-flight zoom animation so it doesn't fight the manual resize.
         self.freeze_animations();
         true
     }
 
-    /// Apply one step of an Alt+right-drag resize: move the dragged edge(s) by the
-    /// raw motion delta, clamped to the minimum size, in a single atomic call.
-    fn apply_alt_resize(&mut self, dx: f32, dy: f32) {
+    /// Resize the window so the dragged edge(s) follow the cursor's *screen*
+    /// movement since the Alt-resize began. Tracking the cursor position (rather
+    /// than accumulating raw device motion) makes it 1:1 with the visible cursor
+    /// regardless of pointer speed / DPI. Called from `CursorMoved`.
+    fn update_alt_resize(&mut self) {
         let Some(dir) = self.alt_resize else {
             return;
         };
@@ -1833,47 +1850,60 @@ impl App {
             let Some(gfx) = &self.gfx else {
                 return;
             };
-            let Ok(pos) = gfx.window.outer_position() else {
+            let Ok(op) = gfx.window.outer_position() else {
                 return;
             };
-            let size = gfx.window.outer_size();
-            let (dx, dy) = (dx.round() as i32, dy.round() as i32);
+            // Cursor screen position now, vs. at the start of the resize.
+            let sx = op.x as f64 + self.cursor_pos.x;
+            let sy = op.y as f64 + self.cursor_pos.y;
+            let dx = (sx - self.alt_resize_press.0).round() as i32;
+            let dy = (sy - self.alt_resize_press.1).round() as i32;
+            let (ox, oy, ow, oh) = self.alt_resize_origin;
             use ResizeDirection::*;
             let west = matches!(dir, West | NorthWest | SouthWest);
             let east = matches!(dir, East | NorthEast | SouthEast);
             let north = matches!(dir, North | NorthWest | NorthEast);
             let south = matches!(dir, South | SouthWest | SouthEast);
-            let (mut x, mut y) = (pos.x, pos.y);
-            let (mut w, mut h) = (size.width as i32, size.height as i32);
+            // Move the dragged edges from the origin rect by the cursor delta.
+            let mut left = ox;
+            let mut top = oy;
+            let mut right = ox + ow as i32;
+            let mut bottom = oy + oh as i32;
             if east {
-                w += dx;
+                right = ox + ow as i32 + dx;
             }
             if west {
-                w -= dx;
-                x += dx;
+                left = ox + dx;
             }
             if south {
-                h += dy;
+                bottom = oy + oh as i32 + dy;
             }
             if north {
-                h -= dy;
-                y += dy;
+                top = oy + dy;
             }
             // Clamp to the minimum, keeping the opposite (fixed) edge in place.
             let min = MIN_DIM as i32;
-            if w < min {
+            if right - left < min {
                 if west {
-                    x -= min - w;
+                    left = right - min;
+                } else {
+                    right = left + min;
                 }
-                w = min;
             }
-            if h < min {
+            if bottom - top < min {
                 if north {
-                    y -= min - h;
+                    top = bottom - min;
+                } else {
+                    bottom = top + min;
                 }
-                h = min;
             }
-            set_window_outer_rect(&gfx.window, x, y, w as u32, h as u32)
+            set_window_outer_rect(
+                &gfx.window,
+                left,
+                top,
+                (right - left) as u32,
+                (bottom - top) as u32,
+            )
         };
         if applied {
             // A deliberate manual resize: keep this size until the next zoom.
@@ -2363,15 +2393,6 @@ impl App {
         } else {
             self.window_anim_target.is_some()
         };
-        // Apply an Alt-resize once per (timed) frame from the accumulated motion,
-        // rather than once per raw motion event (which would be vsync-throttled
-        // into slow motion).
-        if advance_window && self.alt_resize.is_some() {
-            let (dx, dy) = std::mem::take(&mut self.alt_resize_delta);
-            if dx != 0.0 || dy != 0.0 {
-                self.apply_alt_resize(dx, dy);
-            }
-        }
         // Keep scheduling frames while the camera, titlebar, or window geometry
         // is still moving; all settle, after which about_to_wait returns to Wait.
         self.animating = cam_moving || !tb_settled || win_moving;
@@ -2563,6 +2584,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = position;
                 self.cursor_in_window = true;
+                if self.alt_resize.is_some() {
+                    self.update_alt_resize();
+                }
                 self.tick_toolbar();
                 self.tick_metadata();
                 self.request_redraw();
@@ -2584,7 +2608,6 @@ impl ApplicationHandler<UserEvent> for App {
                 // End an in-progress Alt+right-drag resize on any release.
                 if state == ElementState::Released && self.alt_resize.is_some() {
                     self.alt_resize = None;
-                    self.alt_resize_delta = (0.0, 0.0);
                 } else {
                     let resized = state == ElementState::Pressed
                         && !self.fullscreen
@@ -2641,12 +2664,9 @@ impl ApplicationHandler<UserEvent> for App {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta } = event {
-            if self.alt_resize.is_some() {
-                // Accumulate; applied once per frame in `render`.
-                self.alt_resize_delta.0 += delta.0 as f32;
-                self.alt_resize_delta.1 += delta.1 as f32;
-                self.request_redraw();
-            } else if self.dragging {
+            // (Alt-resize is driven by CursorMoved, which tracks the visible
+            // cursor 1:1 — not raw device motion.)
+            if self.dragging {
                 self.on_drag_motion(delta.0 as f32, delta.1 as f32);
             } else if self.window_drag_armed {
                 // Past the click threshold, hand off to the OS move loop (so

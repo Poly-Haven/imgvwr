@@ -1493,6 +1493,28 @@ impl App {
         }
     }
 
+    /// True when the window is too small to comfortably overlay the metadata box
+    /// (so its hover auto-reveal is suppressed).
+    fn window_is_small(&self) -> bool {
+        let (vw, vh) = self.viewport();
+        vw < 480.0 || vh < 360.0
+    }
+
+    /// The titlebar reveals only while the cursor is within the window and near
+    /// its top edge (so it doesn't cover the image while looking around lower
+    /// down). Hidden in fullscreen.
+    fn titlebar_should_show(&self) -> bool {
+        if self.fullscreen || !self.cursor_in_window {
+            return false;
+        }
+        let scale = self
+            .gfx
+            .as_ref()
+            .map(|g| g.window.scale_factor())
+            .unwrap_or(1.0);
+        self.cursor_pos.y <= 56.0 * scale
+    }
+
     /// True in 2D when the whole image is visible (zoom ≤ contain-fit), so it
     /// doesn't overflow the viewport — a body left-drag then moves the window
     /// rather than panning. Always false in panorama mode.
@@ -1719,8 +1741,10 @@ impl App {
             loading_name: self.pending_name.clone(),
             error,
             show_hint,
+            // F2 always shows it; the top-right hover auto-reveal is suppressed
+            // on a small window (it would cover too much of the image).
             show_metadata: self.show_metadata
-                || self.metadata_hover
+                || (self.metadata_hover && !self.window_is_small())
                 || self.ui_state.pointer_over_metadata
                 || forced == Some("metadata"),
             metadata: self.metadata_lines(),
@@ -1989,8 +2013,13 @@ impl App {
             .unwrap_or(0.0)
             .min(0.1);
         let cam_moving = self.camera.animate(dt);
-        // Ease the titlebar opacity toward shown/hidden by cursor presence.
-        let tb_target = if self.cursor_in_window { 1.0 } else { 0.0 };
+        // Ease the titlebar opacity toward shown only while the cursor is near
+        // the top edge of the window.
+        let tb_target = if self.titlebar_should_show() {
+            1.0
+        } else {
+            0.0
+        };
         let tb_k = 1.0 - (-dt / 0.10).exp();
         self.titlebar_alpha += (tb_target - self.titlebar_alpha) * tb_k;
         let tb_settled = (self.titlebar_alpha - tb_target).abs() <= 0.01;

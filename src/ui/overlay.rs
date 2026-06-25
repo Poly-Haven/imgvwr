@@ -74,14 +74,16 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
         .show(ctx, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Window controls (laid out right-to-left): close, maximize, min.
-                if titlebar_button(ui, "×", a, true).clicked() {
+                // The "×" glyph is smaller than the box/dash, so size it up to
+                // keep the three controls visually consistent.
+                if titlebar_button(ui, "×", 21.0, a, true).clicked() {
                     actions.push(UiAction::Close);
                 }
                 let max_glyph = if inputs.is_maximized { "❐" } else { "□" };
-                if titlebar_button(ui, max_glyph, a, false).clicked() {
+                if titlebar_button(ui, max_glyph, 15.0, a, false).clicked() {
                     actions.push(UiAction::ToggleMaximize);
                 }
-                if titlebar_button(ui, "—", a, false).clicked() {
+                if titlebar_button(ui, "—", 15.0, a, false).clicked() {
                     actions.push(UiAction::Minimize);
                 }
                 // The remaining strip is the drag region (move / double-click
@@ -114,10 +116,17 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
         });
 }
 
-/// A single titlebar control glyph with a hover highlight (red for Close).
-fn titlebar_button(ui: &mut egui::Ui, glyph: &str, a: f32, danger: bool) -> egui::Response {
-    let size = egui::vec2(34.0, ui.available_height());
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+/// A single titlebar control glyph (`size` px) with a hover highlight (red for
+/// Close).
+fn titlebar_button(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    size: f32,
+    a: f32,
+    danger: bool,
+) -> egui::Response {
+    let btn = egui::vec2(34.0, ui.available_height());
+    let (rect, resp) = ui.allocate_exact_size(btn, egui::Sense::click());
     if resp.hovered() {
         let hover = if danger {
             egui::Color32::from_rgba_unmultiplied(232, 17, 35, (255.0 * a) as u8)
@@ -131,7 +140,7 @@ fn titlebar_button(ui: &mut egui::Ui, glyph: &str, a: f32, danger: bool) -> egui
         rect.center(),
         egui::Align2::CENTER_CENTER,
         glyph,
-        egui::FontId::proportional(15.0),
+        egui::FontId::proportional(size),
         fg,
     );
     super::clickable(resp)

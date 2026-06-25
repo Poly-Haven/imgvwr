@@ -73,6 +73,8 @@ pub struct UiInputs {
     pub startup_display: Option<String>,
     /// Window corner radius in pixels (0 = square), for the settings spinner.
     pub corner_radius: u32,
+    /// Background colour (sRGB 0–255) behind transparent images.
+    pub background_color: [u8; 3],
     /// Whether the window is maximized (drives the maximize/restore glyph).
     pub is_maximized: bool,
     /// Resize cursor for a borderless edge under the pointer (set via egui so it
@@ -137,6 +139,8 @@ pub enum UiAction {
     SetStartupDisplay(Option<String>),
     /// Set the window corner radius (pixels) and re-apply it live.
     SetCornerRadius(u32),
+    /// Set the background colour (sRGB 0–255) behind transparent images.
+    SetBackgroundColor([u8; 3]),
     // Borderless titlebar controls.
     /// Start an OS window move (titlebar drag).
     DragWindow,

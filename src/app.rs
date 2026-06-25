@@ -2202,6 +2202,7 @@ impl App {
             monitors: self.monitor_list(),
             startup_display: self.prefs.startup_monitor.clone(),
             corner_radius: self.prefs.corner_radius,
+            background_color: self.prefs.background_color,
             is_maximized: self.gfx.as_ref().is_some_and(|g| g.window.is_maximized()),
             resize_cursor: if self.dragging || self.window_drag_armed {
                 None
@@ -2406,6 +2407,11 @@ impl App {
                     apply_window_corners(&gfx.window, if rounded { radius } else { 0 });
                 }
             }
+            UiAction::SetBackgroundColor(color) => {
+                self.prefs.background_color = color;
+                self.prefs.save();
+                self.request_redraw();
+            }
             // Borderless titlebar controls.
             UiAction::DragWindow => {
                 self.freeze_animations();
@@ -2531,6 +2537,7 @@ impl App {
             tan_half_fov: cam.tan_half_fov(),
             wrap_2d: self.wrap_2d,
             nearest: self.nearest_filter,
+            background: srgb_u8_to_f32(self.prefs.background_color),
         };
         let capture_ready = self.capture_ready();
 
@@ -3103,6 +3110,18 @@ fn fmt_ev(ev: f32) -> String {
     } else {
         format!("{:+.2} EV", ev)
     }
+}
+
+/// Normalise an sRGB 0–255 colour to the 0–1 floats written as the framebuffer
+/// clear colour. The default framebuffer isn't sRGB, and the image shader writes
+/// display-encoded output, so the picked sRGB value is used directly (no
+/// linearisation) and appears as chosen.
+fn srgb_u8_to_f32(c: [u8; 3]) -> [f32; 3] {
+    [
+        c[0] as f32 / 255.0,
+        c[1] as f32 / 255.0,
+        c[2] as f32 / 255.0,
+    ]
 }
 
 /// Map a numpad key to a zoom digit 1..=9, else `None`.

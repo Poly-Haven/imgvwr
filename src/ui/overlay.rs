@@ -130,6 +130,16 @@ fn settings_dialog(
                 });
                 ui.add_space(14.0);
 
+                // Background colour (behind transparent images).
+                ui.horizontal(|ui| {
+                    ui.label("Background colour:");
+                    let mut col = inputs.background_color;
+                    if ui.color_edit_button_srgb(&mut col).changed() {
+                        actions.push(UiAction::SetBackgroundColor(col));
+                    }
+                });
+                ui.add_space(14.0);
+
                 // Set as default viewer, with a confirmation step.
                 if state.confirm_default {
                     ui.label("Make imgvwr the default viewer for all supported image types?");

@@ -43,10 +43,17 @@ pub struct AppPreferences {
     /// Window corner radius in physical pixels (0 = square corners).
     #[serde(default = "default_corner_radius")]
     pub corner_radius: u32,
+    /// Background colour (sRGB 0–255) shown behind transparent images.
+    #[serde(default = "default_background_color")]
+    pub background_color: [u8; 3],
 }
 
 fn default_corner_radius() -> u32 {
     4
+}
+
+fn default_background_color() -> [u8; 3] {
+    [5, 5, 5]
 }
 
 impl Default for AppPreferences {
@@ -57,6 +64,7 @@ impl Default for AppPreferences {
             window: None,
             startup_monitor: None,
             corner_radius: default_corner_radius(),
+            background_color: default_background_color(),
         }
     }
 }

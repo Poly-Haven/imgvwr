@@ -42,6 +42,8 @@ pub struct RenderParams {
     pub wrap_2d: bool,
     /// Nearest-neighbour texture filtering instead of the default bilinear.
     pub nearest: bool,
+    /// Background colour (sRGB 0–1) cleared behind the alpha-blended image.
+    pub background: [f32; 3],
 }
 
 impl Default for RenderParams {
@@ -58,6 +60,7 @@ impl Default for RenderParams {
             tan_half_fov: half_fov.tan(),
             wrap_2d: false,
             nearest: false,
+            background: [0.02, 0.02, 0.02],
         }
     }
 }
@@ -330,9 +333,10 @@ impl Renderer {
     pub fn render(&self, params: &RenderParams) {
         let gl = &self.gl;
         let (w, h) = params.viewport;
+        let bg = params.background;
         unsafe {
             gl.viewport(0, 0, w.max(1), h.max(1));
-            gl.clear_color(0.02, 0.02, 0.02, 1.0);
+            gl.clear_color(bg[0], bg[1], bg[2], 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
         }
 

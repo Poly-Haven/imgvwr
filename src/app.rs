@@ -102,7 +102,7 @@ const MIN_DIM: u32 = 170;
 
 /// Time constant (seconds) for easing the window geometry toward its follow
 /// target. Snappy so the window settles quickly (then the loop returns to Wait).
-const WINDOW_EASE_TAU: f32 = 0.045;
+const WINDOW_EASE_TAU: f32 = 0.0225;
 
 /// Result of a background decode, tagged with its generation id.
 struct LoadResult {
@@ -235,6 +235,10 @@ pub struct App {
     /// Active Alt+right-drag resize: the edge(s) being dragged. Resized manually
     /// (not via the OS loop, which is left-button only) so it ends on release.
     alt_resize: Option<ResizeDirection>,
+    /// Mouse motion accumulated since the last frame during an Alt-resize, so the
+    /// window is resized once per frame rather than once per (high-frequency) raw
+    /// motion event.
+    alt_resize_delta: (f32, f32),
     /// A left-press landed in a window-move zone (Alt anywhere, or a 2D-fit
     /// body): it becomes an OS move on the first motion, or a click on release.
     window_drag_armed: bool,
@@ -383,6 +387,7 @@ impl App {
             cursor_in_window: false,
             titlebar_alpha: 0.0,
             alt_resize: None,
+            alt_resize_delta: (0.0, 0.0),
             window_drag_armed: false,
             window_drag_motion: 0.0,
             should_exit: false,
@@ -791,6 +796,10 @@ impl App {
     /// resize is bounded to this short animation, after which the loop returns to
     /// `Wait`. Move + resize go through a single atomic `SetWindowPos`.
     fn ease_window(&mut self, dt: f32) -> bool {
+        if self.fullscreen {
+            self.window_anim_target = None;
+            return false;
+        }
         let Some((tpos, tsize)) = self.window_anim_target else {
             return false;
         };
@@ -1182,12 +1191,13 @@ impl App {
             self.camera.snap_look(0.0, 0.0);
             self.camera.set_fov(crate::camera::DEFAULT_PANO_FOV_DEG);
         } else {
-            // Re-frame the window to the image's default (framed) size and fit
-            // the image in it: the window hugs the image, so the fit zoom is 1.0.
+            // Fit the image: the window hugs it, so the fit zoom is 1.0.
             self.camera.set_zoom(1.0);
             self.camera.set_pan_target(Vec2::ZERO);
-            self.resize_window_to_image(self.file_info.width, self.file_info.height);
         }
+        // Re-frame the window to the image's default (framed) size for both 2D
+        // and panorama (panoramas frame to their 2:1 aspect, capped to 90%).
+        self.resize_window_to_image(self.file_info.width, self.file_info.height);
         self.request_redraw();
     }
 
@@ -1314,6 +1324,8 @@ impl App {
 
     fn start_drag(&mut self) {
         self.dragging = true;
+        // Cut any in-flight zoom/pan animation short so the drag takes over now.
+        self.freeze_animations();
         self.drag_start_cursor = self.cursor_pos;
         if let Some(gfx) = &self.gfx {
             // Confine (fallback to lock) so look-around/pan is unbounded; hide
@@ -1598,11 +1610,22 @@ impl App {
     }
 
     fn set_fullscreen(&mut self, on: bool) {
+        // Cancel any in-flight window-geometry ease first — it would keep
+        // SetWindowPos-ing the window and fight the fullscreen transition.
+        self.window_anim_target = None;
         self.fullscreen = on;
         if let Some(gfx) = &self.gfx {
             gfx.window
                 .set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
         }
+    }
+
+    /// Cut any in-flight zoom/pan/window animation short at its current value so
+    /// a new drag (move / pan / resize) takes over immediately, rather than the
+    /// animation fighting it or having to finish first.
+    fn freeze_animations(&mut self) {
+        self.camera.settle();
+        self.window_anim_target = None;
     }
 
     /// Available monitors as `(winit name, friendly label)` for the settings
@@ -1707,9 +1730,14 @@ impl App {
         let Some(dir) = self.resize_edge_at_cursor() else {
             return false;
         };
-        self.gfx
+        let started = self
+            .gfx
             .as_ref()
-            .is_some_and(|g| g.window.drag_resize_window(dir).is_ok())
+            .is_some_and(|g| g.window.drag_resize_window(dir).is_ok());
+        if started {
+            self.freeze_animations();
+        }
+        started
     }
 
     /// Resize direction from which third of the window the cursor is in (for the
@@ -1748,9 +1776,8 @@ impl App {
             return false;
         };
         self.alt_resize = Some(dir);
-        // Cancel any in-flight zoom window animation so it doesn't fight the
-        // manual resize.
-        self.window_anim_target = None;
+        // Cut any in-flight zoom animation so it doesn't fight the manual resize.
+        self.freeze_animations();
         true
     }
 
@@ -2195,6 +2222,7 @@ impl App {
             }
             // Borderless titlebar controls.
             UiAction::DragWindow => {
+                self.freeze_animations();
                 if let Some(gfx) = &self.gfx {
                     let _ = gfx.window.drag_window();
                 }
@@ -2291,6 +2319,15 @@ impl App {
         } else {
             self.window_anim_target.is_some()
         };
+        // Apply an Alt-resize once per (timed) frame from the accumulated motion,
+        // rather than once per raw motion event (which would be vsync-throttled
+        // into slow motion).
+        if advance_window && self.alt_resize.is_some() {
+            let (dx, dy) = std::mem::take(&mut self.alt_resize_delta);
+            if dx != 0.0 || dy != 0.0 {
+                self.apply_alt_resize(dx, dy);
+            }
+        }
         // Keep scheduling frames while the camera, titlebar, or window geometry
         // is still moving; all settle, after which about_to_wait returns to Wait.
         self.animating = cam_moving || !tb_settled || win_moving;
@@ -2452,8 +2489,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // frame (otherwise the previous frame shows stretched). Pass
                 // advance_window = false so a redraw caused by the geometry ease's
                 // own resize doesn't post another resize (avoids a resize storm),
-                // while still tracking the content to the new size.
-                if matches!(self.render(false), RenderOutcome::Captured) {
+                // while still tracking the content to the new size. During an
+                // Alt-resize, skip the synchronous (vsync-blocked) redraw — its
+                // per-frame resize would otherwise crawl in slow motion; the
+                // timed loop redraws instead.
+                if self.alt_resize.is_some() {
+                    self.request_redraw();
+                } else if matches!(self.render(false), RenderOutcome::Captured) {
                     event_loop.exit();
                 }
                 // A resize we didn't initiate (outside the suppression window),
@@ -2498,6 +2540,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // End an in-progress Alt+right-drag resize on any release.
                 if state == ElementState::Released && self.alt_resize.is_some() {
                     self.alt_resize = None;
+                    self.alt_resize_delta = (0.0, 0.0);
                 } else {
                     let resized = state == ElementState::Pressed
                         && !self.fullscreen
@@ -2555,7 +2598,10 @@ impl ApplicationHandler<UserEvent> for App {
     ) {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.alt_resize.is_some() {
-                self.apply_alt_resize(delta.0 as f32, delta.1 as f32);
+                // Accumulate; applied once per frame in `render`.
+                self.alt_resize_delta.0 += delta.0 as f32;
+                self.alt_resize_delta.1 += delta.1 as f32;
+                self.request_redraw();
             } else if self.dragging {
                 self.on_drag_motion(delta.0 as f32, delta.1 as f32);
             } else if self.window_drag_armed {
@@ -2565,6 +2611,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.window_drag_motion >= DBLCLICK_DRAG_TOL {
                     self.window_drag_armed = false;
                     self.pending_dblclick = false;
+                    // Cut any in-flight animation so it doesn't fight the move.
+                    self.freeze_animations();
                     if let Some(gfx) = &self.gfx {
                         let _ = gfx.window.drag_window();
                     }

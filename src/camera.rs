@@ -22,7 +22,7 @@ pub const DEFAULT_PANO_FOV_DEG: f32 = 100.0;
 
 /// Time constant (seconds) for the exponential easing of zoom/FOV/pan toward
 /// their target. Smaller = snappier. Frame-rate independent (see `animate`).
-const EASE_TAU: f32 = 0.07;
+const EASE_TAU: f32 = 0.035;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Camera {

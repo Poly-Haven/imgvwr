@@ -49,6 +49,9 @@ pub struct AppPreferences {
     /// Auto-pick a starting exposure for HDR panoramas on load.
     #[serde(default = "default_true")]
     pub auto_exposure: bool,
+    /// Colour (sRGB 0–255) of guide lines.
+    #[serde(default = "default_guide_color")]
+    pub guide_color: [u8; 3],
 }
 
 fn default_corner_radius() -> u32 {
@@ -57,6 +60,10 @@ fn default_corner_radius() -> u32 {
 
 fn default_background_color() -> [u8; 3] {
     [5, 5, 5]
+}
+
+fn default_guide_color() -> [u8; 3] {
+    [255, 80, 80]
 }
 
 fn default_true() -> bool {
@@ -73,6 +80,7 @@ impl Default for AppPreferences {
             corner_radius: default_corner_radius(),
             background_color: default_background_color(),
             auto_exposure: true,
+            guide_color: default_guide_color(),
         }
     }
 }

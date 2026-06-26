@@ -22,6 +22,7 @@ uniform sampler2D u_diff_image;      // the comparator slot's image (for u_diff)
 // Guide lines, each .x = image coordinate (0..1), .y = 0 vertical / 1 horizontal.
 uniform int   u_guide_count;
 uniform vec2  u_guides[64];
+uniform vec3  u_guide_color;         // display-encoded sRGB 0–1
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -158,14 +159,21 @@ void main() {
     color = pow(max(color, vec3(0.0)), vec3(1.0 / max(u_gamma, 1e-6)));
 
     // 5. Guide lines, drawn last so they sit on top of every mode. The line
-    //    sticks to the image (compared in image-uv space) but is a constant 1px
+    //    sticks to the image (compared in image-uv space) but is a constant ~1px
     //    in screen space (distance normalised by the per-pixel uv derivative),
-    //    with a 50% black shadow on either side. Works for 2D and panorama alike.
+    //    with a soft dark halo on either side. Works for 2D and panorama alike.
+    //    Anti-aliased via smoothstep on the pixel distance: the nearest pixel to
+    //    the line (always within 0.5px) is fully coloured, so the line can never
+    //    drop out at an unlucky sub-pixel alignment (the old hard `d < 0.5` test
+    //    sometimes left only the halo, making the line look faint/invisible).
     for (int i = 0; i < u_guide_count; i++) {
         float coord = (u_guides[i].y < 0.5) ? uv.x : uv.y;
         float d = abs(coord - u_guides[i].x) / max(fwidth(coord), 1e-9);
-        if (d < 1.5) { color = mix(color, vec3(0.0), 0.5); out_alpha = 1.0; }
-        if (d < 0.5) { color = vec3(0.0, 1.0, 1.0); }
+        float halo = (1.0 - smoothstep(1.0, 2.2, d)) * 0.5; // dark, just outside
+        float line = 1.0 - smoothstep(0.5, 1.2, d);         // full within 0.5px
+        if (halo > 0.0 || line > 0.0) out_alpha = 1.0;
+        color = mix(color, vec3(0.0), halo);
+        color = mix(color, u_guide_color, line);
     }
     frag_color = vec4(color, out_alpha);
 }

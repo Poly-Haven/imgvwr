@@ -2567,6 +2567,7 @@ impl App {
             startup_display: self.prefs.startup_monitor.clone(),
             corner_radius: self.prefs.corner_radius,
             auto_exposure: self.prefs.auto_exposure,
+            guide_color: self.prefs.guide_color,
             background_color: self.prefs.background_color,
             is_maximized: self.gfx.as_ref().is_some_and(|g| g.window.is_maximized()),
             resize_cursor: if self.dragging || self.window_drag_armed {
@@ -2851,6 +2852,11 @@ impl App {
                     .to_string(),
                 );
             }
+            UiAction::SetGuideColor(c) => {
+                self.prefs.guide_color = c;
+                self.prefs.save();
+                self.request_redraw();
+            }
             UiAction::OpenSettings => {
                 self.ui_state.show_settings = true;
                 self.ui_state.confirm_default = false;
@@ -2988,6 +2994,7 @@ impl App {
             diff: self.diff_slot.is_some(),
             guides: guide_arr,
             guide_count: guide_n as i32,
+            guide_color: srgb_u8_to_f32(self.prefs.guide_color),
             clarity_amount: self.clarity_amount,
             clarity_radius: self.clarity_radius,
         };

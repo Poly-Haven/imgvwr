@@ -65,6 +65,9 @@ pub struct RenderParams {
     /// Capped at [`MAX_GUIDES`] (a full 1/32 grid on both axes = 62 lines).
     pub guides: [[f32; 2]; MAX_GUIDES],
     pub guide_count: i32,
+    /// Guide-line colour (display-encoded sRGB 0–1), drawn after the view
+    /// transform straight into the framebuffer.
+    pub guide_color: [f32; 3],
     /// Clarity (local-contrast) strength; 0 bypasses the whole post chain.
     pub clarity_amount: f32,
     /// Clarity unsharp-mask blur radius, in viewport pixels.
@@ -92,6 +95,7 @@ impl Default for RenderParams {
             diff: false,
             guides: [[0.0; 2]; MAX_GUIDES],
             guide_count: 0,
+            guide_color: [1.0, 0.314, 0.314],
             clarity_amount: 0.0,
             clarity_radius: 64.0,
         }
@@ -117,6 +121,7 @@ struct Uniforms {
     diff_image: Option<glow::UniformLocation>,
     guide_count: Option<glow::UniformLocation>,
     guides: Option<glow::UniformLocation>,
+    guide_color: Option<glow::UniformLocation>,
     // Single-texture sampler.
     image: Option<glow::UniformLocation>,
     // Tiled-texture sampler + grid.
@@ -151,6 +156,7 @@ impl Uniforms {
             diff_image: u("u_diff_image"),
             guide_count: u("u_guide_count"),
             guides: u("u_guides"),
+            guide_color: u("u_guide_color"),
             image: u("u_image"),
             tiles: u("u_tiles"),
             tile_cols: u("u_tile_cols"),
@@ -476,6 +482,8 @@ impl Renderer {
             }
             let n = params.guide_count.clamp(0, MAX_GUIDES as i32) as usize;
             gl.uniform_1_i32(u.guide_count.as_ref(), n as i32);
+            let gc = params.guide_color;
+            gl.uniform_3_f32(u.guide_color.as_ref(), gc[0], gc[1], gc[2]);
             if n > 0 {
                 gl.uniform_2_f32_slice(
                     u.guides.as_ref(),

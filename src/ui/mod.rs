@@ -92,6 +92,8 @@ pub struct UiInputs {
     pub background_color: [u8; 3],
     /// Whether HDR panoramas get an auto-exposure pick on load.
     pub auto_exposure: bool,
+    /// Guide-line colour (sRGB 0–255), for the settings picker.
+    pub guide_color: [u8; 3],
     /// Whether the window is maximized (drives the maximize/restore glyph).
     pub is_maximized: bool,
     /// Resize cursor for a borderless edge under the pointer (set via egui so it
@@ -174,6 +176,8 @@ pub enum UiAction {
     SetBackgroundColor([u8; 3]),
     /// Toggle the HDR-panorama auto-exposure-on-load setting.
     SetAutoExposure(bool),
+    /// Set the guide-line colour (sRGB 0–255).
+    SetGuideColor([u8; 3]),
     /// Isolate a single channel as greyscale (`None` = show all channels).
     SetChannelIsolate(Option<u8>),
     /// Set the exposure target (EV) from the bottom-panel slider / buttons.

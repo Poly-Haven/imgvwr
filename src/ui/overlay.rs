@@ -475,6 +475,16 @@ fn settings_dialog(
                 });
                 ui.add_space(14.0);
 
+                // Guide-line colour.
+                ui.horizontal(|ui| {
+                    ui.label("Guide colour:");
+                    let mut col = inputs.guide_color;
+                    if ui.color_edit_button_srgb(&mut col).changed() {
+                        actions.push(UiAction::SetGuideColor(col));
+                    }
+                });
+                ui.add_space(14.0);
+
                 // Auto-exposure for HDR panoramas on load.
                 let mut auto = inputs.auto_exposure;
                 if ui

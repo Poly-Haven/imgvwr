@@ -1108,8 +1108,8 @@ fn loading(ctx: &egui::Context, inputs: &UiInputs) {
 /// Colours cycled by the progress bar's diagonal "barber-pole" bands.
 const BARBER_COLORS: [egui::Color32; 4] = [
     egui::Color32::from_rgb(190, 111, 255),
-    egui::Color32::from_rgb(243, 130, 55),
     egui::Color32::from_rgb(65, 187, 217),
+    egui::Color32::from_rgb(243, 130, 55),
     egui::Color32::from_rgb(161, 208, 77),
 ];
 
@@ -1139,7 +1139,7 @@ fn progress_bar(ui: &mut egui::Ui, value: Option<f32>) {
         let sp = painter.with_clip_rect(fill);
         let h = rect.height();
         const BAND: f32 = 13.0;
-        const SPEED: f32 = 32.0;
+        const SPEED: f32 = 64.0;
         let t = ui.input(|i| i.time) as f32 * SPEED;
         let scroll = (t / BAND).floor() as i64;
         let phase = t.rem_euclid(BAND);

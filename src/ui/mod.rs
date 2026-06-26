@@ -152,6 +152,10 @@ pub struct UiState {
     /// Guide line currently under the pointer (or being dragged), so the renderer
     /// can draw it in the hover colour. Refreshed each egui pass.
     pub hovered_guide: Option<usize>,
+    /// Index of the guide currently being dragged OUT of a ruler, captured at
+    /// drag-start so the rest of the gesture targets that exact guide (robust to
+    /// other guides being added/at the cap mid-drag). `None` = no ruler spawn-drag.
+    pub guide_spawn: Option<usize>,
     /// Whether the H help dialog is open.
     pub show_help: bool,
     /// Whether the settings dialog is open.
@@ -203,15 +207,8 @@ pub enum UiAction {
         index: usize,
         coord: f32,
     },
-    /// Move the most-recently-added guide — used while dragging a freshly-spawned
-    /// guide out of a ruler, where its index isn't yet known to the UI.
-    MoveLastGuide {
-        coord: f32,
-    },
     /// Remove the guide at this index (metadata list ×, right-click, drag-off).
     RemoveGuide(usize),
-    /// Remove the most-recently-added guide (a fresh ruler guide dragged off).
-    RemoveLastGuide,
     /// Reset all image adjustments (the bottom-panel Reset button = Ctrl+R).
     ResetAdjustments,
     /// Open the settings dialog (titlebar gear button).

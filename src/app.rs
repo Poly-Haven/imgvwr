@@ -2840,21 +2840,11 @@ impl App {
                     self.request_redraw();
                 }
             }
-            UiAction::MoveLastGuide { coord } => {
-                if let Some(g) = self.guides.last_mut() {
-                    g[0] = coord.clamp(0.0, 1.0);
-                    self.request_redraw();
-                }
-            }
             UiAction::RemoveGuide(i) => {
                 if i < self.guides.len() {
                     self.guides.remove(i);
                     self.request_redraw();
                 }
-            }
-            UiAction::RemoveLastGuide => {
-                self.guides.pop();
-                self.request_redraw();
             }
             UiAction::ResetAdjustments => self.reset_image_processing(),
             UiAction::SetAutoExposure(on) => {

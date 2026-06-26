@@ -105,11 +105,70 @@ fn y_to_guide_v(r: &RulerInfo, screen: egui::Rect, y: f32) -> f32 {
     0.5 + r.pan_v - ((1.0 - (y - screen.top()) / screen.height()) - 0.5) * r.sy
 }
 
+/// Spawn-and-drag a NEW guide pulled out of a ruler, shared by both rulers.
+/// `horizontal` is the new guide's orientation; `guides_len` is the current guide
+/// count (the index the spawned guide will occupy). The spawned index is captured
+/// at drag-start into `state.guide_spawn`, so the rest of the gesture targets that
+/// exact guide via the bounds-checked `MoveGuide`/`RemoveGuide` — robust to other
+/// guides being appended mid-drag (e.g. the G key) and to the guide cap (at the
+/// cap nothing is spawned and no existing guide is touched). Release past the
+/// image edge / off-screen discards the new guide.
+fn ruler_spawn_drag(
+    ctx: &egui::Context,
+    resp: &egui::Response,
+    r: &RulerInfo,
+    screen: egui::Rect,
+    horizontal: bool,
+    guides_len: usize,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+) {
+    let coord_at = |pt: egui::Pos2| {
+        if horizontal {
+            y_to_guide_v(r, screen, pt.y)
+        } else {
+            x_to_guide_u(r, screen, pt.x)
+        }
+    };
+    if resp.drag_started() {
+        // Only begin the gesture when a guide can actually be added; at the cap
+        // the drag is inert (it must never grab a pre-existing guide).
+        if guides_len < crate::renderer::MAX_GUIDES {
+            if let Some(pt) = ctx.pointer_interact_pos() {
+                state.guide_spawn = Some(guides_len);
+                actions.push(UiAction::AddGuide {
+                    coord: coord_at(pt),
+                    horizontal,
+                });
+            }
+        }
+    }
+    if resp.dragged() {
+        if let (Some(idx), Some(pt)) = (state.guide_spawn, ctx.pointer_interact_pos()) {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+            actions.push(UiAction::MoveGuide {
+                index: idx,
+                coord: coord_at(pt),
+            });
+        }
+    }
+    if resp.drag_stopped() {
+        if let Some(idx) = state.guide_spawn.take() {
+            if let Some(pt) = ctx.pointer_interact_pos() {
+                let coord = coord_at(pt);
+                if !(0.0..=1.0).contains(&coord) || !screen.contains(pt) {
+                    actions.push(UiAction::RemoveGuide(idx));
+                }
+            }
+        }
+    }
+}
+
 /// The left pixel ruler (2D only). Reveals on its own slide — near the left edge
-/// only — and stays while hovered so a guide can be dragged (or clicked) off it.
-/// Spans from just below the titlebar (when it's
-/// showing) to the bottom edge; the bottom panel, drawn afterwards, covers the
-/// overlapping bottom-left corner so there's no fixed panel-height assumption.
+/// only — and stays while hovered (or mid spawn-drag) so a guide can be dragged
+/// off it. Spans from just below the titlebar (when it's showing) to the bottom
+/// edge; the bottom panel, drawn afterwards, covers the overlapping bottom-left
+/// corner so there's no fixed panel-height assumption.
 fn left_ruler(
     ctx: &egui::Context,
     inputs: &UiInputs,
@@ -169,48 +228,39 @@ fn left_ruler(
             }
             resp
         });
+    // Keep the ruler alive for the whole spawn-drag, even as the pointer leaves
+    // the strip into the image (the drag stays routed to the strip's id).
     state.pointer_over_left_ruler = resp.response.contains_pointer() || resp.inner.dragged();
     // Drag a NEW *vertical* guide out of the (vertical) left ruler — Photoshop
     // style: it tracks the pointer's x as you pull it into the image. A plain
-    // click does nothing (no drag → no guide). Releasing past the image edge (or
-    // off-screen) discards it.
-    let inner = &resp.inner;
-    if inner.drag_started() {
-        if let Some(pt) = ctx.pointer_interact_pos() {
-            actions.push(UiAction::AddGuide {
-                coord: x_to_guide_u(&r, screen, pt.x),
-                horizontal: false,
-            });
-        }
-    }
-    if inner.dragged() {
-        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-        if let Some(pt) = ctx.pointer_interact_pos() {
-            actions.push(UiAction::MoveLastGuide {
-                coord: x_to_guide_u(&r, screen, pt.x),
-            });
-        }
-    }
-    if inner.drag_stopped() {
-        if let Some(pt) = ctx.pointer_interact_pos() {
-            let coord = x_to_guide_u(&r, screen, pt.x);
-            if !(0.0..=1.0).contains(&coord) || !screen.contains(pt) {
-                actions.push(UiAction::RemoveLastGuide);
-            }
-        }
-    }
+    // click does nothing (no drag → no guide).
+    ruler_spawn_drag(
+        ctx,
+        &resp.inner,
+        &r,
+        screen,
+        false,
+        inputs.guides.len(),
+        state,
+        actions,
+    );
 }
 
 /// The bottom pixel ruler, drawn as the top strip of the bottom panel (so they
 /// share one background rect — no gap). Ticks point up toward the image; dragging
 /// a guide out of it (upward) creates a *horizontal* guide that tracks the
 /// pointer. A plain click does nothing.
+/// Returns whether the strip is currently being dragged (a guide is being pulled
+/// out), so the caller can keep the bottom panel revealed for the whole gesture
+/// (else it auto-hides when the pointer leaves the panel and kills the drag).
 fn bottom_ruler_strip(
     ui: &mut egui::Ui,
     r: &RulerInfo,
     screen: egui::Rect,
+    guides_len: usize,
+    state: &mut UiState,
     actions: &mut Vec<UiAction>,
-) {
+) -> bool {
     let vw = screen.width();
     let ex = |px: f32| screen.left() + vw * (0.5 + (px / r.img_w - 0.5 - r.pan_u) / r.sx);
     let uv_x = |sx: f32| 0.5 + r.pan_u + ((sx - screen.left()) / vw - 0.5) * r.sx;
@@ -239,31 +289,9 @@ fn bottom_ruler_strip(
             p.line_segment([egui::pos2(x, base_y), egui::pos2(x, base_y - len)], stroke);
         }
     }
-    let ctx = ui.ctx();
-    if resp.drag_started() {
-        if let Some(pt) = ctx.pointer_interact_pos() {
-            actions.push(UiAction::AddGuide {
-                coord: y_to_guide_v(r, screen, pt.y),
-                horizontal: true,
-            });
-        }
-    }
-    if resp.dragged() {
-        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-        if let Some(pt) = ctx.pointer_interact_pos() {
-            actions.push(UiAction::MoveLastGuide {
-                coord: y_to_guide_v(r, screen, pt.y),
-            });
-        }
-    }
-    if resp.drag_stopped() {
-        if let Some(pt) = ctx.pointer_interact_pos() {
-            let coord = y_to_guide_v(r, screen, pt.y);
-            if !(0.0..=1.0).contains(&coord) || !screen.contains(pt) {
-                actions.push(UiAction::RemoveLastGuide);
-            }
-        }
-    }
+    // Pull a NEW *horizontal* guide upward out of the (horizontal) bottom ruler.
+    ruler_spawn_drag(ui.ctx(), &resp, r, screen, true, guides_len, state, actions);
+    resp.dragged()
 }
 
 /// Interactive layer for grabbing / moving / deleting existing guides directly
@@ -380,12 +408,16 @@ fn bottom_panel(
             // Background filled in once the content rect is known, so the ruler
             // strip and the sliders sit on exactly one rect.
             let bg = ui.painter().add(egui::Shape::Noop);
+            let guides_len = inputs.guides.len();
             let content = ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                // Bottom ruler (2D only) flush at the top of the panel.
-                if let Some(r) = &inputs.ruler {
-                    bottom_ruler_strip(ui, r, screen, actions);
-                }
+                // Bottom ruler (2D only) flush at the top of the panel. Returns
+                // whether a guide is being dragged out of it, to keep the panel up.
+                let strip_dragged = if let Some(r) = &inputs.ruler {
+                    bottom_ruler_strip(ui, r, screen, guides_len, state, actions)
+                } else {
+                    false
+                };
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(12, 7))
                     .show(ui, |ui| {
@@ -456,8 +488,10 @@ fn bottom_panel(
                             }
                         });
                     });
+                strip_dragged
             });
             let content_rect = content.response.rect;
+            let strip_dragged = content.inner;
             ui.painter()
                 .set(bg, egui::Shape::rect_filled(content_rect, 0.0, panel_bg()));
             // Reset button, pinned to the panel's bottom-right corner — drawn into
@@ -466,12 +500,15 @@ fn bottom_panel(
             // by the panel and rendered faint behind the panel background.) Its
             // placement is the area's right edge, independent of the slider group
             // widths (the slider rows already reserve room for it on the right).
-            reset_button(ui, content_rect)
+            (reset_button(ui, content_rect), strip_dragged)
         });
-    if resp.inner.clicked() {
+    let (reset_resp, strip_dragged) = resp.inner;
+    if reset_resp.clicked() {
         actions.push(UiAction::ResetAdjustments);
     }
-    state.pointer_over_panel = resp.response.contains_pointer();
+    // Keep the panel up for the whole bottom-ruler spawn-drag, even once the
+    // pointer leaves the panel into the image (mirrors the left ruler).
+    state.pointer_over_panel = resp.response.contains_pointer() || strip_dragged;
 }
 
 /// A labelled slider with `−` / `+` step buttons, emitting `make(value)` on any

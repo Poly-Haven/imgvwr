@@ -23,6 +23,8 @@ uniform sampler2D u_diff_image;      // the comparator slot's image (for u_diff)
 uniform int   u_guide_count;
 uniform vec2  u_guides[64];
 uniform vec3  u_guide_color;         // display-encoded sRGB 0–1
+uniform int   u_guide_hover;         // index of the hovered guide, or -1
+uniform vec3  u_guide_hover_color;   // inverse-hue colour for the hovered guide
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -172,8 +174,9 @@ void main() {
         float halo = (1.0 - smoothstep(1.0, 2.2, d)) * 0.5; // dark, just outside
         float line = 1.0 - smoothstep(0.5, 1.2, d);         // full within 0.5px
         if (halo > 0.0 || line > 0.0) out_alpha = 1.0;
+        vec3 gcol = (i == u_guide_hover) ? u_guide_hover_color : u_guide_color;
         color = mix(color, vec3(0.0), halo);
-        color = mix(color, u_guide_color, line);
+        color = mix(color, gcol, line);
     }
     frag_color = vec4(color, out_alpha);
 }

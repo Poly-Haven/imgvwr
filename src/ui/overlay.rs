@@ -56,6 +56,10 @@ pub fn build_overlays(
     // overlapping bottom-left corner). The bottom ruler lives inside the panel.
     left_ruler(ctx, inputs, state, actions);
 
+    // Interactive grab/move/delete strips for existing guides (lowest order, so
+    // they only catch clicks that land on a guide line).
+    guides_layer(ctx, inputs, state, actions);
+
     // Auto-hiding bottom panel (tone sliders + the merged bottom ruler).
     bottom_panel(ctx, inputs, state, actions);
 
@@ -77,6 +81,28 @@ const RULER_LEVELS: [(f32, f32, f32); 4] = [
 /// Tick colour: the old gray-210 darkened by 30%.
 fn ruler_tick_stroke() -> egui::Stroke {
     egui::Stroke::new(1.0, egui::Color32::from_gray(147))
+}
+
+// Screen ↔ image-coordinate mappings shared by the rulers and the interactive
+// guide layer (these mirror the shader's 2D UV mapping exactly). A *vertical*
+// guide sits at a constant image u (its on-screen line is vertical); a
+// *horizontal* guide at a constant image v.
+
+/// On-screen x of a vertical guide at image-u `coord` (0..1).
+fn guide_u_to_x(r: &RulerInfo, screen: egui::Rect, coord: f32) -> f32 {
+    screen.left() + screen.width() * (0.5 + (coord - 0.5 - r.pan_u) / r.sx)
+}
+/// Image-u (0..1) under a pointer at screen x.
+fn x_to_guide_u(r: &RulerInfo, screen: egui::Rect, x: f32) -> f32 {
+    0.5 + r.pan_u + ((x - screen.left()) / screen.width() - 0.5) * r.sx
+}
+/// On-screen y of a horizontal guide at image-v `coord` (0..1).
+fn guide_v_to_y(r: &RulerInfo, screen: egui::Rect, coord: f32) -> f32 {
+    screen.top() + screen.height() * (0.5 - (0.5 + r.pan_v - coord) / r.sy)
+}
+/// Image-v (0..1) under a pointer at screen y.
+fn y_to_guide_v(r: &RulerInfo, screen: egui::Rect, y: f32) -> f32 {
+    0.5 + r.pan_v - ((1.0 - (y - screen.top()) / screen.height()) - 0.5) * r.sy
 }
 
 /// The left pixel ruler (2D only). Reveals on its own slide — near the left edge
@@ -143,20 +169,42 @@ fn left_ruler(
             }
             resp
         });
-    state.pointer_over_left_ruler = resp.response.contains_pointer();
-    if resp.inner.drag_stopped() || resp.inner.clicked() {
+    state.pointer_over_left_ruler = resp.response.contains_pointer() || resp.inner.dragged();
+    // Drag a NEW *vertical* guide out of the (vertical) left ruler — Photoshop
+    // style: it tracks the pointer's x as you pull it into the image. A plain
+    // click does nothing (no drag → no guide). Releasing past the image edge (or
+    // off-screen) discards it.
+    let inner = &resp.inner;
+    if inner.drag_started() {
         if let Some(pt) = ctx.pointer_interact_pos() {
             actions.push(UiAction::AddGuide {
-                coord: uv_y(pt.y),
-                horizontal: true,
+                coord: x_to_guide_u(&r, screen, pt.x),
+                horizontal: false,
             });
+        }
+    }
+    if inner.dragged() {
+        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        if let Some(pt) = ctx.pointer_interact_pos() {
+            actions.push(UiAction::MoveLastGuide {
+                coord: x_to_guide_u(&r, screen, pt.x),
+            });
+        }
+    }
+    if inner.drag_stopped() {
+        if let Some(pt) = ctx.pointer_interact_pos() {
+            let coord = x_to_guide_u(&r, screen, pt.x);
+            if !(0.0..=1.0).contains(&coord) || !screen.contains(pt) {
+                actions.push(UiAction::RemoveLastGuide);
+            }
         }
     }
 }
 
 /// The bottom pixel ruler, drawn as the top strip of the bottom panel (so they
 /// share one background rect — no gap). Ticks point up toward the image; dragging
-/// or clicking it adds a vertical guide.
+/// a guide out of it (upward) creates a *horizontal* guide that tracks the
+/// pointer. A plain click does nothing.
 fn bottom_ruler_strip(
     ui: &mut egui::Ui,
     r: &RulerInfo,
@@ -191,14 +239,114 @@ fn bottom_ruler_strip(
             p.line_segment([egui::pos2(x, base_y), egui::pos2(x, base_y - len)], stroke);
         }
     }
-    if resp.drag_stopped() || resp.clicked() {
-        if let Some(pt) = ui.ctx().pointer_interact_pos() {
+    let ctx = ui.ctx();
+    if resp.drag_started() {
+        if let Some(pt) = ctx.pointer_interact_pos() {
             actions.push(UiAction::AddGuide {
-                coord: uv_x(pt.x),
-                horizontal: false,
+                coord: y_to_guide_v(r, screen, pt.y),
+                horizontal: true,
             });
         }
     }
+    if resp.dragged() {
+        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        if let Some(pt) = ctx.pointer_interact_pos() {
+            actions.push(UiAction::MoveLastGuide {
+                coord: y_to_guide_v(r, screen, pt.y),
+            });
+        }
+    }
+    if resp.drag_stopped() {
+        if let Some(pt) = ctx.pointer_interact_pos() {
+            let coord = y_to_guide_v(r, screen, pt.y);
+            if !(0.0..=1.0).contains(&coord) || !screen.contains(pt) {
+                actions.push(UiAction::RemoveLastGuide);
+            }
+        }
+    }
+}
+
+/// Interactive layer for grabbing / moving / deleting existing guides directly
+/// on the image (2D only — it uses the ruler mapping). Each guide gets a thin,
+/// full-length hit strip along its on-screen line at the LOWEST egui order, so a
+/// click away from any guide still falls through to the image (pan), while a
+/// click near a line grabs it. Hover → grab cursor + mark the guide for the
+/// renderer's hover colour; drag → move it; right-click or drag-off → delete.
+fn guides_layer(
+    ctx: &egui::Context,
+    inputs: &UiInputs,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+) {
+    state.hovered_guide = None;
+    let Some(r) = inputs.ruler else {
+        return;
+    };
+    if inputs.guides.is_empty() {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    const HALF: f32 = 4.0; // hit half-thickness around the line (px)
+    egui::Area::new(egui::Id::new("imgvwr_guides"))
+        .order(egui::Order::Background)
+        .fixed_pos(screen.min)
+        .constrain(false)
+        .show(ctx, |ui| {
+            for (i, g) in inputs.guides.iter().enumerate() {
+                let horizontal = g[1] >= 0.5;
+                let rect = if horizontal {
+                    let y = guide_v_to_y(&r, screen, g[0]);
+                    egui::Rect::from_min_max(
+                        egui::pos2(screen.left(), y - HALF),
+                        egui::pos2(screen.right(), y + HALF),
+                    )
+                } else {
+                    let x = guide_u_to_x(&r, screen, g[0]);
+                    egui::Rect::from_min_max(
+                        egui::pos2(x - HALF, screen.top()),
+                        egui::pos2(x + HALF, screen.bottom()),
+                    )
+                };
+                let id = ui.id().with(("guide", i));
+                let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
+                if resp.hovered() || resp.dragged() {
+                    state.hovered_guide = Some(i);
+                    ctx.set_cursor_icon(if resp.dragged() {
+                        egui::CursorIcon::Grabbing
+                    } else {
+                        egui::CursorIcon::Grab
+                    });
+                }
+                // Right-click removes.
+                if resp.secondary_clicked() {
+                    actions.push(UiAction::RemoveGuide(i));
+                    continue;
+                }
+                // Map the pointer to this guide's axis coordinate (for move/drop).
+                let coord = ctx.pointer_interact_pos().map(|pt| {
+                    if horizontal {
+                        y_to_guide_v(&r, screen, pt.y)
+                    } else {
+                        x_to_guide_u(&r, screen, pt.x)
+                    }
+                });
+                if resp.dragged() {
+                    if let Some(coord) = coord {
+                        actions.push(UiAction::MoveGuide { index: i, coord });
+                    }
+                }
+                if resp.drag_stopped() {
+                    // Released past the image edge / off-screen → discard it.
+                    let off = match (coord, ctx.pointer_interact_pos()) {
+                        (Some(c), Some(pt)) => !(0.0..=1.0).contains(&c) || !screen.contains(pt),
+                        _ => false,
+                    };
+                    if off {
+                        actions.push(UiAction::RemoveGuide(i));
+                    }
+                }
+            }
+        });
 }
 
 /// Auto-hiding bottom panel of image-adjustment sliders (revealed by the cursor
@@ -1204,8 +1352,9 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
             &[
                 ("S", "Sharpness (original res)"),
                 ("Alt + middle-drag", "Squash / stretch image"),
-                ("G", "Add guide (½, ¼, ⅛, …)"),
-                ("Drag from a ruler", "Add a guide line"),
+                ("G", "Add guide (½, ¼ … to 1/32)"),
+                ("Pull from a ruler", "Drag out a guide"),
+                ("Drag / right-click guide", "Move / delete it"),
                 ("Channel boxes (F2)", "Isolate R/G/B/A"),
             ],
         ),

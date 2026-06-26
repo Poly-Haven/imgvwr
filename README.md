@@ -53,11 +53,12 @@ for Windows.
 | Input | Action |
 |---|---|
 | `S` | Sharpness checker — `\|original − blurred\|`, amplifiable by exposure |
-| `G` | Add the next guide in sequence (50%, then quarters, eighths…) |
-| Drag / click a ruler | Add a guide line (left ruler near the left edge; bottom ruler with the panel; 2D) |
+| `G` | Add the next guide in sequence (½, ¼, ⅛ … down to 1/32 on each axis) |
+| Pull from a ruler | Drag a guide out of a ruler — left ruler → vertical, bottom ruler → horizontal (2D) |
+| Drag / right-click a guide | Move a guide, or delete it (drag off the image or right-click) |
 | `Alt` + middle-drag | Squash / stretch the image non-uniformly, unbounded (line straightness) |
 | Channel boxes (`F2`) | Click to isolate R / G / B / A as greyscale |
-| Guides list (`F2`) | Remove individual guides; bottom-panel **↺** or `Ctrl+R` resets all |
+| Guides list (`F2`) | Shows each guide (`V 425px` / `H 312px`); × removes; `Ctrl+R` resets all |
 
 ### Window (borderless)
 

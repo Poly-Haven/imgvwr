@@ -149,6 +149,9 @@ pub struct UiState {
     /// Updated after each egui pass: is the metadata box's View menu (or one of
     /// its sub-menus) open? Keeps the box revealed while navigating the menu.
     pub view_menu_open: bool,
+    /// Guide line currently under the pointer (or being dragged), so the renderer
+    /// can draw it in the hover colour. Refreshed each egui pass.
+    pub hovered_guide: Option<usize>,
     /// Whether the H help dialog is open.
     pub show_help: bool,
     /// Whether the settings dialog is open.
@@ -190,13 +193,25 @@ pub enum UiAction {
     SetClarity(f32),
     /// Set the Clarity blur radius (viewport px) from the bottom-panel slider.
     SetClarityRadius(f32),
-    /// Add a guide line dragged from a ruler: image uv coord, horizontal?
+    /// Add a guide line dragged out of a ruler: image uv coord, horizontal?
     AddGuide {
         coord: f32,
         horizontal: bool,
     },
-    /// Remove the guide at this index (from the metadata box's guide list).
+    /// Move an existing guide (drag): set guide `index`'s coord (image uv 0..1).
+    MoveGuide {
+        index: usize,
+        coord: f32,
+    },
+    /// Move the most-recently-added guide — used while dragging a freshly-spawned
+    /// guide out of a ruler, where its index isn't yet known to the UI.
+    MoveLastGuide {
+        coord: f32,
+    },
+    /// Remove the guide at this index (metadata list ×, right-click, drag-off).
     RemoveGuide(usize),
+    /// Remove the most-recently-added guide (a fresh ruler guide dragged off).
+    RemoveLastGuide,
     /// Reset all image adjustments (the bottom-panel Reset button = Ctrl+R).
     ResetAdjustments,
     /// Open the settings dialog (titlebar gear button).

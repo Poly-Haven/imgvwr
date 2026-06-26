@@ -68,6 +68,10 @@ pub struct RenderParams {
     /// Guide-line colour (display-encoded sRGB 0–1), drawn after the view
     /// transform straight into the framebuffer.
     pub guide_color: [f32; 3],
+    /// Index of the guide under the pointer (drawn in the hover colour), or -1.
+    pub guide_hover: i32,
+    /// Hover colour (inverse hue of `guide_color`), display-encoded sRGB 0–1.
+    pub guide_hover_color: [f32; 3],
     /// Clarity (local-contrast) strength; 0 bypasses the whole post chain.
     pub clarity_amount: f32,
     /// Clarity unsharp-mask blur radius, in viewport pixels.
@@ -96,6 +100,8 @@ impl Default for RenderParams {
             guides: [[0.0; 2]; MAX_GUIDES],
             guide_count: 0,
             guide_color: [1.0, 0.314, 0.314],
+            guide_hover: -1,
+            guide_hover_color: [0.314, 1.0, 1.0],
             clarity_amount: 0.0,
             clarity_radius: 64.0,
         }
@@ -122,6 +128,8 @@ struct Uniforms {
     guide_count: Option<glow::UniformLocation>,
     guides: Option<glow::UniformLocation>,
     guide_color: Option<glow::UniformLocation>,
+    guide_hover: Option<glow::UniformLocation>,
+    guide_hover_color: Option<glow::UniformLocation>,
     // Single-texture sampler.
     image: Option<glow::UniformLocation>,
     // Tiled-texture sampler + grid.
@@ -157,6 +165,8 @@ impl Uniforms {
             guide_count: u("u_guide_count"),
             guides: u("u_guides"),
             guide_color: u("u_guide_color"),
+            guide_hover: u("u_guide_hover"),
+            guide_hover_color: u("u_guide_hover_color"),
             image: u("u_image"),
             tiles: u("u_tiles"),
             tile_cols: u("u_tile_cols"),
@@ -484,6 +494,9 @@ impl Renderer {
             gl.uniform_1_i32(u.guide_count.as_ref(), n as i32);
             let gc = params.guide_color;
             gl.uniform_3_f32(u.guide_color.as_ref(), gc[0], gc[1], gc[2]);
+            let gh = params.guide_hover_color;
+            gl.uniform_3_f32(u.guide_hover_color.as_ref(), gh[0], gh[1], gh[2]);
+            gl.uniform_1_i32(u.guide_hover.as_ref(), params.guide_hover);
             if n > 0 {
                 gl.uniform_2_f32_slice(
                     u.guides.as_ref(),

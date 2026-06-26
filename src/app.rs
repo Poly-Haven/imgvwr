@@ -2834,11 +2834,27 @@ impl App {
                 self.request_redraw();
             }
             UiAction::AddGuide { coord, horizontal } => self.add_guide(coord, horizontal),
+            UiAction::MoveGuide { index, coord } => {
+                if let Some(g) = self.guides.get_mut(index) {
+                    g[0] = coord.clamp(0.0, 1.0);
+                    self.request_redraw();
+                }
+            }
+            UiAction::MoveLastGuide { coord } => {
+                if let Some(g) = self.guides.last_mut() {
+                    g[0] = coord.clamp(0.0, 1.0);
+                    self.request_redraw();
+                }
+            }
             UiAction::RemoveGuide(i) => {
                 if i < self.guides.len() {
                     self.guides.remove(i);
                     self.request_redraw();
                 }
+            }
+            UiAction::RemoveLastGuide => {
+                self.guides.pop();
+                self.request_redraw();
             }
             UiAction::ResetAdjustments => self.reset_image_processing(),
             UiAction::SetAutoExposure(on) => {
@@ -2996,6 +3012,15 @@ impl App {
             guides: guide_arr,
             guide_count: guide_n as i32,
             guide_color: srgb_u8_to_f32(self.prefs.guide_color),
+            // Hovered guide (from last frame's egui pass) gets the inverse-hue
+            // colour so it stands out under the grab cursor.
+            guide_hover: self
+                .ui_state
+                .hovered_guide
+                .filter(|&i| i < guide_n)
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+            guide_hover_color: inverse_hue(srgb_u8_to_f32(self.prefs.guide_color)),
             clarity_amount: self.clarity_amount,
             clarity_radius: self.clarity_radius,
         };
@@ -3617,6 +3642,43 @@ fn srgb_u8_to_f32(c: [u8; 3]) -> [f32; 3] {
     ]
 }
 
+/// Rotate a colour's hue by 180° while keeping its saturation and value, for the
+/// guide hover colour ("always the inverse hue"). Operates in the gamma-encoded
+/// space the colour is picked in (it's a UI accent, not a physical mix).
+fn inverse_hue(rgb: [f32; 3]) -> [f32; 3] {
+    let (r, g, b) = (rgb[0], rgb[1], rgb[2]);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    // Hue in degrees.
+    let mut h = if d <= 1e-6 {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / d).rem_euclid(6.0))
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    h = (h + 180.0).rem_euclid(360.0); // inverse hue
+    let s = if max <= 1e-6 { 0.0 } else { d / max };
+    let v = max;
+    // HSV -> RGB.
+    let c = v * s;
+    let hp = h / 60.0;
+    let x = c * (1.0 - (hp.rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = match hp as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    [r1 + m, g1 + m, b1 + m]
+}
+
 /// Map a numpad key to a zoom digit 1..=9, else `None`.
 fn numpad_digit(key: &PhysicalKey) -> Option<u32> {
     let PhysicalKey::Code(code) = key else {
@@ -3937,5 +3999,35 @@ fn install_debug_callback(gl: &mut glow::Context) {
             glow::DEBUG_SEVERITY_MEDIUM => log::warn!("GL: {message}"),
             _ => log::debug!("GL: {message}"),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() < 2.0 / 255.0)
+    }
+
+    #[test]
+    fn inverse_hue_red_is_cyan() {
+        // The default guide red (255,80,80) inverts to cyan (80,255,255): hue
+        // rotated 180°, saturation and value unchanged.
+        let red = srgb_u8_to_f32([255, 80, 80]);
+        let got = inverse_hue(red);
+        assert!(close(got, srgb_u8_to_f32([80, 255, 255])), "got {got:?}");
+    }
+
+    #[test]
+    fn inverse_hue_is_an_involution_and_preserves_sv() {
+        // Inverting twice returns the original; a grey (no hue) is unchanged.
+        for c in [[200, 120, 40], [10, 200, 90], [128, 128, 128], [0, 0, 0]] {
+            let orig = srgb_u8_to_f32(c);
+            assert!(close(inverse_hue(inverse_hue(orig)), orig), "color {c:?}");
+        }
+        // Grey has no hue to rotate, so it must map to itself.
+        let grey = srgb_u8_to_f32([90, 90, 90]);
+        assert!(close(inverse_hue(grey), grey));
     }
 }

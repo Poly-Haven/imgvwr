@@ -253,6 +253,10 @@ pub struct App {
     minimap_prev_view: Option<(f32, f32, f32)>,
     /// True while the left button is dragging inside the minimap (navigating).
     minimap_drag: bool,
+    /// Headless-test override (debug only): force the minimap fade alpha to a
+    /// fixed value, so the cross-fade composite can be verified in a capture.
+    #[cfg(debug_assertions)]
+    debug_minimap_alpha: Option<f32>,
 
     // Colour management.
     ocio: OcioManager,
@@ -447,6 +451,8 @@ impl App {
             minimap_auto_until: None,
             minimap_prev_view: None,
             minimap_drag: false,
+            #[cfg(debug_assertions)]
+            debug_minimap_alpha: None,
             ocio,
             last_view: None,
             prefs,
@@ -2362,9 +2368,16 @@ impl App {
         } else {
             (MINIMAP_MAX * aspect, MINIMAP_MAX)
         };
-        let (w, h, margin) = (w_pt * scale, h_pt * scale, MINIMAP_MARGIN * scale);
-        let x = vw - margin - w;
-        let y = vh - margin - h;
+        // Snap to whole physical pixels so the GL thumbnail rect and the egui
+        // border (rect / scale) land on the same edges — otherwise a fractional
+        // DPI scale leaves a 1px scene-coloured seam between them.
+        let (w, h, margin) = (
+            (w_pt * scale).round(),
+            (h_pt * scale).round(),
+            MINIMAP_MARGIN * scale,
+        );
+        let x = (vw - margin - w).round();
+        let y = (vh - margin - h).round();
         if x < margin || y < margin {
             return None; // window too small to seat the minimap
         }
@@ -2384,6 +2397,10 @@ impl App {
     fn minimap_alpha(&self) -> f32 {
         if self.minimap_metrics().is_none() || !self.minimap_gated_in() {
             return 0.0;
+        }
+        #[cfg(debug_assertions)]
+        if let Some(a) = self.debug_minimap_alpha {
+            return a;
         }
         if self.minimap_on {
             return 1.0;
@@ -2901,14 +2918,24 @@ impl App {
                 }
             }
             (ElementState::Pressed, MouseButton::Right) => {
-                // Right-click on a guide deletes it (and nothing else; a plain
-                // right-drag never pans). Alt+right is the third-resize, handled
-                // earlier in the event router, so it never reaches here.
+                // A right-press over the minimap is inert (the overlay captures the
+                // pointer); otherwise right-click on a guide deletes it (and
+                // nothing else; a plain right-drag never pans). Alt+right is the
+                // third-resize, handled earlier in the router, so it never reaches
+                // here.
+                if self.minimap_hit() {
+                    return;
+                }
                 if let Some(idx) = self.guide_at_cursor() {
                     self.remove_guide(idx);
                 }
             }
             (ElementState::Pressed, MouseButton::Middle) => {
+                // A middle-press over the minimap is inert (the overlay captures the
+                // pointer).
+                if self.minimap_hit() {
+                    return;
+                }
                 // Alt + middle-drag squashes/stretches the image within the same
                 // window (to inspect line straightness); otherwise pan/look.
                 if self.modifiers.alt_key() {
@@ -3007,10 +3034,16 @@ impl App {
         if std::env::var_os("IMGVWR_DEBUG_SHARPNESS").is_some() {
             self.sharpness = true;
         }
-        if std::env::var_os("IMGVWR_DEBUG_MINIMAP").is_some() {
+        if let Ok(v) = std::env::var("IMGVWR_DEBUG_MINIMAP") {
             // Force the minimap on for headless capture (pair with a zoomed-in
-            // IMGVWR_DEBUG_ZOOM so it passes the contain-fit gate).
+            // IMGVWR_DEBUG_ZOOM so it passes the contain-fit gate). A value in
+            // (0,1) also forces that fade alpha, to verify the cross-fade.
             self.minimap_on = true;
+            if let Ok(a) = v.parse::<f32>() {
+                if a > 0.0 && a < 1.0 {
+                    self.debug_minimap_alpha = Some(a);
+                }
+            }
         }
         if std::env::var_os("IMGVWR_DEBUG_GUIDES").is_some() {
             self.guides = vec![[0.5, 1.0], [0.5, 0.0], [0.25, 0.0]];
@@ -3885,8 +3918,15 @@ impl ApplicationHandler<UserEvent> for App {
             // (direction from the cursor's third of the window). Otherwise
             // egui-consumed events fall through to `_ => {}`.
             WindowEvent::MouseInput { state, button, .. } => {
-                // End an in-progress Alt+right-drag resize on any release.
-                if state == ElementState::Released && self.alt_resize.is_some() {
+                // End an in-progress Alt+right-drag resize when the RIGHT button
+                // (the one driving it) is released. Gating on the button matters:
+                // swallowing *any* release here would skip `on_mouse_button` for a
+                // left release that ended a pan / guide- or minimap-drag, leaving
+                // that gesture flag stuck on.
+                if state == ElementState::Released
+                    && button == MouseButton::Right
+                    && self.alt_resize.is_some()
+                {
                     self.alt_resize = None;
                 } else {
                     let resized = state == ElementState::Pressed

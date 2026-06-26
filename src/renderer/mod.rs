@@ -597,6 +597,13 @@ impl Renderer {
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             gl.enable(glow::BLEND);
+            // The shader outputs straight (non-premultiplied) alpha, so the fade
+            // needs SRC_ALPHA / ONE_MINUS_SRC_ALPHA. egui's painter leaves a
+            // *premultiplied* blend func set from the previous frame's paint and
+            // never restores it; without resetting here the fade would composite
+            // the thumbnail additively (blown out) instead of cross-fading.
+            gl.blend_equation(glow::FUNC_ADD);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
             gl.enable(glow::SCISSOR_TEST);
             gl.scissor(x, y, w, h);
         }

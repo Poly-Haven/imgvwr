@@ -22,6 +22,10 @@ cargo build --release
   [`src/ui/overlay.rs`](src/ui/overlay.rs) `help_dialog`) **and** the README controls table.
 - Run clippy on **both** feature sets before declaring done:
   `cargo clippy --all-targets -- -D warnings` and the same with `--no-default-features`.
+- **UI icons: prefer the *filled* Bootstrap variant** (`*-fill.svg`) over the thin outline
+  one. At the small titlebar/HUD sizes the hairline strokes of the outline icons render muddy;
+  the filled glyphs stay bold and crisp. Done so far for Open (`folder-fill`) and Settings
+  (`gear-fill`); use the `-fill` version for any new icon when one exists.
 - The fragment shader is templated — `__IMAGE_SAMPLER__` / `__OCIO_*__` are substituted in
   `renderer/mod.rs`. The panorama path must sample via `sample_image_grad` (seam-corrected
   derivatives), never plain `sample_image`, or the longitude wrap shows a mip-LOD seam.

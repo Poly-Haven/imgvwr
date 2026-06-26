@@ -574,7 +574,9 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
                         }
                         if titlebar_button(
                             ui,
-                            egui::include_image!("../../resources/icons/ui/gear.svg"),
+                            // Filled gear: renders bolder/crisper at this size than
+                            // the thin-stroked outline gear (same as the Open icon).
+                            egui::include_image!("../../resources/icons/ui/gear-fill.svg"),
                             15.0,
                             a,
                             false,

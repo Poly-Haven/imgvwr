@@ -1237,14 +1237,28 @@ impl App {
         if std::env::var_os("IMGVWR_DEBUG_SLOT").is_some() && self.slots[0].is_none() {
             self.slots[0] = self.current_image.clone();
         }
-        // Dev-only: self-diff against slot 1 to verify the diff path headlessly.
+        // Dev-only: verify the diff path headlessly. IMGVWR_DEBUG_DIFF self-diffs
+        // (renders 0); IMGVWR_DEBUG_DIFF_FILE=<path> diffs against another file (so
+        // identical regions can be confirmed 0 even when minified). Both go through
+        // the same precompute as the real Alt+N path.
         #[cfg(debug_assertions)]
-        if std::env::var_os("IMGVWR_DEBUG_DIFF").is_some() {
-            if let Some(slot) = self.slots[0].clone().or_else(|| self.current_image.clone()) {
-                if let Some(gfx) = &mut self.gfx {
-                    gfx.renderer.set_diff_image(Some(slot.as_ref()));
+        if std::env::var_os("IMGVWR_DEBUG_DIFF").is_some()
+            || std::env::var_os("IMGVWR_DEBUG_DIFF_FILE").is_some()
+        {
+            let target: Option<Arc<ImageData>> =
+                if let Some(p) = std::env::var_os("IMGVWR_DEBUG_DIFF_FILE") {
+                    let prog = Arc::new(crate::image_loader::ReadProgress::default());
+                    load_image(Path::new(&p), &prog).ok().map(Arc::new)
+                } else {
+                    self.slots[0].clone().or_else(|| self.current_image.clone())
+                };
+            if let (Some(slot), Some(cur)) = (target, self.current_image.clone()) {
+                if let Some(diff) = abs_diff_image(&cur, &slot) {
+                    if let Some(gfx) = &mut self.gfx {
+                        gfx.renderer.set_diff_image(Some(&diff));
+                    }
+                    self.diff_slot = Some(0);
                 }
-                self.diff_slot = Some(0);
             }
         }
         self.recompute_active_slot();
@@ -1299,8 +1313,10 @@ impl App {
     }
 
     /// Alt+N: toggle showing the absolute difference between the current image
-    /// and comparator slot `n`. Uploads the slot image to the renderer's diff
-    /// texture; exposure/clarity/etc then act on the displayed difference.
+    /// and comparator slot `n`. The diff is PRECOMPUTED at base resolution (so the
+    /// GPU mip chain shows the average of the per-pixel differences — identical
+    /// regions read 0 at every zoom) and uploaded as the renderer's diff texture;
+    /// exposure/clarity/etc then act on the displayed difference.
     fn toggle_slot_diff(&mut self, n: usize) {
         let idx = n - 1;
         if self.diff_slot == Some(idx) {
@@ -1316,16 +1332,23 @@ impl App {
             self.show_toast(format!("Slot {n} empty"));
             return;
         };
+        let Some(current) = self.current_image.clone() else {
+            return;
+        };
+        let Some(diff) = abs_diff_image(&current, &slot) else {
+            self.show_toast("Can't diff (different pixel types)".to_string());
+            return;
+        };
         let ok = self
             .gfx
             .as_mut()
-            .is_some_and(|gfx| gfx.renderer.set_diff_image(Some(slot.as_ref())));
+            .is_some_and(|gfx| gfx.renderer.set_diff_image(Some(&diff)));
         if ok {
             self.diff_slot = Some(idx);
             self.show_toast(format!("Diff vs slot {n}"));
         } else {
             self.diff_slot = None;
-            self.show_toast("Slot image too large to diff".to_string());
+            self.show_toast("Image too large to diff".to_string());
         }
         self.request_redraw();
     }
@@ -3628,6 +3651,62 @@ fn fmt_ev(ev: f32) -> String {
 /// clear colour. The default framebuffer isn't sRGB, and the image shader writes
 /// display-encoded output, so the picked sRGB value is used directly (no
 /// linearisation) and appears as chosen.
+/// Per-pixel absolute difference of `a` and `b`, at `a`'s resolution (nearest-
+/// sampling `b` when sizes differ). Precomputed so the GPU mip chain of the diff
+/// shows the *average of the per-pixel differences* — identical regions stay 0 at
+/// every zoom. (Differencing two separately mip-averaged textures instead bleeds
+/// nearby differences into identical regions when minified.) Computed in the
+/// source (encoded) space, matching how the shader then linearises/views it.
+/// Returns `None` if the two images use different pixel types.
+fn abs_diff_image(a: &ImageData, b: &ImageData) -> Option<ImageData> {
+    use crate::image_loader::PixelBuffer;
+    let (w, h) = (a.width as usize, a.height as usize);
+    let (bw, bh) = ((b.width as usize).max(1), (b.height as usize).max(1));
+    // Nearest map from a's grid into b's (identity when the sizes match).
+    let map = |x: usize, n: usize, bn: usize| (x * bn / n.max(1)).min(bn - 1);
+    let pixels = match (&a.pixels, &b.pixels) {
+        (PixelBuffer::U8(av), PixelBuffer::U8(bv)) => {
+            let mut out = vec![0u8; w * h * 4];
+            for y in 0..h {
+                let by = map(y, h, bh);
+                for x in 0..w {
+                    let bx = map(x, w, bw);
+                    let (ai, bi) = ((y * w + x) * 4, (by * bw + bx) * 4);
+                    for c in 0..4 {
+                        out[ai + c] = (av[ai + c] as i16 - bv[bi + c] as i16).unsigned_abs() as u8;
+                    }
+                }
+            }
+            PixelBuffer::U8(out)
+        }
+        (PixelBuffer::F32(av), PixelBuffer::F32(bv)) => {
+            let mut out = vec![0f32; w * h * 4];
+            for y in 0..h {
+                let by = map(y, h, bh);
+                for x in 0..w {
+                    let bx = map(x, w, bw);
+                    let (ai, bi) = ((y * w + x) * 4, (by * bw + bx) * 4);
+                    for c in 0..4 {
+                        out[ai + c] = (av[ai + c] - bv[bi + c]).abs();
+                    }
+                }
+            }
+            PixelBuffer::F32(out)
+        }
+        _ => return None,
+    };
+    Some(ImageData {
+        path: a.path.clone(),
+        width: a.width,
+        height: a.height,
+        channels: a.channels,
+        dtype_name: a.dtype_name.clone(),
+        compression: "-".to_string(),
+        pixels,
+        is_encoded_srgb: a.is_encoded_srgb,
+    })
+}
+
 fn srgb_u8_to_f32(c: [u8; 3]) -> [f32; 3] {
     [
         c[0] as f32 / 255.0,
@@ -4002,6 +4081,37 @@ mod tests {
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         (0..3).all(|i| (a[i] - b[i]).abs() < 2.0 / 255.0)
+    }
+
+    #[test]
+    fn abs_diff_zero_for_identical_correct_otherwise() {
+        use crate::image_loader::PixelBuffer;
+        let mk = |px: Vec<u8>| ImageData {
+            path: std::path::PathBuf::from("t.png"),
+            width: 2,
+            height: 1,
+            channels: 4,
+            dtype_name: "uint8".into(),
+            compression: "-".into(),
+            pixels: PixelBuffer::U8(px),
+            is_encoded_srgb: true,
+        };
+        let a = mk(vec![10, 20, 30, 255, 100, 100, 100, 255]);
+        let b = mk(vec![10, 20, 30, 255, 40, 90, 160, 255]);
+        let d = abs_diff_image(&a, &b).unwrap();
+        let PixelBuffer::U8(v) = &d.pixels else {
+            panic!()
+        };
+        // Pixel 0 is identical -> 0; pixel 1 -> |100-40|,|100-90|,|100-160|.
+        assert_eq!(&v[0..3], &[0, 0, 0]);
+        assert_eq!(&v[4..7], &[60, 10, 60]);
+        // A self-diff is exactly zero everywhere (the property the GPU mip chain
+        // preserves at every LOD, so identical regions read 0 at any zoom).
+        let s = abs_diff_image(&a, &a).unwrap();
+        let PixelBuffer::U8(sv) = &s.pixels else {
+            panic!()
+        };
+        assert!(sv.iter().all(|&x| x == 0));
     }
 
     #[test]

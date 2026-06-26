@@ -121,10 +121,14 @@ pub struct MinimapInfo {
     pub rect: egui::Rect,
     /// Fade opacity, 0..1.
     pub alpha: f32,
-    /// The current view region as one or more polylines (points). 2D is a single
-    /// closed rectangle; panorama is the rectilinearly un-projected screen border,
-    /// split into segments at the longitude wrap.
+    /// The current view region outline as one or more polylines (points). 2D is a
+    /// rectangle (one per wrapped tile); panorama is the rectilinearly un-projected
+    /// screen border, split into segments at the longitude wrap.
     pub view_segments: Vec<Vec<egui::Pos2>>,
+    /// The current view region as a filled triangle list (every 3 points = one
+    /// triangle), drawn under the outline as a faint shade. A projected mesh, so it
+    /// fills correctly regardless of concavity (panorama poles) or wrapping.
+    pub view_fill: Vec<[egui::Pos2; 3]>,
 }
 
 impl UiInputs {

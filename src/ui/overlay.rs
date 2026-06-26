@@ -322,29 +322,26 @@ fn minimap(ctx: &egui::Context, inputs: &UiInputs) {
         egui::Id::new("imgvwr_minimap"),
     ));
 
-    // Current-view region, clipped to the panel so a view box larger than the
-    // image, or a wrapped panorama segment, can't spill past the edge. Each
-    // segment is shaded with 10% white (the 2D box is one rect; a panorama view is
-    // its un-projected quad, split into pieces at the longitude wrap) and outlined.
+    // Current-view region, clipped to the panel so a box larger than the image, or
+    // a wrapped tile / panorama segment, can't spill past the edge. The interior is
+    // a faint 5% white fill (a projected triangle mesh, so it's correct for any
+    // shape — concave panorama bands, wrapped tiles) under a brighter outline.
     let clipped = painter.with_clip_rect(info.rect);
-    let view_fill = egui::Color32::from_white_alpha((a * 26.0).round() as u8);
+    let fill_color = egui::Color32::from_white_alpha((a * 13.0).round() as u8);
     let view_stroke = egui::Stroke::new(
         1.0,
         egui::Color32::from_white_alpha((a * 235.0).round() as u8),
     );
-    // Fill only convex segments. egui fills a polygon as a triangle fan from its
-    // first vertex, which is correct only when convex; a panorama view box that
-    // wraps a pole (steep pitch) becomes a concave band, and a fan over it would
-    // overpaint far outside the region. The 2D rect and the common pano horizon
-    // view are convex and fill fine; concave/degenerate ones keep just the outline.
-    for seg in &info.view_segments {
-        if let Some(poly) = convex_polygon(seg) {
-            clipped.add(egui::Shape::convex_polygon(
-                poly,
-                view_fill,
-                egui::Stroke::NONE,
-            ));
+    if !info.view_fill.is_empty() {
+        let mut mesh = egui::Mesh::default();
+        for tri in &info.view_fill {
+            let base = mesh.vertices.len() as u32;
+            for p in tri {
+                mesh.colored_vertex(*p, fill_color);
+            }
+            mesh.add_triangle(base, base + 1, base + 2);
         }
+        clipped.add(egui::Shape::mesh(mesh));
     }
     for seg in &info.view_segments {
         if seg.len() >= 2 {
@@ -362,37 +359,6 @@ fn minimap(ctx: &egui::Context, inputs: &UiInputs) {
         ),
         egui::StrokeKind::Outside,
     );
-}
-
-/// If `seg` (a view-region outline, possibly with a duplicated closing point) is a
-/// convex polygon, return its deduplicated vertices for a triangle-fan fill; else
-/// `None` (so a concave/degenerate region is left unfilled rather than overpainted).
-fn convex_polygon(seg: &[egui::Pos2]) -> Option<Vec<egui::Pos2>> {
-    let mut p: Vec<egui::Pos2> = seg.to_vec();
-    if p.len() >= 2 && p.first() == p.last() {
-        p.pop(); // drop the closing duplicate
-    }
-    let n = p.len();
-    if n < 3 {
-        return None;
-    }
-    // Convex iff every turn has the same sign (in egui's y-down space). Tiny
-    // cross products (collinear points) don't flip the decision.
-    let mut sign = 0.0_f32;
-    for i in 0..n {
-        let a = p[i];
-        let b = p[(i + 1) % n];
-        let c = p[(i + 2) % n];
-        let cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
-        if cross.abs() > 1e-3 {
-            if sign == 0.0 {
-                sign = cross.signum();
-            } else if cross.signum() != sign {
-                return None;
-            }
-        }
-    }
-    Some(p)
 }
 
 /// The left pixel ruler (2D only). Reveals on its own slide — near the left edge
@@ -1668,14 +1634,24 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
     });
     // Widest single section (its key column + 10px grid gap + action column), so a
     // row of `cols` such sections is guaranteed to fit `cols * sec_w` of width.
-    let sec_w = SECTIONS
+    let sec_widths: Vec<f32> = SECTIONS
         .iter()
         .map(|(_, keys)| {
             let kw = keys.iter().map(|(k, _)| text_w(k)).fold(0.0, f32::max);
             let aw = keys.iter().map(|(_, a)| text_w(a)).fold(0.0, f32::max);
             kw + 10.0 + aw
         })
-        .fold(1.0, f32::max);
+        .collect();
+    let sec_w = sec_widths.iter().copied().fold(1.0, f32::max);
+    let title_w = ctx.fonts(|f| {
+        f.layout_no_wrap(
+            "Keyboard & mouse".to_string(),
+            egui::FontId::proportional(18.0),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .x
+    });
     let row_h = line_h + 3.0; // grid row + spacing
     let header_h = line_h + 8.0; // section header + the 4px space under it
     let section_h = |keys: &[(&str, &str)]| header_h + keys.len() as f32 * row_h;
@@ -1717,11 +1693,35 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
     // fullscreen); otherwise there's nothing more room to reveal.
     let truncated = (keep < SECTIONS.len() || overflow) && !inputs.is_fullscreen;
 
+    // Width of a row of `n` sections starting at `start` (sum of their measured
+    // widths + the gaps), and the fixed dialog content width every part centres in.
+    let row_w = |start: usize, end: usize| -> f32 {
+        let n = end - start;
+        sec_widths[start..end].iter().sum::<f32>() + n.saturating_sub(1) as f32 * COL_GAP
+    };
+    let mut content_w = title_w;
+    for row_start in (0..keep).step_by(cols) {
+        content_w = content_w.max(row_w(row_start, (row_start + cols).min(keep)));
+    }
+    // Approximate footer width (button text + chrome) so it can be centred too.
+    const BTN_CHROME: f32 = 22.0;
+    let buttons_w = text_w("Close")
+        + BTN_CHROME
+        + if truncated {
+            text_w("Show more") + BTN_CHROME + 8.0
+        } else {
+            0.0
+        };
+    content_w = content_w.max(buttons_w);
+
     egui::Area::new(egui::Id::new("imgvwr_help"))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             overlay_frame().show(ui, |ui| {
-                ui.set_max_width(avail_w);
+                // Fix the content width so the title, every section row, and the
+                // footer all centre against the same reference (egui won't centre a
+                // full-width horizontal group on its own).
+                ui.set_min_width(content_w);
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("Keyboard & mouse")
@@ -1735,14 +1735,17 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 // instead of pushing the footer (Close / Show more) off-screen.
                 egui::ScrollArea::vertical()
                     .max_height(avail_h.max(48.0))
-                    .auto_shrink([true, true])
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
+                        ui.set_min_width(content_w);
                         for row_start in (0..keep).step_by(cols) {
                             if row_start > 0 {
                                 ui.add_space(ROW_GAP);
                             }
                             let row_end = (row_start + cols).min(keep);
                             ui.horizontal_top(|ui| {
+                                let pad = (content_w - row_w(row_start, row_end)).max(0.0) * 0.5;
+                                ui.add_space(pad);
                                 for (j, (title, keys)) in
                                     SECTIONS[row_start..row_end].iter().enumerate()
                                 {
@@ -1775,19 +1778,18 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                         }
                     });
                 ui.add_space(12.0);
-                ui.vertical_centered(|ui| {
-                    ui.horizontal(|ui| {
-                        if truncated
-                            && clickable(ui.button("Show more"))
-                                .on_hover_text("Go fullscreen to show every shortcut")
-                                .clicked()
-                        {
-                            actions.push(UiAction::ToggleFullscreen);
-                        }
-                        if clickable(ui.button("Close")).clicked() {
-                            actions.push(UiAction::CloseHelp);
-                        }
-                    });
+                ui.horizontal(|ui| {
+                    ui.add_space((content_w - buttons_w).max(0.0) * 0.5);
+                    if truncated
+                        && clickable(ui.button("Show more"))
+                            .on_hover_text("Go fullscreen to show every shortcut")
+                            .clicked()
+                    {
+                        actions.push(UiAction::ToggleFullscreen);
+                    }
+                    if clickable(ui.button("Close")).clicked() {
+                        actions.push(UiAction::CloseHelp);
+                    }
                 });
             });
         });

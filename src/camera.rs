@@ -214,6 +214,20 @@ impl CameraController {
         }
     }
 
+    /// Wrap both the rendered and the target 2D pan into the canonical
+    /// `[-0.5, 0.5]` range (per axis). Normalising only the rendered camera would
+    /// leave the eased target far away, so a wrap-off after a long wrapped pan
+    /// would ease the image right back off-screen. No-op on `Pano`.
+    pub fn normalize_flat_pan(&mut self) {
+        let wrap = |p: f32| (p + 0.5).rem_euclid(1.0) - 0.5;
+        for cam in [&mut self.camera, &mut self.target] {
+            if let Camera::Flat { pan, .. } = cam {
+                pan.x = wrap(pan.x);
+                pan.y = wrap(pan.y);
+            }
+        }
+    }
+
     /// Pan in 2D by a UV delta — instant (drag). No-op on `Pano`.
     pub fn pan(&mut self, d_uv: Vec2) {
         for cam in [&mut self.camera, &mut self.target] {

@@ -1935,10 +1935,9 @@ impl App {
     /// canonical range so the same on-screen region maps onto the real image
     /// rather than a now-clipped tiled clone.
     fn normalize_pan_to_canonical(&mut self) {
-        if let Camera::Flat { pan, .. } = &mut self.camera.camera {
-            pan.x = (pan.x + 0.5).rem_euclid(1.0) - 0.5;
-            pan.y = (pan.y + 0.5).rem_euclid(1.0) - 0.5;
-        }
+        // Normalise both the rendered and target pan, so turning off wrap after a
+        // long wrapped pan doesn't ease the image off-screen toward a far target.
+        self.camera.normalize_flat_pan();
     }
 
     fn on_wheel(&mut self, delta: MouseScrollDelta) {
@@ -2520,25 +2519,114 @@ impl App {
                 rect.min.y + v * rect.height(),
             )
         };
-        let view_segments = match self.camera.camera {
+        let mut view_segments: Vec<Vec<egui::Pos2>> = Vec::new();
+        let mut view_fill: Vec<[egui::Pos2; 3]> = Vec::new();
+        match self.camera.camera {
             Camera::Flat { pan, .. } => {
+                // The view rectangle in image uv. With wrap on it can run past
+                // [0,1]; minimap_spans tiles each axis so the box appears on both
+                // edges of the minimap (matching the wrapped image).
                 let (hu, hv) = self.view_half_extent_uv();
                 let (cu, cv) = (0.5 + pan.x, 0.5 + pan.y);
-                vec![vec![
-                    to_pt(cu - hu, cv - hv),
-                    to_pt(cu + hu, cv - hv),
-                    to_pt(cu + hu, cv + hv),
-                    to_pt(cu - hu, cv + hv),
-                    to_pt(cu - hu, cv - hv),
-                ]]
+                let u_spans = self.minimap_spans(cu - hu, cu + hu);
+                let v_spans = self.minimap_spans(cv - hv, cv + hv);
+                for &(ua, ub) in &u_spans {
+                    for &(va, vb) in &v_spans {
+                        let (tl, tr) = (to_pt(ua, va), to_pt(ub, va));
+                        let (br, bl) = (to_pt(ub, vb), to_pt(ua, vb));
+                        view_fill.push([tl, tr, br]);
+                        view_fill.push([tl, br, bl]);
+                        view_segments.push(vec![tl, tr, br, bl, tl]);
+                    }
+                }
             }
-            Camera::Pano { .. } => self.pano_view_segments(&to_pt),
-        };
+            Camera::Pano { .. } => {
+                view_segments = self.pano_view_segments(&to_pt);
+                view_fill = self.pano_view_fill(&to_pt);
+            }
+        }
         Some(crate::ui::MinimapInfo {
             rect,
             alpha,
             view_segments,
+            view_fill,
         })
+    }
+
+    /// Split an image-uv interval `[a, b]` (one view-box axis) into the minimap's
+    /// local `[0,1]` segments. Without wrap it's the clamped overlap with the image
+    /// (a single span). With 2D wrap on it tiles: the parts of the interval that
+    /// fall in each unit cell map back into `[0,1]`, so a box that runs off one
+    /// edge reappears on the other.
+    fn minimap_spans(&self, a: f32, b: f32) -> Vec<(f32, f32)> {
+        if a >= b {
+            return Vec::new();
+        }
+        if !self.wrap_2d {
+            let (lo, hi) = (a.max(0.0), b.min(1.0));
+            return if hi > lo { vec![(lo, hi)] } else { Vec::new() };
+        }
+        if b - a >= 1.0 {
+            return vec![(0.0, 1.0)]; // covers the whole axis
+        }
+        let mut out = Vec::new();
+        let k0 = a.floor() as i32;
+        let k1 = (b - 1e-6).floor() as i32;
+        for k in k0..=k1 {
+            let lo = (a.max(k as f32) - k as f32).clamp(0.0, 1.0);
+            let hi = (b.min((k + 1) as f32) - k as f32).clamp(0.0, 1.0);
+            if hi > lo {
+                out.push((lo, hi));
+            }
+        }
+        out
+    }
+
+    /// The panorama view region as a filled triangle mesh on the minimap: project a
+    /// grid over the window interior to equirect uv and emit two triangles per cell,
+    /// skipping cells that straddle the longitude seam. This fills the region
+    /// correctly however concave it is (e.g. a steep-pitch view wrapping a pole),
+    /// where a single boundary polygon would mis-tessellate.
+    fn pano_view_fill(&self, to_pt: &impl Fn(f32, f32) -> egui::Pos2) -> Vec<[egui::Pos2; 3]> {
+        let (vw, vh) = self.viewport();
+        let (vw, vh) = (vw as f64, vh as f64);
+        const N: usize = 16; // grid cells per axis
+        let stride = N + 1;
+        let mut grid: Vec<Option<(f32, f32)>> = Vec::with_capacity(stride * stride);
+        for j in 0..=N {
+            for i in 0..=N {
+                let px = i as f64 / N as f64 * vw;
+                let py = j as f64 / N as f64 * vh;
+                grid.push(self.viewport_uv(px, py));
+            }
+        }
+        let mut tris = Vec::new();
+        for j in 0..N {
+            for i in 0..N {
+                let corners = [
+                    grid[j * stride + i],
+                    grid[j * stride + i + 1],
+                    grid[(j + 1) * stride + i + 1],
+                    grid[(j + 1) * stride + i],
+                ];
+                let (Some(a), Some(b), Some(c), Some(d)) =
+                    (corners[0], corners[1], corners[2], corners[3])
+                else {
+                    continue;
+                };
+                let us = [a.0, b.0, c.0, d.0];
+                let umin = us.iter().copied().fold(f32::INFINITY, f32::min);
+                let umax = us.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                if umax - umin > 0.5 {
+                    continue; // straddles the longitude seam
+                }
+                let (pa, pb) = (to_pt(a.0, a.1), to_pt(b.0, b.1));
+                let (pc, pd) = (to_pt(c.0, c.1), to_pt(d.0, d.1));
+                tris.push([pa, pb, pc]);
+                tris.push([pa, pc, pd]);
+            }
+        }
+        tris
     }
 
     /// The panorama view region as polylines on the minimap: sample the window
@@ -3080,12 +3168,19 @@ impl App {
                     *fov_deg = v;
                 }
             }
-            Camera::Flat { zoom, .. } => {
+            Camera::Flat { zoom, pan } => {
                 if let Some(v) = f("IMGVWR_DEBUG_ZOOM") {
                     *zoom = v;
                 }
+                if let Some(v) = f("IMGVWR_DEBUG_PAN_X") {
+                    pan.x = v;
+                }
+                if let Some(v) = f("IMGVWR_DEBUG_PAN_Y") {
+                    pan.y = v;
+                }
             }
         }
+        self.camera.settle();
     }
 
     // ---- UI --------------------------------------------------------------

@@ -46,6 +46,9 @@ pub struct AppPreferences {
     /// Background colour (sRGB 0–255) shown behind transparent images.
     #[serde(default = "default_background_color")]
     pub background_color: [u8; 3],
+    /// Auto-pick a starting exposure for HDR panoramas on load.
+    #[serde(default = "default_true")]
+    pub auto_exposure: bool,
 }
 
 fn default_corner_radius() -> u32 {
@@ -54,6 +57,10 @@ fn default_corner_radius() -> u32 {
 
 fn default_background_color() -> [u8; 3] {
     [5, 5, 5]
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppPreferences {
@@ -65,6 +72,7 @@ impl Default for AppPreferences {
             startup_monitor: None,
             corner_radius: default_corner_radius(),
             background_color: default_background_color(),
+            auto_exposure: true,
         }
     }
 }

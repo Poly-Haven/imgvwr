@@ -1180,7 +1180,7 @@ impl App {
             // Auto-expose HDR panoramas: pick the starting exposure so the
             // average linear value lands on AUTO_EXPOSURE_TARGET. (No-op for
             // 8-bit images, where average_linear_luminance returns None.)
-            if equirect {
+            if equirect && self.prefs.auto_exposure {
                 if let Some(luma) = data.average_linear_luminance() {
                     if luma > 1e-6 {
                         self.exposure = (AUTO_EXPOSURE_TARGET / luma).log2().clamp(-16.0, 16.0);
@@ -2542,6 +2542,7 @@ impl App {
             monitors: self.monitor_list(),
             startup_display: self.prefs.startup_monitor.clone(),
             corner_radius: self.prefs.corner_radius,
+            auto_exposure: self.prefs.auto_exposure,
             background_color: self.prefs.background_color,
             is_maximized: self.gfx.as_ref().is_some_and(|g| g.window.is_maximized()),
             resize_cursor: if self.dragging || self.window_drag_armed {
@@ -2816,6 +2817,18 @@ impl App {
                 }
             }
             UiAction::ResetAdjustments => self.reset_image_processing(),
+            UiAction::SetAutoExposure(on) => {
+                self.prefs.auto_exposure = on;
+                self.prefs.save();
+                self.show_toast(
+                    if on {
+                        "Auto-exposure on"
+                    } else {
+                        "Auto-exposure off"
+                    }
+                    .to_string(),
+                );
+            }
             UiAction::OpenSettings => {
                 self.ui_state.show_settings = true;
                 self.ui_state.confirm_default = false;

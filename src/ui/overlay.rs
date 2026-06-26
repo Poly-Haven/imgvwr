@@ -430,6 +430,16 @@ fn settings_dialog(
                 });
                 ui.add_space(14.0);
 
+                // Auto-exposure for HDR panoramas on load.
+                let mut auto = inputs.auto_exposure;
+                if ui
+                    .checkbox(&mut auto, "Auto-expose HDR panoramas on open")
+                    .changed()
+                {
+                    actions.push(UiAction::SetAutoExposure(auto));
+                }
+                ui.add_space(14.0);
+
                 // Set as default viewer, with a confirmation step.
                 if state.confirm_default {
                     ui.label("Make imgvwr the default viewer for all supported image types?");

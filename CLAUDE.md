@@ -44,5 +44,12 @@ cargo build --release
   easing, and let the single synchronous `Resized` render present each size once (vsync-paced).
   `follow_zoom_with_window` frames against the in-flight `window_anim_target` height (not the
   lagging current size) so zoom gain per notch is scroll-speed-independent.
+- **The borderless window keeps `WS_CAPTION | WS_SIZEBOX`.** winit's `with_decorations(false)`
+  does NOT strip the caption/sizing-border styles (it needs them for Aero-snap) — it hides them
+  via `WM_NCCALCSIZE` only. So `DefWindowProc` still paints the classic GDI frame on
+  `WM_NCACTIVATE` / `WM_NCPAINT` (focus change, restore-from-minimize), flashing an old-style
+  titlebar. `suppress_nonclient_frame` subclasses the proc to swallow `WM_NCPAINT` and forward
+  `WM_NCACTIVATE` with `lParam = -1`; don't "fix" this by stripping styles (breaks snap/resize)
+  or by leaning on `DWMWA_NCRENDERING_POLICY` (that's the DWM frame, not the GDI one).
 - rawler's `raw_metadata` is brittle (rejects some decodable files); raw EXIF orientation is read
   directly from the TIFF tag instead (`read_tiff_orientation` in `image_loader/formats.rs`).

@@ -1719,8 +1719,9 @@ impl App {
         self.isolate_channel = None;
         self.sharpness = false;
         self.guides.clear();
-        // Drop any in-flight ruler spawn-drag index so it can't point at a
+        // Drop any in-flight guide gesture so its release can't touch a
         // since-cleared guide (the gesture's release, if any, becomes a no-op).
+        self.guide_drag = None;
         self.ui_state.guide_spawn = None;
         self.diff_slot = None;
         if let Some(gfx) = &mut self.gfx {
@@ -1793,8 +1794,10 @@ impl App {
         self.wrap_2d = s.wrap_2d;
         self.nearest_filter = s.nearest_filter;
         self.image_stretch = s.image_stretch;
-        // Cancel any in-flight ruler spawn so its release can't touch the restored
-        // guides, and clear the hover highlight.
+        // Cancel any in-flight guide gesture (grab or ruler-spawn) so its release
+        // can't move/keep/delete a guide against the just-replaced vector, and clear
+        // the hover highlight.
+        self.guide_drag = None;
         self.ui_state.guide_spawn = None;
         self.ui_state.hovered_guide = None;
         self.request_redraw();
@@ -4329,6 +4332,17 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { event, .. }
                 if !egui_consumed && event.state == ElementState::Pressed =>
             {
+                // OS auto-repeat only drives folder navigation (hold ← / → to flip
+                // through images). Every other key acts once per physical press, so
+                // a held adjustment/toggle/guide key can't ramp and flood the undo
+                // stack (and held zoom/rotate can't run away).
+                let nav_repeat = matches!(
+                    &event.logical_key,
+                    Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowRight)
+                );
+                if event.repeat && !nav_repeat {
+                    return;
+                }
                 // Numpad digits = exact zoom; top-row digits = comparator slots
                 // (Ctrl+N saves, N recalls).
                 if let Some(digit) = numpad_digit(&event.physical_key) {

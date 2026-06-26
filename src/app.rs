@@ -92,6 +92,10 @@ const DBLCLICK_DRAG_TOL: f32 = 6.0;
 /// Navigation minimap geometry (egui points): longest side and edge margin.
 const MINIMAP_MAX: f32 = 200.0;
 const MINIMAP_MARGIN: f32 = 16.0;
+/// Samples per window edge / grid cells per axis for the panorama minimap view
+/// region. Shared by the outline and the fill so the filled mesh boundary lands
+/// exactly on the outline (no triangular gap between a coarse fill and finer line).
+const PANO_VIEW_SAMPLES: usize = 40;
 /// Auto-shown minimap (2D pan/zoom): stays fully visible for `MINIMAP_HOLD` after
 /// the last view change, then fades over `MINIMAP_FADE`.
 const MINIMAP_HOLD: Duration = Duration::from_millis(1800);
@@ -2647,47 +2651,63 @@ impl App {
     }
 
     /// The panorama view region as a filled triangle mesh on the minimap: project a
-    /// grid over the window interior to equirect uv and emit two triangles per cell,
-    /// skipping cells that straddle the longitude seam. This fills the region
-    /// correctly however concave it is (e.g. a steep-pitch view wrapping a pole),
-    /// where a single boundary polygon would mis-tessellate.
+    /// grid over the window interior to equirect uv and emit two triangles per cell.
+    /// The grid resolution matches the outline ([`PANO_VIEW_SAMPLES`]) so the fill
+    /// boundary lands on the outline (no triangular gap). Cells straddling the
+    /// longitude seam are unwrapped and emitted at both `u` and `u-1`, so the fill
+    /// reaches both minimap edges (the painter clip trims the overflow) instead of
+    /// leaving a hole. This fills correctly however concave the region is (e.g. a
+    /// steep-pitch view wrapping a pole), where a single boundary polygon would
+    /// mis-tessellate.
     fn pano_view_fill(&self, to_pt: &impl Fn(f32, f32) -> egui::Pos2) -> Vec<[egui::Pos2; 3]> {
         let (vw, vh) = self.viewport();
         let (vw, vh) = (vw as f64, vh as f64);
-        const N: usize = 16; // grid cells per axis
-        let stride = N + 1;
+        let n = PANO_VIEW_SAMPLES;
+        let stride = n + 1;
         let mut grid: Vec<Option<(f32, f32)>> = Vec::with_capacity(stride * stride);
-        for j in 0..=N {
-            for i in 0..=N {
-                let px = i as f64 / N as f64 * vw;
-                let py = j as f64 / N as f64 * vh;
+        for j in 0..=n {
+            for i in 0..=n {
+                let px = i as f64 / n as f64 * vw;
+                let py = j as f64 / n as f64 * vh;
                 grid.push(self.viewport_uv(px, py));
             }
         }
-        let mut tris = Vec::new();
-        for j in 0..N {
-            for i in 0..N {
-                let corners = [
+        let mut tris: Vec<[egui::Pos2; 3]> = Vec::new();
+        let quad = |tris: &mut Vec<[egui::Pos2; 3]>,
+                    a: (f32, f32),
+                    b: (f32, f32),
+                    c: (f32, f32),
+                    d: (f32, f32)| {
+            let (pa, pb) = (to_pt(a.0, a.1), to_pt(b.0, b.1));
+            let (pc, pd) = (to_pt(c.0, c.1), to_pt(d.0, d.1));
+            tris.push([pa, pb, pc]);
+            tris.push([pa, pc, pd]);
+        };
+        for j in 0..n {
+            for i in 0..n {
+                let (Some(a), Some(b), Some(c), Some(d)) = (
                     grid[j * stride + i],
                     grid[j * stride + i + 1],
                     grid[(j + 1) * stride + i + 1],
                     grid[(j + 1) * stride + i],
-                ];
-                let (Some(a), Some(b), Some(c), Some(d)) =
-                    (corners[0], corners[1], corners[2], corners[3])
-                else {
+                ) else {
                     continue;
                 };
                 let us = [a.0, b.0, c.0, d.0];
                 let umin = us.iter().copied().fold(f32::INFINITY, f32::min);
                 let umax = us.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                 if umax - umin > 0.5 {
-                    continue; // straddles the longitude seam
+                    // Straddles the seam: lift the low-u corners by +1 so the cell is
+                    // contiguous near u≈1, then emit it AND a copy shifted by −1 so
+                    // it fills the panel's right and left edges around the wrap.
+                    let un = |p: (f32, f32)| (if p.0 < 0.5 { p.0 + 1.0 } else { p.0 }, p.1);
+                    let (a, b, c, d) = (un(a), un(b), un(c), un(d));
+                    quad(&mut tris, a, b, c, d);
+                    let sh = |p: (f32, f32)| (p.0 - 1.0, p.1);
+                    quad(&mut tris, sh(a), sh(b), sh(c), sh(d));
+                } else {
+                    quad(&mut tris, a, b, c, d);
                 }
-                let (pa, pb) = (to_pt(a.0, a.1), to_pt(b.0, b.1));
-                let (pc, pd) = (to_pt(c.0, c.1), to_pt(d.0, d.1));
-                tris.push([pa, pb, pc]);
-                tris.push([pa, pc, pd]);
             }
         }
         tris
@@ -2700,7 +2720,7 @@ impl App {
     fn pano_view_segments(&self, to_pt: &impl Fn(f32, f32) -> egui::Pos2) -> Vec<Vec<egui::Pos2>> {
         let (vw, vh) = self.viewport();
         let (vw, vh) = (vw as f64, vh as f64);
-        const K: usize = 48; // samples per window edge
+        const K: usize = PANO_VIEW_SAMPLES; // samples per window edge (matches the fill)
         let mut border: Vec<(f64, f64)> = Vec::with_capacity(K * 4 + 1);
         for i in 0..K {
             border.push((i as f64 / K as f64 * vw, 0.0)); // top L→R
@@ -3820,12 +3840,12 @@ impl App {
                 .filter(|&i| i < guide_n)
                 .map(|i| i as i32)
                 .unwrap_or(-1),
-            // While grabbing a guide it's drawn in a hue halfway between the base
-            // and the hover (inverse) colour (a 90° rotation); a plain hover uses
-            // the full inverse hue.
+            // While grabbing a guide — or dragging a fresh one out of a ruler — it's
+            // drawn in a hue halfway between the base and the hover (inverse) colour
+            // (a 90° rotation); a plain hover uses the full inverse hue.
             guide_hover_color: {
                 let base = srgb_u8_to_f32(self.prefs.guide_color);
-                if self.guide_drag.is_some() {
+                if self.guide_drag.is_some() || self.ui_state.guide_spawn.is_some() {
                     shift_hue(base, 90.0)
                 } else {
                     inverse_hue(base)
@@ -4072,13 +4092,14 @@ impl ApplicationHandler<UserEvent> for App {
                 // Hover highlight: the dragged guide, else the one under the
                 // cursor — but not while panning/stretching/resizing (the cursor
                 // is grabbed and hidden then, so a stray highlight just flickers).
-                self.ui_state.hovered_guide = self.guide_drag.or_else(|| {
-                    if self.dragging || self.stretching || self.alt_resize.is_some() {
-                        None
-                    } else {
-                        self.guide_at_cursor()
-                    }
-                });
+                self.ui_state.hovered_guide =
+                    self.guide_drag.or(self.ui_state.guide_spawn).or_else(|| {
+                        if self.dragging || self.stretching || self.alt_resize.is_some() {
+                            None
+                        } else {
+                            self.guide_at_cursor()
+                        }
+                    });
                 self.tick_bottom_panel();
                 self.tick_left_ruler();
                 self.tick_metadata();

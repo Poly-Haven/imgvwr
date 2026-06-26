@@ -1719,10 +1719,12 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             overlay_frame().show(ui, |ui| {
-                // Fix the content width so the title, every section row, and the
-                // footer all centre against the same reference (egui won't centre a
-                // full-width horizontal group on its own).
-                ui.set_min_width(content_w);
+                // Fix the content width (bounded — content_w ≤ avail_w) so the
+                // title, every section row, and the footer all centre against the
+                // same reference (egui won't centre a full-width horizontal group
+                // on its own). set_width, not set_min_width, so an auto-sizing Area
+                // can't let the body expand past the window.
+                ui.set_width(content_w);
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("Keyboard & mouse")
@@ -1734,11 +1736,13 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ui.add_space(10.0);
                 // Cap the body height so a too-short window scrolls the sections
                 // instead of pushing the footer (Close / Show more) off-screen.
+                // auto_shrink horizontal stays TRUE so the scroll viewport hugs the
+                // content_w-wide rows rather than ballooning in the unbounded Area.
                 egui::ScrollArea::vertical()
                     .max_height(avail_h.max(48.0))
-                    .auto_shrink([false, true])
+                    .auto_shrink([true, true])
                     .show(ui, |ui| {
-                        ui.set_min_width(content_w);
+                        ui.set_width(content_w);
                         for row_start in (0..keep).step_by(cols) {
                             if row_start > 0 {
                                 ui.add_space(ROW_GAP);

@@ -21,7 +21,7 @@ uniform int   u_diff;                // 1 = show |image - slot| (the slot diff c
 uniform sampler2D u_diff_image;      // the comparator slot's image (for u_diff)
 // Guide lines, each .x = image coordinate (0..1), .y = 0 vertical / 1 horizontal.
 uniform int   u_guide_count;
-uniform vec2  u_guides[32];
+uniform vec2  u_guides[64];
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb

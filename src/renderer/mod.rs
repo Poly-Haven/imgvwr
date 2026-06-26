@@ -30,6 +30,11 @@ const OCIO_FIRST_UNIT: u32 = 1;
 /// Texture unit for the slot-difference image (above any plausible LUT count).
 const DIFF_UNIT: u32 = 12;
 
+/// Maximum simultaneous guide lines. Sized to hold a full 1/32 grid on both
+/// axes (31 + 31 = 62 lines). Must match the `u_guides[..]` array in the
+/// fragment shader.
+pub const MAX_GUIDES: usize = 64;
+
 /// Per-frame uniform values supplied by the application.
 #[derive(Clone, Copy, Debug)]
 pub struct RenderParams {
@@ -57,7 +62,8 @@ pub struct RenderParams {
     /// Show the absolute difference against the loaded comparator-slot image.
     pub diff: bool,
     /// Guide lines: `[image_coord (0..1), orientation (0=vertical/1=horizontal)]`.
-    pub guides: [[f32; 2]; 32],
+    /// Capped at [`MAX_GUIDES`] (a full 1/32 grid on both axes = 62 lines).
+    pub guides: [[f32; 2]; MAX_GUIDES],
     pub guide_count: i32,
     /// Clarity (local-contrast) strength; 0 bypasses the whole post chain.
     pub clarity_amount: f32,
@@ -84,7 +90,7 @@ impl Default for RenderParams {
             stretch: [1.0, 1.0],
             sharpness: false,
             diff: false,
-            guides: [[0.0; 2]; 32],
+            guides: [[0.0; 2]; MAX_GUIDES],
             guide_count: 0,
             clarity_amount: 0.0,
             clarity_radius: 64.0,
@@ -468,7 +474,7 @@ impl Renderer {
                 gl.active_texture(glow::TEXTURE0 + DIFF_UNIT);
                 gl.bind_texture(glow::TEXTURE_2D, self.diff_texture);
             }
-            let n = params.guide_count.clamp(0, 32) as usize;
+            let n = params.guide_count.clamp(0, MAX_GUIDES as i32) as usize;
             gl.uniform_1_i32(u.guide_count.as_ref(), n as i32);
             if n > 0 {
                 gl.uniform_2_f32_slice(

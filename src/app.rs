@@ -219,7 +219,8 @@ pub struct App {
     stretching: bool,
     /// Sharpness checker (S): show the original-resolution high-pass.
     sharpness: bool,
-    /// Guide lines: `[image_coord (0..1), 0=vertical / 1=horizontal]` (max 32).
+    /// Guide lines: `[image_coord (0..1), 0=vertical / 1=horizontal]`
+    /// (max [`crate::renderer::MAX_GUIDES`]).
     guides: Vec<[f32; 2]>,
     show_metadata: bool,
 
@@ -1512,9 +1513,10 @@ impl App {
     }
 
     /// Add a guide line (image coord 0..1; `horizontal` = a constant-image-y
-    /// line). Capped at 32. Guides clear with the image or Ctrl+R.
+    /// line). Capped at [`crate::renderer::MAX_GUIDES`]. Guides clear with the
+    /// image or Ctrl+R.
     fn add_guide(&mut self, coord: f32, horizontal: bool) {
-        if self.guides.len() < 32 {
+        if self.guides.len() < crate::renderer::MAX_GUIDES {
             self.guides
                 .push([coord.clamp(0.0, 1.0), if horizontal { 1.0 } else { 0.0 }]);
             self.show_toast("Guide added".to_string());
@@ -1532,10 +1534,11 @@ impl App {
 
     /// The G key adds the next guide in a fixed sequence: horizontal then vertical
     /// at 50%, then the quarters (¼, ¾) H then V, then the eighths, and so on —
-    /// always the first canonical position not already present.
+    /// always the first canonical position not already present. Stops once the
+    /// grid is complete down to 1/32 divisions on each axis (62 lines).
     fn add_next_guide(&mut self) {
         let mut denom = 2u32;
-        while denom <= 256 {
+        while denom <= 32 {
             // Odd numerators are the positions new at this level (even ones belong
             // to a coarser level already covered).
             for horizontal in [true, false] {
@@ -2966,8 +2969,8 @@ impl App {
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();
         let cam = self.camera.camera;
-        let mut guide_arr = [[0.0f32; 2]; 32];
-        let guide_n = self.guides.len().min(32);
+        let mut guide_arr = [[0.0f32; 2]; crate::renderer::MAX_GUIDES];
+        let guide_n = self.guides.len().min(crate::renderer::MAX_GUIDES);
         guide_arr[..guide_n].copy_from_slice(&self.guides[..guide_n]);
         let base = RenderParams {
             viewport: (1, 1),

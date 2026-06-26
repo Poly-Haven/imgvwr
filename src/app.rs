@@ -809,7 +809,15 @@ impl App {
         };
         // A zoom overrides any earlier manual resize.
         self.manual_window = false;
-        let (_, vh) = self.viewport();
+        // Frame against the in-flight follow target's height when an ease is
+        // already running, not the current (lagging) window height: each notch
+        // then compounds the zoom by the same factor regardless of how fast the
+        // user scrolls. Anchoring to the lagging size makes a fast burst zoom
+        // far less per notch than the same number of slow clicks.
+        let vh = self
+            .window_anim_target
+            .map(|(_, sz)| sz.height as f32)
+            .unwrap_or_else(|| self.viewport().1);
         // Target on-screen scale: device pixels per image pixel (100% == 1.0).
         let scale = zoom * vh / img_h as f32;
         // Frame the image at `scale`, scaled down uniformly (keeping the image's
@@ -889,21 +897,23 @@ impl App {
         });
         if computed.is_some() {
             self.window_anim_target = computed;
-            // Kick off the geometry animation: this first step posts a resize,
-            // whose Resized event draws and advances the next step (a self-
-            // sustaining, vsync-gated chain — see `ease_window`).
-            self.last_window_ease = None;
-            self.ease_window();
+            // Just retarget; `about_to_wait` advances the ease one step per loop
+            // iteration (after OS input is processed, so a fast scroll burst
+            // isn't starved). A redundant per-notch reseed here is what made
+            // fast zooming lurch. The redraw kicks the loop into its easing path.
+            self.request_redraw();
         }
     }
 
     /// Advance the window's outer rect one step toward `window_anim_target`,
-    /// returning true while still moving. Driven by the `Resized` event chain
-    /// (each step posts a `SetWindowPos`, whose `Resized` draws the new size and
-    /// calls this again) — one resize per presented frame, vsync-gated, so the
-    /// geometry animates at the refresh rate with no queued-resize backlog. The
-    /// move + resize go through a single atomic `SetWindowPos`. Self-timed (its
-    /// own `dt`) since it's not on the render clock.
+    /// returning true while still moving. Called once per loop iteration from
+    /// `about_to_wait` (NOT from the `Resized` handler): each step posts one
+    /// `SetWindowPos`, whose `Resized` renders the new size synchronously (one
+    /// vsync-gated present), then the loop yields — processing any queued scroll
+    /// input — before the next step. Driving it from `Resized` instead would
+    /// drain the whole chain before yielding and starve input (fast-scroll
+    /// shudder). The move + resize go through a single atomic `SetWindowPos`.
+    /// Self-timed (its own `dt`) since it's not on the render clock.
     fn ease_window(&mut self) -> bool {
         if self.fullscreen {
             self.window_anim_target = None;
@@ -2964,12 +2974,13 @@ impl ApplicationHandler<UserEvent> for App {
                 if !programmatic && !special && self.loaded_path.is_some() {
                     self.manual_window = true;
                 }
-                // Advance the geometry ease one step: this just presented the new
-                // size, so post the next resize (whose Resized presents again) —
-                // a vsync-gated, one-resize-per-present chain. No-op when idle.
-                if self.alt_resize.is_none() {
-                    self.ease_window();
-                }
+                // The geometry ease is advanced in `about_to_wait`, NOT here:
+                // posting the next resize from this handler self-perpetuates
+                // before the loop yields, starving OS input (queued scroll
+                // notches) until the window settles — the fast-scroll shudder.
+                // Advancing from `about_to_wait` lets input be processed between
+                // every step while this synchronous render still presents each
+                // size exactly once (vsync-paced, no double-present).
             }
             WindowEvent::RedrawRequested => {
                 if matches!(self.render(), RenderOutcome::Captured) {
@@ -3097,6 +3108,16 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.exit();
             return;
         }
+        // Advance the window-follow geometry ease one step per loop iteration —
+        // HERE, after this iteration's OS input was processed, so a fast scroll
+        // burst keeps retargeting smoothly instead of being starved by a
+        // self-perpetuating Resized chain. The posted resize's Resized event
+        // renders the new size synchronously (one present, vsync-paced via the
+        // blocking swap). No-op when no follow target is pending.
+        let easing = self.alt_resize.is_none() && self.window_anim_target.is_some();
+        if easing {
+            self.ease_window();
+        }
         if self.capture_active() {
             // Drive continuous frames while a capture is pending.
             event_loop.set_control_flow(ControlFlow::Poll);
@@ -3107,6 +3128,11 @@ impl ApplicationHandler<UserEvent> for App {
             // Drive frames while decoding (spinner) or uploading (pump + bar).
             event_loop.set_control_flow(ControlFlow::Poll);
             self.request_redraw();
+        } else if easing {
+            // Keep the loop spinning at vsync rate so the next ease step follows
+            // promptly. No request_redraw: the Resized render above is the frame;
+            // adding one would double-present (the old slow-mo regression).
+            event_loop.set_control_flow(ControlFlow::Poll);
         } else if self.toast_active() || self.animating {
             // Drive ~60 fps while the toast fades or the zoom/pan eases. Both
             // settle quickly, after which we fall through to `Wait` (idle 0% CPU).

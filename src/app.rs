@@ -1599,6 +1599,24 @@ impl App {
         }
     }
 
+    /// Remove guide `idx`, reconciling the in-flight drag/hover indices so a
+    /// removal during an LMB guide-drag (e.g. a concurrent right-click delete)
+    /// keeps the drag targeting the same line instead of silently shifting onto
+    /// the guide that slid into the freed slot.
+    fn remove_guide(&mut self, idx: usize) {
+        if idx >= self.guides.len() {
+            return;
+        }
+        self.guides.remove(idx);
+        match self.guide_drag {
+            Some(d) if d == idx => self.guide_drag = None,
+            Some(d) if d > idx => self.guide_drag = Some(d - 1),
+            _ => {}
+        }
+        self.ui_state.hovered_guide = None;
+        self.request_redraw();
+    }
+
     /// Is there already a guide at `pos` (image fraction) with this orientation?
     fn has_guide(&self, pos: f32, horizontal: bool) -> bool {
         let orient = if horizontal { 1.0 } else { 0.0 };
@@ -2234,33 +2252,40 @@ impl App {
         let uvy = self.viewport_uv(cx, cy + 1.0)?; // +1px screen-y (for d uv/dy)
         let pano = self.camera.is_panorama();
         let mut best: Option<(usize, f32)> = None;
+        // Seam-unwrap a per-pixel uv.x delta (longitude wraps in panorama).
+        let unwrap = |mut d: f32| {
+            if pano {
+                if d > 0.5 {
+                    d -= 1.0;
+                } else if d < -0.5 {
+                    d += 1.0;
+                }
+            }
+            d
+        };
         for (i, g) in self.guides.iter().enumerate() {
+            // Screen-pixel distance, normalised by the FULL local gradient
+            // (|d/dx| + |d/dy|) of the relevant uv axis — matching the shader's
+            // fwidth so a tilted panorama guide is hit where it's actually drawn.
             let dist = if g[1] >= 0.5 {
-                // Horizontal guide: constant uv.y → distance measured in screen-y.
-                let d = uvy.1 - uv0.1;
-                if d.abs() < 1e-9 {
+                // Horizontal guide: constant uv.y.
+                let grad = (uvx.1 - uv0.1).abs() + (uvy.1 - uv0.1).abs();
+                if grad < 1e-9 {
                     f32::INFINITY
                 } else {
-                    (uv0.1 - g[0]).abs() / d.abs()
+                    (uv0.1 - g[0]).abs() / grad
                 }
             } else {
-                // Vertical guide: constant uv.x → distance in screen-x.
-                let mut d = uvx.0 - uv0.0;
+                // Vertical guide: constant uv.x (circular distance in pano).
+                let grad = unwrap(uvx.0 - uv0.0).abs() + unwrap(uvy.0 - uv0.0).abs();
                 let mut delta = (uv0.0 - g[0]).abs();
                 if pano {
-                    // Unwrap the longitude seam in the derivative + use the
-                    // circular distance to the meridian.
-                    if d > 0.5 {
-                        d -= 1.0;
-                    } else if d < -0.5 {
-                        d += 1.0;
-                    }
                     delta = delta.min(1.0 - delta);
                 }
-                if d.abs() < 1e-9 {
+                if grad < 1e-9 {
                     f32::INFINITY
                 } else {
-                    delta / d.abs()
+                    delta / grad
                 }
             };
             if dist <= GRAB_PX && best.is_none_or(|(_, b)| dist < b) {
@@ -2588,11 +2613,7 @@ impl App {
                 // right-drag never pans). Alt+right is the third-resize, handled
                 // earlier in the event router, so it never reaches here.
                 if let Some(idx) = self.guide_at_cursor() {
-                    if idx < self.guides.len() {
-                        self.guides.remove(idx);
-                        self.ui_state.hovered_guide = None;
-                        self.request_redraw();
-                    }
+                    self.remove_guide(idx);
                 }
             }
             (ElementState::Pressed, MouseButton::Middle) => {
@@ -3111,16 +3132,7 @@ impl App {
                     self.request_redraw();
                 }
             }
-            UiAction::RemoveGuide(i) => {
-                if i < self.guides.len() {
-                    self.guides.remove(i);
-                    // Drop the stale hover index: removing shifts the guides down,
-                    // so a held `hovered_guide` would briefly light up whatever
-                    // guide slid into its slot. Re-set next frame by the UI.
-                    self.ui_state.hovered_guide = None;
-                    self.request_redraw();
-                }
-            }
+            UiAction::RemoveGuide(i) => self.remove_guide(i),
             UiAction::ResetAdjustments => self.reset_image_processing(),
             UiAction::SetAutoExposure(on) => {
                 self.prefs.auto_exposure = on;
@@ -3477,8 +3489,16 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                 }
-                // Hover highlight: the dragged guide, else the one under the cursor.
-                self.ui_state.hovered_guide = self.guide_drag.or_else(|| self.guide_at_cursor());
+                // Hover highlight: the dragged guide, else the one under the
+                // cursor — but not while panning/stretching/resizing (the cursor
+                // is grabbed and hidden then, so a stray highlight just flickers).
+                self.ui_state.hovered_guide = self.guide_drag.or_else(|| {
+                    if self.dragging || self.stretching || self.alt_resize.is_some() {
+                        None
+                    } else {
+                        self.guide_at_cursor()
+                    }
+                });
                 self.tick_bottom_panel();
                 self.tick_left_ruler();
                 self.tick_metadata();

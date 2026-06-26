@@ -131,8 +131,10 @@ fn nice_degrees(raw: f32) -> f32 {
 fn pano_rotate(p: &PanoProj, rx: f32, ry: f32, rz: f32) -> (f32, f32, f32) {
     let (cy, sy) = (p.yaw.cos(), p.yaw.sin());
     let (cp, sp) = (p.pitch.cos(), p.pitch.sin());
-    let py = cp * ry - sp * rz; // pitch about X …
-    let pz = sp * ry + cp * rz;
+    // Pitch about X — must match the shader's `mp` exactly (the transpose would
+    // flip the latitude ruler's sign whenever the panorama is pitched) …
+    let py = cp * ry + sp * rz;
+    let pz = -sp * ry + cp * rz;
     (cy * rx - sy * pz, py, sy * rx + cy * pz) // … then yaw about Y
 }
 

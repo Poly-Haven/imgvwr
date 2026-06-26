@@ -119,7 +119,17 @@ void main() {
     // when zoomed out, vanishing only at LOD 0.) Kept in source space so the
     // exposure / view / clarity below still amplify it.
     if (u_diff != 0) {
-        texel = vec4(texture(u_diff_image, uv).rgb, 1.0);
+        // Sample with a seam-corrected gradient (the same longitude unwrap the
+        // image sampler uses), so a minified panorama diff doesn't flash the
+        // coarsest-mip column at the wrap where dFdx(uv.x) ≈ 1. In 2D the
+        // gradient is unchanged.
+        vec2 ddxd = dFdx(uv);
+        vec2 ddyd = dFdy(uv);
+        if (u_projection_mode != 1) {
+            if (abs(ddxd.x) > 0.5) ddxd.x -= sign(ddxd.x);
+            if (abs(ddyd.x) > 0.5) ddyd.x -= sign(ddyd.x);
+        }
+        texel = vec4(textureGrad(u_diff_image, uv, ddxd, ddyd).rgb, 1.0);
     }
     // Sharpness checker: |original - 2px-blurred original|, from the ORIGINAL
     // full-resolution pixels (LOD 0), not the displayed mip. Done here in source

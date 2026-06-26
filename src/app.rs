@@ -1314,6 +1314,15 @@ impl App {
             return;
         };
         self.slots[n - 1] = Some(cur);
+        // Overwriting the slot currently being diffed against would otherwise leave
+        // a stale precomputed diff (vs the old slot content) on screen — turn it
+        // off so the comparison can't silently go wrong.
+        if self.diff_slot == Some(n - 1) {
+            self.diff_slot = None;
+            if let Some(gfx) = &mut self.gfx {
+                gfx.renderer.set_diff_image(None);
+            }
+        }
         self.recompute_active_slot();
         self.show_toast(format!("Saved slot {n}"));
         self.request_redraw();
@@ -1342,6 +1351,18 @@ impl App {
         let Some(current) = self.current_image.clone() else {
             return;
         };
+        // Reject oversize images BEFORE the (O(w·h), GB-scale-allocating) CPU diff
+        // — the diff texture is current-sized, so if it can't be uploaded the whole
+        // precompute would be wasted work / a multi-second freeze for nothing.
+        let max_size = self
+            .gfx
+            .as_ref()
+            .map(|g| g.renderer.max_texture_size())
+            .unwrap_or(0);
+        if current.width.max(current.height) as i32 > max_size {
+            self.show_toast("Image too large to diff".to_string());
+            return;
+        }
         let Some(diff) = abs_diff_image(&current, &slot) else {
             self.show_toast("Can't diff (different pixel types)".to_string());
             return;

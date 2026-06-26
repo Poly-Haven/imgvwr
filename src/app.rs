@@ -2009,11 +2009,13 @@ impl App {
             .collect()
     }
 
-    /// True when the window is too small to comfortably overlay the metadata box
-    /// (so its hover auto-reveal is suppressed).
+    /// True when the window is too small to comfortably overlay the auto-hiding
+    /// panels. One predictable threshold for ALL of them (bottom panel, metadata
+    /// box, rulers) so a tiny window doesn't keep popping a panel over most of
+    /// itself — the titlebar is the only auto-hiding chrome that still reveals.
     fn window_is_small(&self) -> bool {
         let (vw, vh) = self.viewport();
-        vw < 480.0 || vh < 360.0
+        vw < 550.0 || vh < 400.0
     }
 
     /// The titlebar reveals only while the cursor is within the window and near
@@ -2037,7 +2039,11 @@ impl App {
     /// The image↔screen mapping the pixel rulers need (2D only). Mirrors the
     /// shader's 2D UV mapping so ticks land on real image pixels.
     fn ruler_info(&self) -> Option<crate::ui::RulerInfo> {
-        if self.camera.is_panorama() || self.file_info.width == 0 || self.bottom_slide <= 0.001 {
+        if self.camera.is_panorama()
+            || self.file_info.width == 0
+            || self.bottom_slide <= 0.001
+            || self.window_is_small()
+        {
             return None;
         }
         let (vw, vh) = self.viewport();
@@ -2594,7 +2600,7 @@ impl App {
             })
             .unwrap_or((1.0, 0.0));
         let near_bottom = self.cursor_in_window && self.cursor_pos.y >= vh - (44.0 * scale) as f64;
-        if near_bottom || self.ui_state.pointer_over_panel {
+        if (near_bottom || self.ui_state.pointer_over_panel) && !self.window_is_small() {
             self.bottom_visible = true;
             self.bottom_hide_deadline = None;
         } else if self.bottom_visible {

@@ -1676,8 +1676,11 @@ impl App {
                     .as_ref()
                     .and_then(|g| g.renderer.image_aspect())
                     .unwrap_or(1.0);
-                let sx = inv_zoom * (vw / vh) / image_aspect.max(1e-4);
-                let sy = inv_zoom;
+                // Match the shader's screen→image scale (which divides by the
+                // squash/stretch) so the image follows the cursor 1:1 regardless
+                // of squash — otherwise a narrow squash slows panning to a crawl.
+                let sx = inv_zoom * (vw / vh) / image_aspect.max(1e-4) / self.image_stretch.x;
+                let sy = inv_zoom / self.image_stretch.y;
                 // Grab feel: content follows the cursor. Panning is unbounded —
                 // the image may be moved freely past the viewport edge.
                 let du = -(dx / vw) * sx;
@@ -3081,12 +3084,14 @@ impl ApplicationHandler<UserEvent> for App {
             // (Alt-resize is driven by CursorMoved, which tracks the visible
             // cursor 1:1 — not raw device motion.)
             if self.stretching {
-                // Alt+middle-drag: right→wider, up→taller (multiplicative).
+                // Alt+middle-drag: right→wider, up→taller (multiplicative). No
+                // real limit on the squash/stretch (a single-pixel-wide image is
+                // allowed); the bounds are only a numerical guard against 0/∞.
                 const SENS: f32 = 0.004;
                 self.image_stretch.x =
-                    (self.image_stretch.x * (1.0 + delta.0 as f32 * SENS)).clamp(0.2, 5.0);
+                    (self.image_stretch.x * (1.0 + delta.0 as f32 * SENS)).clamp(1e-4, 1e4);
                 self.image_stretch.y =
-                    (self.image_stretch.y * (1.0 - delta.1 as f32 * SENS)).clamp(0.2, 5.0);
+                    (self.image_stretch.y * (1.0 - delta.1 as f32 * SENS)).clamp(1e-4, 1e4);
                 self.request_redraw();
             } else if self.dragging {
                 self.on_drag_motion(delta.0 as f32, delta.1 as f32);

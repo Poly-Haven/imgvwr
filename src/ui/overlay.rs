@@ -564,7 +564,9 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
                             }
                             if titlebar_button(
                                 ui,
-                                egui::include_image!("../../resources/icons/ui/folder2-open.svg"),
+                                // Filled folder: renders bold/crisp at this size,
+                                // unlike the thin-stroked outline open-folder icon.
+                                egui::include_image!("../../resources/icons/ui/folder-fill.svg"),
                                 15.0,
                                 a,
                                 false,

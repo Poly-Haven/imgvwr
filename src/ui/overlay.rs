@@ -332,10 +332,15 @@ fn minimap(ctx: &egui::Context, inputs: &UiInputs) {
         1.0,
         egui::Color32::from_white_alpha((a * 235.0).round() as u8),
     );
+    // Fill only convex segments. egui fills a polygon as a triangle fan from its
+    // first vertex, which is correct only when convex; a panorama view box that
+    // wraps a pole (steep pitch) becomes a concave band, and a fan over it would
+    // overpaint far outside the region. The 2D rect and the common pano horizon
+    // view are convex and fill fine; concave/degenerate ones keep just the outline.
     for seg in &info.view_segments {
-        if seg.len() >= 3 {
+        if let Some(poly) = convex_polygon(seg) {
             clipped.add(egui::Shape::convex_polygon(
-                seg.clone(),
+                poly,
                 view_fill,
                 egui::Stroke::NONE,
             ));
@@ -357,6 +362,37 @@ fn minimap(ctx: &egui::Context, inputs: &UiInputs) {
         ),
         egui::StrokeKind::Outside,
     );
+}
+
+/// If `seg` (a view-region outline, possibly with a duplicated closing point) is a
+/// convex polygon, return its deduplicated vertices for a triangle-fan fill; else
+/// `None` (so a concave/degenerate region is left unfilled rather than overpainted).
+fn convex_polygon(seg: &[egui::Pos2]) -> Option<Vec<egui::Pos2>> {
+    let mut p: Vec<egui::Pos2> = seg.to_vec();
+    if p.len() >= 2 && p.first() == p.last() {
+        p.pop(); // drop the closing duplicate
+    }
+    let n = p.len();
+    if n < 3 {
+        return None;
+    }
+    // Convex iff every turn has the same sign (in egui's y-down space). Tiny
+    // cross products (collinear points) don't flip the decision.
+    let mut sign = 0.0_f32;
+    for i in 0..n {
+        let a = p[i];
+        let b = p[(i + 1) % n];
+        let c = p[(i + 2) % n];
+        let cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+        if cross.abs() > 1e-3 {
+            if sign == 0.0 {
+                sign = cross.signum();
+            } else if cross.signum() != sign {
+                return None;
+            }
+        }
+    }
+    Some(p)
 }
 
 /// The left pixel ruler (2D only). Reveals on its own slide — near the left edge
@@ -1673,9 +1709,13 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
     while keep > 1 && packed_h(keep) > avail_h {
         keep -= 1;
     }
+    // Even one section (the tallest, always-kept first one) can be taller than a
+    // very short window; in that case the body scrolls so the title and footer
+    // stay on-screen and clickable.
+    let overflow = packed_h(keep) > avail_h;
     // Only offer "Show more" → fullscreen when it could actually help (not already
     // fullscreen); otherwise there's nothing more room to reveal.
-    let truncated = keep < SECTIONS.len() && !inputs.is_fullscreen;
+    let truncated = (keep < SECTIONS.len() || overflow) && !inputs.is_fullscreen;
 
     egui::Area::new(egui::Id::new("imgvwr_help"))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -1691,39 +1731,49 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                     );
                 });
                 ui.add_space(10.0);
-                for row_start in (0..keep).step_by(cols) {
-                    if row_start > 0 {
-                        ui.add_space(ROW_GAP);
-                    }
-                    let row_end = (row_start + cols).min(keep);
-                    ui.horizontal_top(|ui| {
-                        for (j, (title, keys)) in SECTIONS[row_start..row_end].iter().enumerate() {
-                            if j > 0 {
-                                ui.add_space(COL_GAP);
+                // Cap the body height so a too-short window scrolls the sections
+                // instead of pushing the footer (Close / Show more) off-screen.
+                egui::ScrollArea::vertical()
+                    .max_height(avail_h.max(48.0))
+                    .auto_shrink([true, true])
+                    .show(ui, |ui| {
+                        for row_start in (0..keep).step_by(cols) {
+                            if row_start > 0 {
+                                ui.add_space(ROW_GAP);
                             }
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new(*title).strong().color(ACCENT));
-                                ui.add_space(4.0);
-                                egui::Grid::new(("imgvwr_help", *title))
-                                    .num_columns(2)
-                                    .spacing([10.0, 3.0])
-                                    .show(ui, |ui| {
-                                        for (key, action) in *keys {
-                                            ui.label(
-                                                egui::RichText::new(*key)
-                                                    .color(egui::Color32::from_rgb(180, 200, 255)),
-                                            );
-                                            ui.label(
-                                                egui::RichText::new(*action)
-                                                    .color(egui::Color32::from_gray(220)),
-                                            );
-                                            ui.end_row();
-                                        }
+                            let row_end = (row_start + cols).min(keep);
+                            ui.horizontal_top(|ui| {
+                                for (j, (title, keys)) in
+                                    SECTIONS[row_start..row_end].iter().enumerate()
+                                {
+                                    if j > 0 {
+                                        ui.add_space(COL_GAP);
+                                    }
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(*title).strong().color(ACCENT),
+                                        );
+                                        ui.add_space(4.0);
+                                        egui::Grid::new(("imgvwr_help", *title))
+                                            .num_columns(2)
+                                            .spacing([10.0, 3.0])
+                                            .show(ui, |ui| {
+                                                for (key, action) in *keys {
+                                                    ui.label(egui::RichText::new(*key).color(
+                                                        egui::Color32::from_rgb(180, 200, 255),
+                                                    ));
+                                                    ui.label(
+                                                        egui::RichText::new(*action)
+                                                            .color(egui::Color32::from_gray(220)),
+                                                    );
+                                                    ui.end_row();
+                                                }
+                                            });
                                     });
+                                }
                             });
                         }
                     });
-                }
                 ui.add_space(12.0);
                 ui.vertical_centered(|ui| {
                     ui.horizontal(|ui| {

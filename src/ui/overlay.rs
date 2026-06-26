@@ -157,7 +157,12 @@ fn left_ruler(
 /// The bottom pixel ruler, drawn as the top strip of the bottom panel (so they
 /// share one background rect — no gap). Ticks point up toward the image; dragging
 /// or clicking it adds a vertical guide.
-fn bottom_ruler_strip(ui: &mut egui::Ui, r: &RulerInfo, screen: egui::Rect, actions: &mut Vec<UiAction>) {
+fn bottom_ruler_strip(
+    ui: &mut egui::Ui,
+    r: &RulerInfo,
+    screen: egui::Rect,
+    actions: &mut Vec<UiAction>,
+) {
     let vw = screen.width();
     let ex = |px: f32| screen.left() + vw * (0.5 + (px / r.img_w - 0.5 - r.pan_u) / r.sx);
     let uv_x = |sx: f32| 0.5 + r.pan_u + ((sx - screen.left()) / vw - 0.5) * r.sx;
@@ -168,12 +173,16 @@ fn bottom_ruler_strip(ui: &mut egui::Ui, r: &RulerInfo, screen: egui::Rect, acti
     let base_y = rect.bottom();
     let p = ui.painter();
     let stroke = ruler_tick_stroke();
-    let (px0, px1) = (uv_x(screen.left()) * r.img_w, uv_x(screen.right()) * r.img_w);
+    let (px0, px1) = (
+        uv_x(screen.left()) * r.img_w,
+        uv_x(screen.right()) * r.img_w,
+    );
     for (interval, len, coarser) in RULER_LEVELS {
         if interval * ppx_x < 3.0 {
             continue;
         }
-        for k in (px0.min(px1) / interval).floor() as i64..=(px0.max(px1) / interval).ceil() as i64 {
+        for k in (px0.min(px1) / interval).floor() as i64..=(px0.max(px1) / interval).ceil() as i64
+        {
             let pos = k as f32 * interval;
             if pos < 0.0 || pos > r.img_w || (coarser > 0.0 && (pos % coarser).abs() < 0.5) {
                 continue;
@@ -213,7 +222,10 @@ fn bottom_panel(
     let slide = inputs.bottom_slide.clamp(0.0, 1.0);
     let screen = ctx.screen_rect();
     let resp = egui::Area::new(egui::Id::new("imgvwr_bottom"))
-        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(0.0, (1.0 - slide) * 96.0))
+        .anchor(
+            egui::Align2::LEFT_BOTTOM,
+            egui::vec2(0.0, (1.0 - slide) * 96.0),
+        )
         .constrain(false)
         .show(ctx, |ui| {
             ui.set_width(screen.width());
@@ -249,10 +261,46 @@ fn bottom_panel(
                                     ui.add_space(((field - row_w) * 0.5).max(0.0));
                                     for _ in 0..n {
                                         ui.allocate_ui(egui::vec2(GROUP_W, 24.0), |ui| match i {
-                                            0 => adj_slider(ui, "Exposure", inputs.exposure, -16.0..=16.0, 0.5, 2, UiAction::SetExposure, actions),
-                                            1 => adj_slider(ui, "Gamma", inputs.gamma, 0.1..=4.0, 0.1, 2, UiAction::SetGamma, actions),
-                                            2 => adj_slider(ui, "Clarity", inputs.clarity_amount, 0.0..=10.0, 0.5, 2, UiAction::SetClarity, actions),
-                                            _ => adj_slider(ui, "Radius", inputs.clarity_radius, 8.0..=256.0, 16.0, 0, UiAction::SetClarityRadius, actions),
+                                            0 => adj_slider(
+                                                ui,
+                                                "Exposure",
+                                                inputs.exposure,
+                                                -16.0..=16.0,
+                                                0.5,
+                                                2,
+                                                UiAction::SetExposure,
+                                                actions,
+                                            ),
+                                            1 => adj_slider(
+                                                ui,
+                                                "Gamma",
+                                                inputs.gamma,
+                                                0.1..=4.0,
+                                                0.1,
+                                                2,
+                                                UiAction::SetGamma,
+                                                actions,
+                                            ),
+                                            2 => adj_slider(
+                                                ui,
+                                                "Clarity",
+                                                inputs.clarity_amount,
+                                                0.0..=10.0,
+                                                0.5,
+                                                2,
+                                                UiAction::SetClarity,
+                                                actions,
+                                            ),
+                                            _ => adj_slider(
+                                                ui,
+                                                "Radius",
+                                                inputs.clarity_radius,
+                                                8.0..=256.0,
+                                                16.0,
+                                                0,
+                                                UiAction::SetClarityRadius,
+                                                actions,
+                                            ),
                                         });
                                         i += 1;
                                     }
@@ -1002,8 +1050,10 @@ fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiActio
     ))
     .tint(egui::Color32::WHITE)
     .fit_to_exact_size(egui::vec2(10.0, 10.0));
-    let button =
-        egui::Button::image_and_text(chevron, egui::RichText::new(current).color(egui::Color32::WHITE));
+    let button = egui::Button::image_and_text(
+        chevron,
+        egui::RichText::new(current).color(egui::Color32::WHITE),
+    );
     let resp = egui::menu::menu_custom_button(ui, button, |ui| {
         for view in inputs.views_for(&active_display) {
             let is_active = inputs

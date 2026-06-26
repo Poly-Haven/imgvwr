@@ -250,6 +250,9 @@ pub struct App {
     // Input state.
     modifiers: ModifiersState,
     dragging: bool,
+    /// Index of the guide currently being dragged with the left button (grabbed
+    /// directly on the image). `None` = not dragging a guide.
+    guide_drag: Option<usize>,
     cursor_pos: PhysicalPosition<f64>,
     /// Cursor position when a pan/look drag began, restored on release (a
     /// confined/locked grab otherwise drops the cursor at the window centre).
@@ -432,6 +435,7 @@ impl App {
             },
             modifiers: ModifiersState::empty(),
             dragging: false,
+            guide_drag: None,
             // Start far from the left edge so the toolbar stays hidden until the
             // cursor actually moves there (and so headless captures are clean).
             cursor_pos: PhysicalPosition::new(1.0e6, 1.0e6),
@@ -2173,6 +2177,99 @@ impl App {
             .collect()
     }
 
+    /// Image uv under a screen-pixel position (physical px), mirroring the
+    /// shader's 2D / panorama projection. Used for direct guide hit-testing.
+    fn viewport_uv(&self, sx: f64, sy: f64) -> Option<(f32, f32)> {
+        use std::f32::consts::{PI, TAU};
+        let (vw, vh) = self.viewport();
+        if vw <= 0.0 || vh <= 0.0 || self.file_info.width == 0 {
+            return None;
+        }
+        let nx = sx as f32 / vw;
+        let ny = sy as f32 / vh;
+        let cam = &self.camera.camera;
+        match cam {
+            Camera::Flat { .. } => {
+                let image_aspect =
+                    (self.file_info.width as f32 / self.file_info.height as f32).max(1e-4);
+                let inv_zoom = cam.tan_half_fov();
+                let s_x = inv_zoom * (vw / vh) / image_aspect / self.image_stretch.x;
+                let s_y = inv_zoom / self.image_stretch.y;
+                let pan_u = cam.yaw() / TAU;
+                let pan_v = -cam.pitch() / PI;
+                let u = 0.5 + pan_u + (nx - 0.5) * s_x;
+                let v = 0.5 + pan_v - ((1.0 - ny) - 0.5) * s_y;
+                Some((u, v))
+            }
+            Camera::Pano { .. } => {
+                let thf = cam.tan_half_fov();
+                let ndc_x = (nx * 2.0 - 1.0) / self.image_stretch.x;
+                let ndc_y = ((1.0 - ny) * 2.0 - 1.0) / self.image_stretch.y;
+                let rx = ndc_x * (vw / vh) * thf;
+                let ry = ndc_y * thf;
+                let inv = 1.0 / (rx * rx + ry * ry + 1.0).sqrt();
+                let (wx, wy, wz) = pano_rotate(cam.yaw(), cam.pitch(), rx * inv, ry * inv, inv);
+                let lon = wz.atan2(wx);
+                let lat = wy.clamp(-1.0, 1.0).asin();
+                Some((1.0 - (lon / TAU + 0.5), 0.5 - lat / PI))
+            }
+        }
+    }
+
+    /// The guide nearest the cursor within 3 screen pixels, or `None`. Works in
+    /// 2D and panorama (screen distance via the local uv derivative; longitude
+    /// distance is circular in pano). Drives grab/delete and the hover highlight.
+    fn guide_at_cursor(&self) -> Option<usize> {
+        const GRAB_PX: f32 = 3.0;
+        if self.guides.is_empty() || !self.cursor_in_window {
+            return None;
+        }
+        let (cx, cy) = (self.cursor_pos.x, self.cursor_pos.y);
+        let (vw, vh) = self.viewport();
+        if cx < 0.0 || cy < 0.0 || cx as f32 > vw || cy as f32 > vh {
+            return None;
+        }
+        let uv0 = self.viewport_uv(cx, cy)?;
+        let uvx = self.viewport_uv(cx + 1.0, cy)?; // +1px screen-x (for d uv/dx)
+        let uvy = self.viewport_uv(cx, cy + 1.0)?; // +1px screen-y (for d uv/dy)
+        let pano = self.camera.is_panorama();
+        let mut best: Option<(usize, f32)> = None;
+        for (i, g) in self.guides.iter().enumerate() {
+            let dist = if g[1] >= 0.5 {
+                // Horizontal guide: constant uv.y → distance measured in screen-y.
+                let d = uvy.1 - uv0.1;
+                if d.abs() < 1e-9 {
+                    f32::INFINITY
+                } else {
+                    (uv0.1 - g[0]).abs() / d.abs()
+                }
+            } else {
+                // Vertical guide: constant uv.x → distance in screen-x.
+                let mut d = uvx.0 - uv0.0;
+                let mut delta = (uv0.0 - g[0]).abs();
+                if pano {
+                    // Unwrap the longitude seam in the derivative + use the
+                    // circular distance to the meridian.
+                    if d > 0.5 {
+                        d -= 1.0;
+                    } else if d < -0.5 {
+                        d += 1.0;
+                    }
+                    delta = delta.min(1.0 - delta);
+                }
+                if d.abs() < 1e-9 {
+                    f32::INFINITY
+                } else {
+                    delta / d.abs()
+                }
+            };
+            if dist <= GRAB_PX && best.is_none_or(|(_, b)| dist < b) {
+                best = Some((i, dist));
+            }
+        }
+        best.map(|(i, _)| i)
+    }
+
     /// True when the window is too small to comfortably overlay the auto-hiding
     /// panels. One predictable threshold for ALL of them (bottom panel, metadata
     /// box, rulers) so a tiny window doesn't keep popping a panel over most of
@@ -2454,6 +2551,17 @@ impl App {
         }
         match (state, button) {
             (ElementState::Pressed, MouseButton::Left) => {
+                // Grabbing a guide takes priority over pan/window-move: if the
+                // press lands on a guide line (2D or pano), drag THAT guide and
+                // start no pan. Alt-held presses still move the window (so Alt is
+                // an escape hatch over a guide).
+                if !self.modifiers.alt_key() {
+                    if let Some(idx) = self.guide_at_cursor() {
+                        self.guide_drag = Some(idx);
+                        self.freeze_animations();
+                        return;
+                    }
+                }
                 let now = Instant::now();
                 let double = self
                     .last_left_press
@@ -2475,6 +2583,18 @@ impl App {
                     self.dblclick_motion = 0.0;
                 }
             }
+            (ElementState::Pressed, MouseButton::Right) => {
+                // Right-click on a guide deletes it (and nothing else; a plain
+                // right-drag never pans). Alt+right is the third-resize, handled
+                // earlier in the event router, so it never reaches here.
+                if let Some(idx) = self.guide_at_cursor() {
+                    if idx < self.guides.len() {
+                        self.guides.remove(idx);
+                        self.ui_state.hovered_guide = None;
+                        self.request_redraw();
+                    }
+                }
+            }
             (ElementState::Pressed, MouseButton::Middle) => {
                 // Alt + middle-drag squashes/stretches the image within the same
                 // window (to inspect line straightness); otherwise pan/look.
@@ -2485,6 +2605,25 @@ impl App {
                 }
             }
             (ElementState::Released, MouseButton::Left) => {
+                // Finish a guide grab: drop it if released off the image (its
+                // coord went outside 0..1), else keep it where it landed.
+                if let Some(idx) = self.guide_drag.take() {
+                    if let Some(g) = self.guides.get(idx).copied() {
+                        let horizontal = g[1] >= 0.5;
+                        let off = self
+                            .viewport_uv(self.cursor_pos.x, self.cursor_pos.y)
+                            .is_none_or(|(u, v)| {
+                                let c = if horizontal { v } else { u };
+                                !(0.0..=1.0).contains(&c)
+                            });
+                        if off {
+                            self.guides.remove(idx);
+                        }
+                    }
+                    self.ui_state.hovered_guide = None;
+                    self.request_redraw();
+                    return;
+                }
                 let was_window_drag = self.window_drag_armed;
                 self.window_drag_armed = false;
                 if !was_window_drag {
@@ -2698,27 +2837,32 @@ impl App {
             guide_color: self.prefs.guide_color,
             background_color: self.prefs.background_color,
             is_maximized: self.gfx.as_ref().is_some_and(|g| g.window.is_maximized()),
-            resize_cursor: if self.dragging || self.window_drag_armed {
+            resize_cursor: if self.guide_drag.is_some() {
+                Some(egui::CursorIcon::Grabbing)
+            } else if self.dragging || self.window_drag_armed {
                 None
-            } else {
+            } else if let Some(d) = self.alt_resize.or_else(|| self.resize_edge_at_cursor()) {
                 // The active Alt-resize direction (if dragging), else the edge
-                // under the cursor.
-                self.alt_resize
-                    .or_else(|| self.resize_edge_at_cursor())
-                    .map(|d| match d {
-                        ResizeDirection::East | ResizeDirection::West => {
-                            egui::CursorIcon::ResizeHorizontal
-                        }
-                        ResizeDirection::North | ResizeDirection::South => {
-                            egui::CursorIcon::ResizeVertical
-                        }
-                        ResizeDirection::NorthEast | ResizeDirection::SouthWest => {
-                            egui::CursorIcon::ResizeNeSw
-                        }
-                        ResizeDirection::NorthWest | ResizeDirection::SouthEast => {
-                            egui::CursorIcon::ResizeNwSe
-                        }
-                    })
+                // under the cursor — these win over a guide hover at the border.
+                Some(match d {
+                    ResizeDirection::East | ResizeDirection::West => {
+                        egui::CursorIcon::ResizeHorizontal
+                    }
+                    ResizeDirection::North | ResizeDirection::South => {
+                        egui::CursorIcon::ResizeVertical
+                    }
+                    ResizeDirection::NorthEast | ResizeDirection::SouthWest => {
+                        egui::CursorIcon::ResizeNeSw
+                    }
+                    ResizeDirection::NorthWest | ResizeDirection::SouthEast => {
+                        egui::CursorIcon::ResizeNwSe
+                    }
+                })
+            } else if self.ui_state.hovered_guide.is_some() {
+                // Hovering a guide line → the grab hand.
+                Some(egui::CursorIcon::Grab)
+            } else {
+                None
             },
         }
     }
@@ -3324,6 +3468,17 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.alt_resize.is_some() {
                     self.update_alt_resize();
                 }
+                // Move a grabbed guide to follow the cursor along its constant-uv
+                // axis (clamped on-image; the release decides keep vs discard).
+                if let Some(idx) = self.guide_drag {
+                    if let Some((u, v)) = self.viewport_uv(position.x, position.y) {
+                        if let Some(g) = self.guides.get_mut(idx) {
+                            g[0] = if g[1] >= 0.5 { v } else { u }.clamp(0.0, 1.0);
+                        }
+                    }
+                }
+                // Hover highlight: the dragged guide, else the one under the cursor.
+                self.ui_state.hovered_guide = self.guide_drag.or_else(|| self.guide_at_cursor());
                 self.tick_bottom_panel();
                 self.tick_left_ruler();
                 self.tick_metadata();
@@ -3335,6 +3490,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cursor_in_window = false;
+                self.ui_state.hovered_guide = None;
                 self.request_redraw();
             }
             // A press that starts a borderless resize is handled before egui so
@@ -3827,6 +3983,17 @@ fn abs_diff_image(a: &ImageData, b: &ImageData) -> Option<ImageData> {
     })
 }
 
+/// Rotate a camera-space ray by the panorama yaw/pitch (must match the shader's
+/// `rotation_yaw_pitch`), returning the world direction. Used to project the
+/// cursor onto the sphere for guide hit-testing.
+fn pano_rotate(yaw: f32, pitch: f32, rx: f32, ry: f32, rz: f32) -> (f32, f32, f32) {
+    let (cy, sy) = (yaw.cos(), yaw.sin());
+    let (cp, sp) = (pitch.cos(), pitch.sin());
+    let py = cp * ry + sp * rz; // pitch about X …
+    let pz = -sp * ry + cp * rz;
+    (cy * rx - sy * pz, py, sy * rx + cy * pz) // … then yaw about Y
+}
+
 fn srgb_u8_to_f32(c: [u8; 3]) -> [f32; 3] {
     [
         c[0] as f32 / 255.0,
@@ -4232,6 +4399,20 @@ mod tests {
             panic!()
         };
         assert!(sv.iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn pano_rotate_matches_shader_rotation() {
+        let close = |a: (f32, f32, f32), b: (f32, f32, f32)| {
+            (a.0 - b.0).abs() < 1e-5 && (a.1 - b.1).abs() < 1e-5 && (a.2 - b.2).abs() < 1e-5
+        };
+        // Identity at yaw=pitch=0.
+        assert!(close(pano_rotate(0.0, 0.0, 0.2, 0.3, 0.9), (0.2, 0.3, 0.9)));
+        // Yaw +90° sends forward (0,0,1) to (-1,0,0) (matches the shader's `my`).
+        let h = std::f32::consts::FRAC_PI_2;
+        assert!(close(pano_rotate(h, 0.0, 0.0, 0.0, 1.0), (-1.0, 0.0, 0.0)));
+        // Pitch +90° sends forward (0,0,1) to (0,1,0) (matches the shader's `mp`).
+        assert!(close(pano_rotate(0.0, h, 0.0, 0.0, 1.0), (0.0, 1.0, 0.0)));
     }
 
     #[test]

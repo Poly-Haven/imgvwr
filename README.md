@@ -55,8 +55,8 @@ for Windows.
 |---|---|
 | `S` | Sharpness checker — `\|original − blurred\|`, amplifiable by exposure |
 | `G` | Add the next guide *level* — density doubles each press (½, then ¼, ⅛ … down to 1/32 on each axis) |
-| Pull from a ruler | Drag a guide out of a ruler — left ruler → vertical, bottom ruler → horizontal (2D) |
-| Drag / right-click a guide | Move a guide, or delete it (drag off the image or right-click) |
+| Pull from a ruler | Drag a guide out of a ruler — left ruler → vertical, bottom ruler → horizontal (2D pixels or panorama degrees) |
+| Drag / right-click a guide | Grab a guide to move it, or delete it (drag off the image, or right-click) — 2D and panorama |
 | `Alt` + middle-drag | Squash / stretch the image non-uniformly, unbounded (line straightness) |
 | Channel boxes (`F2`) | Click to isolate R / G / B / A as greyscale |
 | Guides list (`F2`) | Shows each guide (`V 425px` / `H 312px`); × removes; `Ctrl+R` resets all |

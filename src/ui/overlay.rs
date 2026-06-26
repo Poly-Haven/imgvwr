@@ -56,9 +56,9 @@ pub fn build_overlays(
     // overlapping bottom-left corner). The bottom ruler lives inside the panel.
     left_ruler(ctx, inputs, state, actions);
 
-    // Interactive grab/move/delete strips for existing guides (lowest order, so
-    // they only catch clicks that land on a guide line).
-    guides_layer(ctx, inputs, state, actions);
+    // (Grabbing / moving / deleting existing guides is handled in the app's input
+    // layer — see App::guide_at_cursor — so it has a single authority over
+    // mouse-button routing vs panning and works in both 2D and panorama.)
 
     // Auto-hiding bottom panel (tone sliders + the merged bottom ruler).
     bottom_panel(ctx, inputs, state, actions);
@@ -195,26 +195,35 @@ fn degree_ticks(s0: f32, s1: f32, angle_at: impl Fn(f32) -> f32, mut tick: impl 
     }
 }
 
-// Screen ↔ image-coordinate mappings shared by the rulers and the interactive
-// guide layer (these mirror the shader's 2D UV mapping exactly). A *vertical*
-// guide sits at a constant image u (its on-screen line is vertical); a
-// *horizontal* guide at a constant image v.
+// Screen → image-coordinate mappings used by the rulers to spawn guides (these
+// mirror the shader's UV mapping). A *vertical* guide sits at a constant image u
+// (its on-screen line is vertical); a *horizontal* guide at a constant image v.
 
-/// On-screen x of a vertical guide at image-u `coord` (0..1).
-fn guide_u_to_x(r: &RulerInfo, screen: egui::Rect, coord: f32) -> f32 {
-    screen.left() + screen.width() * (0.5 + (coord - 0.5 - r.pan_u) / r.sx)
-}
-/// Image-u (0..1) under a pointer at screen x.
+/// Image-u (0..1) under a pointer at screen x (2D).
 fn x_to_guide_u(r: &RulerInfo, screen: egui::Rect, x: f32) -> f32 {
     0.5 + r.pan_u + ((x - screen.left()) / screen.width() - 0.5) * r.sx
 }
-/// On-screen y of a horizontal guide at image-v `coord` (0..1).
-fn guide_v_to_y(r: &RulerInfo, screen: egui::Rect, coord: f32) -> f32 {
-    screen.top() + screen.height() * (0.5 - (0.5 + r.pan_v - coord) / r.sy)
-}
-/// Image-v (0..1) under a pointer at screen y.
+/// Image-v (0..1) under a pointer at screen y (2D).
 fn y_to_guide_v(r: &RulerInfo, screen: egui::Rect, y: f32) -> f32 {
     0.5 + r.pan_v - ((1.0 - (y - screen.top()) / screen.height()) - 0.5) * r.sy
+}
+
+/// Equirectangular image uv under a screen point in panorama mode (mirrors the
+/// shader's pano projection), so a guide can be spawned at the cursor's
+/// longitude/latitude.
+fn pano_screen_uv(p: &PanoProj, screen: egui::Rect, pt: egui::Pos2) -> (f32, f32) {
+    use std::f32::consts::{PI, TAU};
+    let nx = (pt.x - screen.left()) / screen.width();
+    let ny = (pt.y - screen.top()) / screen.height();
+    let ndc_x = nx * 2.0 - 1.0;
+    let ndc_y = (1.0 - ny) * 2.0 - 1.0; // GL y-up
+    let rx = ndc_x * p.aspect * p.tan_half_fov;
+    let ry = ndc_y * p.tan_half_fov;
+    let inv = 1.0 / (rx * rx + ry * ry + 1.0).sqrt();
+    let (wx, wy, wz) = pano_rotate(p, rx * inv, ry * inv, inv);
+    let lon = wz.atan2(wx);
+    let lat = wy.clamp(-1.0, 1.0).asin();
+    (1.0 - (lon / TAU + 0.5), 0.5 - lat / PI)
 }
 
 /// Spawn-and-drag a NEW guide pulled out of a ruler, shared by both rulers.
@@ -236,7 +245,16 @@ fn ruler_spawn_drag(
     actions: &mut Vec<UiAction>,
 ) {
     let coord_at = |pt: egui::Pos2| {
-        if horizontal {
+        // Pano: the spawned coord is the cursor's latitude (horizontal guide) or
+        // longitude (vertical guide); 2D: the linear uv mapping.
+        if let Some(p) = r.pano {
+            let (u, v) = pano_screen_uv(&p, screen, pt);
+            if horizontal {
+                v
+            } else {
+                u
+            }
+        } else if horizontal {
             y_to_guide_v(r, screen, pt.y)
         } else {
             x_to_guide_u(r, screen, pt.x)
@@ -351,19 +369,17 @@ fn left_ruler(
     state.pointer_over_left_ruler = resp.response.contains_pointer() || resp.inner.dragged();
     // Drag a NEW *vertical* guide out of the (vertical) left ruler — Photoshop
     // style: it tracks the pointer's x as you pull it into the image. A plain
-    // click does nothing. 2D only (the pano ruler is a degree read-out).
-    if r.pano.is_none() {
-        ruler_spawn_drag(
-            ctx,
-            &resp.inner,
-            &r,
-            screen,
-            false,
-            inputs.guides.len(),
-            state,
-            actions,
-        );
-    }
+    // click does nothing. Works in 2D (pixel uv) and pano (longitude).
+    ruler_spawn_drag(
+        ctx,
+        &resp.inner,
+        &r,
+        screen,
+        false,
+        inputs.guides.len(),
+        state,
+        actions,
+    );
 }
 
 /// The bottom pixel ruler, drawn as the top strip of the bottom panel (so they
@@ -392,8 +408,7 @@ fn bottom_ruler_strip(
         p.line_segment([egui::pos2(x, base_y), egui::pos2(x, base_y - len)], stroke);
     };
     if let Some(proj) = r.pano {
-        // Longitude degrees along the centre row (ndc.y = 0). 2D guide spawn is
-        // disabled in pano; the ruler is a degree read-out.
+        // Longitude degrees along the centre row (ndc.y = 0).
         let angle_at = |sx: f32| -> f32 {
             let ndc_x = (sx - screen.left()) / vw * 2.0 - 1.0;
             let rx = ndc_x * proj.aspect * proj.tan_half_fov;
@@ -402,104 +417,19 @@ fn bottom_ruler_strip(
             wz.atan2(wx).to_degrees()
         };
         degree_ticks(screen.left(), screen.right(), angle_at, draw);
-        return resp.dragged();
+    } else {
+        let ex = |px: f32| screen.left() + vw * (0.5 + (px / r.img_w - 0.5 - r.pan_u) / r.sx);
+        let uv_x = |sx: f32| 0.5 + r.pan_u + ((sx - screen.left()) / vw - 0.5) * r.sx;
+        let ppx_x = (vw / (r.img_w * r.sx)).abs();
+        let (px0, px1) = (
+            uv_x(screen.left()) * r.img_w,
+            uv_x(screen.right()) * r.img_w,
+        );
+        pixel_ticks(px0, px1, ppx_x, r.img_w, |px, major| draw(ex(px), major));
     }
-    let ex = |px: f32| screen.left() + vw * (0.5 + (px / r.img_w - 0.5 - r.pan_u) / r.sx);
-    let uv_x = |sx: f32| 0.5 + r.pan_u + ((sx - screen.left()) / vw - 0.5) * r.sx;
-    let ppx_x = (vw / (r.img_w * r.sx)).abs();
-    let (px0, px1) = (
-        uv_x(screen.left()) * r.img_w,
-        uv_x(screen.right()) * r.img_w,
-    );
-    pixel_ticks(px0, px1, ppx_x, r.img_w, |px, major| draw(ex(px), major));
-    // Pull a NEW *horizontal* guide upward out of the (horizontal) bottom ruler.
+    // Pull a NEW *horizontal* guide upward out of the bottom ruler (2D + pano).
     ruler_spawn_drag(ui.ctx(), &resp, r, screen, true, guides_len, state, actions);
     resp.dragged()
-}
-
-/// Interactive layer for grabbing / moving / deleting existing guides directly
-/// on the image (2D only — it uses the ruler mapping). Each guide gets a thin,
-/// full-length hit strip along its on-screen line at the LOWEST egui order, so a
-/// click away from any guide still falls through to the image (pan), while a
-/// click near a line grabs it. Hover → grab cursor + mark the guide for the
-/// renderer's hover colour; drag → move it; right-click or drag-off → delete.
-fn guides_layer(
-    ctx: &egui::Context,
-    inputs: &UiInputs,
-    state: &mut UiState,
-    actions: &mut Vec<UiAction>,
-) {
-    state.hovered_guide = None;
-    let Some(r) = inputs.ruler else {
-        return;
-    };
-    // Guide grab/move is 2D only (the pano on-screen position is a curved
-    // meridian); guides still render and can be removed from the metadata list.
-    if r.pano.is_some() || inputs.guides.is_empty() {
-        return;
-    }
-    let screen = ctx.screen_rect();
-    const HALF: f32 = 7.0; // hit half-thickness around the line (px), generous to grab
-    egui::Area::new(egui::Id::new("imgvwr_guides"))
-        .order(egui::Order::Background)
-        .fixed_pos(screen.min)
-        .constrain(false)
-        .show(ctx, |ui| {
-            for (i, g) in inputs.guides.iter().enumerate() {
-                let horizontal = g[1] >= 0.5;
-                let rect = if horizontal {
-                    let y = guide_v_to_y(&r, screen, g[0]);
-                    egui::Rect::from_min_max(
-                        egui::pos2(screen.left(), y - HALF),
-                        egui::pos2(screen.right(), y + HALF),
-                    )
-                } else {
-                    let x = guide_u_to_x(&r, screen, g[0]);
-                    egui::Rect::from_min_max(
-                        egui::pos2(x - HALF, screen.top()),
-                        egui::pos2(x + HALF, screen.bottom()),
-                    )
-                };
-                let id = ui.id().with(("guide", i));
-                let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
-                if resp.hovered() || resp.dragged() {
-                    state.hovered_guide = Some(i);
-                    ctx.set_cursor_icon(if resp.dragged() {
-                        egui::CursorIcon::Grabbing
-                    } else {
-                        egui::CursorIcon::Grab
-                    });
-                }
-                // Right-click removes.
-                if resp.secondary_clicked() {
-                    actions.push(UiAction::RemoveGuide(i));
-                    continue;
-                }
-                // Map the pointer to this guide's axis coordinate (for move/drop).
-                let coord = ctx.pointer_interact_pos().map(|pt| {
-                    if horizontal {
-                        y_to_guide_v(&r, screen, pt.y)
-                    } else {
-                        x_to_guide_u(&r, screen, pt.x)
-                    }
-                });
-                if resp.dragged() {
-                    if let Some(coord) = coord {
-                        actions.push(UiAction::MoveGuide { index: i, coord });
-                    }
-                }
-                if resp.drag_stopped() {
-                    // Released past the image edge / off-screen → discard it.
-                    let off = match (coord, ctx.pointer_interact_pos()) {
-                        (Some(c), Some(pt)) => !(0.0..=1.0).contains(&c) || !screen.contains(pt),
-                        _ => false,
-                    };
-                    if off {
-                        actions.push(UiAction::RemoveGuide(i));
-                    }
-                }
-            }
-        });
 }
 
 /// Auto-hiding bottom panel of image-adjustment sliders (revealed by the cursor

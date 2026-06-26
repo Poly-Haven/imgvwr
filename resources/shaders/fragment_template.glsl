@@ -164,8 +164,21 @@ void main() {
     //    drop out at an unlucky sub-pixel alignment (the old hard `d < 0.5` test
     //    sometimes left only the halo, making the line look faint/invisible).
     for (int i = 0; i < u_guide_count; i++) {
-        float coord = (u_guides[i].y < 0.5) ? uv.x : uv.y;
-        float d = abs(coord - u_guides[i].x) / max(fwidth(coord), 1e-9);
+        bool vertical = u_guides[i].y < 0.5; // a constant-uv.x (longitude) line
+        float coord = vertical ? uv.x : uv.y;
+        float dcdx = dFdx(coord);
+        float dcdy = dFdy(coord);
+        float dist = abs(coord - u_guides[i].x);
+        // Longitude (uv.x) wraps in the panorama: unwrap the derivative across the
+        // seam (as the image sampler does) and measure the circular distance, so
+        // the wrap-around vertical guide isn't smeared into a fat aliased band on
+        // the image-edge side. 2D / latitude lines don't wrap, so stay plain.
+        if (u_projection_mode != 1 && vertical) {
+            if (abs(dcdx) > 0.5) dcdx -= sign(dcdx);
+            if (abs(dcdy) > 0.5) dcdy -= sign(dcdy);
+            dist = min(dist, 1.0 - dist);
+        }
+        float d = dist / max(abs(dcdx) + abs(dcdy), 1e-9);
         float halo = (1.0 - smoothstep(1.0, 2.2, d)) * 0.5; // dark, just outside
         float line = 1.0 - smoothstep(0.5, 1.2, d);         // full within 0.5px
         if (halo > 0.0 || line > 0.0) out_alpha = 1.0;

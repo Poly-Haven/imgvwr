@@ -45,6 +45,15 @@ cargo build --release
 - The navigation minimap (`M`) reuses the scene shader via a scissored second `draw_quad` into the
   bottom-right corner (`Renderer::render_minimap`) — so the thumbnail is tone-mapped and tiled like
   the main view; egui only strokes the border + view box on top. Its fade rides `u_global_alpha`.
+- **8-bit images downscale with Lanczos-3, not bilinear** (`sample_image_lanczos` in the
+  `SINGLE_TEXTURE_SAMPLER` injection; gated by `u_lanczos`, set in `draw_quad` from
+  `image.is_u8 && !nearest`). It mip-prefilters to the nearest level (`round(lod)`) so the GPU mip
+  chain anti-aliases the bulk minification, then reconstructs with a separable Lanczos-3 kernel over
+  that level's texels via `texelFetch`. Upscaling (`lod <= 0`) and the nearest toggle fall back to
+  `texture()`/bilinear, so only minification pays the cost. Bit depth ≠ sRGB: a 16-bit PNG is
+  `F32`+sRGB, so the gate is `is_u8` (`ImageData::is_u8`, threaded onto `ImageTexture`), *not*
+  `is_encoded_srgb`. Tiled (huge) images keep bilinear. `IMGVWR_DEBUG_NO_LANCZOS` forces it off for
+  A/B capture; verify via `IMGVWR_DEBUG_ZOOM` < 1 (downscale, differs) vs > 1 (upscale, identical).
 - **2D display rotation (Up/Down) is a per-image session property** (`App::rotation` 0–3 CW
   quarter-turns; remembered in `image_rotations` by path; not reset by R/Ctrl+R). It's applied
   purely in the shader: `u_image_aspect` is fed the *rotated* aspect and the sampler permutes the

@@ -29,6 +29,8 @@ uniform float u_global_alpha;        // whole-frame opacity (1 = opaque); the
                                      // minimap pass fades its thumbnail with this
 uniform int   u_rotation;            // 2D display rotation, 90° CW quarter-turns 0–3
                                      // (u_image_aspect is already the rotated aspect)
+uniform int   u_lanczos;             // 1 = Lanczos-3 minification (8-bit images);
+                                     // 0 = bilinear/trilinear. Upscaling is always bilinear.
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -108,7 +110,9 @@ void main() {
         // rotation-permuted source coordinate.
         uv = raw_uv;
         src_uv = rotate_uv(uv, u_rotation);
-        texel = sample_image(src_uv);
+        // Lanczos-3 minification for 8-bit images (sharper downscaling); bilinear
+        // otherwise and for any upscaling (handled inside sample_image_lanczos).
+        texel = (u_lanczos != 0) ? sample_image_lanczos(src_uv) : sample_image(src_uv);
     } else {
         // -- Rectilinear equirectangular projection ----------------------
         vec2 ndc = (v_uv * 2.0 - 1.0) / u_stretch;

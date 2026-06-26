@@ -82,6 +82,8 @@ pub struct RenderParams {
     /// 2D display rotation in 90° clockwise quarter-turns (0–3). The image is
     /// sampled at the permuted source coordinate; the aspect is rotated to match.
     pub rotation: i32,
+    /// Force-disable Lanczos minification (debug A/B only); normally false.
+    pub lanczos_off: bool,
 }
 
 impl Default for RenderParams {
@@ -112,6 +114,7 @@ impl Default for RenderParams {
             clarity_radius: 64.0,
             global_alpha: 1.0,
             rotation: 0,
+            lanczos_off: false,
         }
     }
 }
@@ -140,6 +143,7 @@ struct Uniforms {
     guide_hover_color: Option<glow::UniformLocation>,
     global_alpha: Option<glow::UniformLocation>,
     rotation: Option<glow::UniformLocation>,
+    lanczos: Option<glow::UniformLocation>,
     // Single-texture sampler.
     image: Option<glow::UniformLocation>,
     // Tiled-texture sampler + grid.
@@ -179,6 +183,7 @@ impl Uniforms {
             guide_hover_color: u("u_guide_hover_color"),
             global_alpha: u("u_global_alpha"),
             rotation: u("u_rotation"),
+            lanczos: u("u_lanczos"),
             image: u("u_image"),
             tiles: u("u_tiles"),
             tile_cols: u("u_tile_cols"),
@@ -497,6 +502,11 @@ impl Renderer {
             gl.uniform_1_f32(u.global_alpha.as_ref(), params.global_alpha);
             gl.uniform_1_i32(u.projection_mode.as_ref(), params.projection_mode);
             gl.uniform_1_i32(u.rotation.as_ref(), params.rotation);
+            // Lanczos-3 minification for 8-bit images only, and only when not in
+            // nearest-neighbour mode (the I toggle keeps its hard pixels). The
+            // lanczos_off flag is a debug A/B override (always false in normal use).
+            let lanczos = image.is_u8 && !params.nearest && !params.lanczos_off;
+            gl.uniform_1_i32(u.lanczos.as_ref(), lanczos as i32);
             // A 90°/270° display rotation swaps the displayed aspect; the shader's
             // 2D mapping fits the image against this rotated aspect.
             let aspect = if params.rotation & 1 == 1 {

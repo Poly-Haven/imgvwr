@@ -9,6 +9,9 @@ for Windows.
 - **Full-quality HDR:** very high resolution (24k+) 32-bit float images are
   uploaded at full bit depth, tiled across multiple GPU textures when they exceed
   `GL_MAX_TEXTURE_SIZE`.
+- **High-quality downscaling:** 8-bit images are minified with a separable
+  Lanczos-3 filter (sharper than bilinear, with mip pre-filtering so it stays
+  alias-free at any zoom-out); higher bit depths and all upscaling use bilinear.
 - **OCIO v2 colour management:** bundled Blender/AgX config, with AgX/Filmic and
   other view transforms selectable from the metadata box's View dropdown.
 - **Review tools:** per-channel isolation, an auto-exposure pick for HDR

@@ -27,6 +27,51 @@ vec4 sample_image_grad(vec2 uv, vec2 ddx, vec2 ddy) {
 // Trilinear sample at an explicit LOD (the slot diff samples both images this way
 // so identical content matches exactly at every zoom).
 vec4 sample_image_lod(vec2 uv, float lod) { return textureLod(u_image, uv, lod); }
+// Separable Lanczos-3 weight (a=3). |x|>=3 -> 0; x=0 -> 1.
+float lanczos3_w(float x) {
+    const float LPI = 3.14159265358979;
+    x = abs(x);
+    if (x < 1e-5) return 1.0;
+    if (x >= 3.0) return 0.0;
+    float p = LPI * x;
+    return (3.0 * sin(p) * sin(p / 3.0)) / (p * p);
+}
+// High-quality downscaling sample for 8-bit images: pick the mip level whose
+// residual scale is nearest 1:1 (so the GPU mip chain pre-filters the bulk
+// minification, avoiding aliasing), then reconstruct with a separable Lanczos-3
+// kernel over that level's texels (sharper than bilinear/trilinear). Upscaling /
+// 1:1 falls back to the bilinear `texture()` so only minification pays the cost.
+vec4 sample_image_lanczos(vec2 uv) {
+    vec2 tex0 = vec2(textureSize(u_image, 0));
+    vec2 dx = dFdx(uv) * tex0;
+    vec2 dy = dFdy(uv) * tex0;
+    float lod = 0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1e-8));
+    if (lod <= 0.0) {
+        return texture(u_image, uv); // upscaling / native -> bilinear
+    }
+    float maxlvl = floor(log2(max(tex0.x, tex0.y)));
+    float level = clamp(floor(lod + 0.5), 0.0, maxlvl); // nearest mip
+    float R = max(exp2(lod - level), 1e-3);             // source texels per output px
+    ivec2 sz = textureSize(u_image, int(level));
+    vec2 t = uv * vec2(sz) - 0.5;
+    vec2 base = floor(t);
+    vec2 f = t - base;
+    vec4 sum = vec4(0.0);
+    float wsum = 0.0;
+    // [-4,5] covers the Lanczos-3 support (+/-3 output px = +/-3R texels, R<=~1.41).
+    for (int j = -4; j <= 5; j++) {
+        float wy = lanczos3_w((float(j) - f.y) / R);
+        for (int i = -4; i <= 5; i++) {
+            float w = lanczos3_w((float(i) - f.x) / R) * wy;
+            // Match the texture wrap modes (REPEAT horizontally, CLAMP vertically).
+            int cx = int(mod(base.x + float(i), float(sz.x)));
+            int cy = clamp(int(base.y) + j, 0, sz.y - 1);
+            sum += w * texelFetch(u_image, ivec2(cx, cy), int(level));
+            wsum += w;
+        }
+    }
+    return sum / max(wsum, 1e-5);
+}
 // Original-resolution sharpness: |LOD0 - (2px-blurred LOD0)|. Returned raw so the
 // exposure / view pipeline downstream can amplify it (same idea as the slot diff).
 vec3 sharp_diff(vec2 uv) {
@@ -93,6 +138,10 @@ vec4 sample_image_lod(vec2 uv, float lod) {
 // LOD-0 point sample of the tiled image at UV.
 vec4 sample_tile_lod0(vec2 uv) { return sample_image_lod(uv, 0.0); }
 
+// Tiled images keep the bilinear/trilinear path (Lanczos over the array's bordered
+// tiles is out of scope); huge 8-bit images that need tiling are uncommon.
+vec4 sample_image_lanczos(vec2 uv) { return sample_image(uv); }
+
 // Original-resolution sharpness: |LOD0 - (2px-blurred LOD0)|, returned raw so the
 // exposure / view pipeline downstream can amplify it (same idea as the slot diff).
 vec3 sharp_diff(vec2 uv) {
@@ -142,6 +191,8 @@ pub struct ImageTexture {
     pub kind: ImageTextureKind,
     pub aspect: f32,
     pub is_encoded_srgb: bool,
+    /// 8-bit (LDR) source — eligible for Lanczos downscaling.
+    pub is_u8: bool,
 }
 
 impl ImageTexture {
@@ -203,6 +254,7 @@ pub struct UploadJob {
     total: i32,
     aspect: f32,
     is_encoded_srgb: bool,
+    is_u8: bool,
 }
 
 enum JobKind {
@@ -318,6 +370,7 @@ pub unsafe fn begin_upload(
         total,
         aspect: data.aspect(),
         is_encoded_srgb: data.is_encoded_srgb,
+        is_u8: data.is_u8(),
     })
 }
 
@@ -331,7 +384,7 @@ pub unsafe fn pump_upload(
 ) -> Option<ImageTexture> {
     let (_, format, ty, bpp, src) = pixel_format(data);
     gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-    let (aspect, is_srgb) = (job.aspect, job.is_encoded_srgb);
+    let (aspect, is_srgb, is_u8) = (job.aspect, job.is_encoded_srgb, job.is_u8);
 
     match &mut job.kind {
         JobKind::Single {
@@ -364,6 +417,7 @@ pub unsafe fn pump_upload(
                     kind: ImageTextureKind::Single(*texture),
                     aspect,
                     is_encoded_srgb: is_srgb,
+                    is_u8,
                 });
             }
             gl.bind_texture(glow::TEXTURE_2D, None);
@@ -424,6 +478,7 @@ pub unsafe fn pump_upload(
                     kind: ImageTextureKind::Tiled(out),
                     aspect,
                     is_encoded_srgb: is_srgb,
+                    is_u8,
                 });
             }
             gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);

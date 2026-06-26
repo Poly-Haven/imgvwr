@@ -292,6 +292,10 @@ pub struct App {
     /// Per-image-path display rotation, remembered for the session so reopening a
     /// rotated image (or stepping back to it) restores the rotation.
     image_rotations: HashMap<PathBuf, u8>,
+    /// Debug A/B override: when set (via `IMGVWR_DEBUG_NO_LANCZOS` in debug
+    /// builds), forces bilinear minification even for 8-bit images so the Lanczos
+    /// path can be compared. Always false in release.
+    debug_no_lanczos: bool,
     /// Undo / redo of editing state (guides, adjustments, toggle modes). The
     /// baseline is the last-committed snapshot; a change away from it (outside a
     /// gesture) pushes the baseline onto `undo_stack`. Cleared on each image load.
@@ -507,6 +511,7 @@ impl App {
             show_metadata: false,
             rotation: 0,
             image_rotations: HashMap::new(),
+            debug_no_lanczos: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             undo_baseline: UndoState::fresh(),
@@ -3358,6 +3363,10 @@ impl App {
         if std::env::var_os("IMGVWR_DEBUG_SHARPNESS").is_some() {
             self.sharpness = true;
         }
+        // A/B the Lanczos minification against bilinear for the same 8-bit image.
+        if std::env::var_os("IMGVWR_DEBUG_NO_LANCZOS").is_some() {
+            self.debug_no_lanczos = true;
+        }
         if let Ok(v) = std::env::var("IMGVWR_DEBUG_ROTATION") {
             if let Ok(r) = v.parse::<i32>() {
                 self.rotation = r.rem_euclid(4) as u8;
@@ -4017,6 +4026,8 @@ impl App {
             global_alpha: 1.0,
             // 2D display rotation (ignored by the panorama branch in the shader).
             rotation: self.rotation as i32,
+            // Debug A/B only: force Lanczos off to compare against bilinear.
+            lanczos_off: self.debug_no_lanczos,
         };
         // Minimap thumbnail pass parameters (panel rect + fade), gathered before
         // the mutable gfx borrow. Drawn after the scene, below the egui overlay.

@@ -56,6 +56,12 @@ impl ImageData {
         is_equirectangular(self.width, self.height)
     }
 
+    /// True for 8-bit-per-channel (LDR) sources, uploaded as a `U8` texture. Used
+    /// to pick Lanczos downscaling (8-bit only) vs bilinear (higher bit depths).
+    pub fn is_u8(&self) -> bool {
+        matches!(self.pixels, PixelBuffer::U8(_))
+    }
+
     /// Mean linear luminance (Rec.709) of the image, estimated from a subsample
     /// for speed (~1M pixels, so even a 24k panorama stays fast). `None` for
     /// 8-bit images, whose pixels are sRGB-encoded rather than scene-linear.

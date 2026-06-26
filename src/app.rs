@@ -2415,7 +2415,7 @@ impl App {
                 format!("{} · imgvwr", self.file_info.name)
             };
             if self.always_on_top {
-                title.push_str(" (always on top [A])");
+                title.push_str(" (Always on Top [A])");
             }
             gfx.window.set_title(&title);
         }
@@ -2476,7 +2476,18 @@ impl App {
             slot_labels: self.slot_labels(),
             active_slot: self.active_slot,
             titlebar_slide: self.titlebar_slide,
-            title: self.file_info.name.clone(),
+            title: {
+                // The borderless titlebar shows the filename; flag always-on-top
+                // here too (the OS title is invisible on a borderless window).
+                let mut t = self.file_info.name.clone();
+                if self.always_on_top {
+                    if t.is_empty() {
+                        t.push_str("imgvwr");
+                    }
+                    t.push_str("  (Always on Top [A])");
+                }
+                t
+            },
             icon: self.titlebar_icon.clone(),
             monitors: self.monitor_list(),
             startup_display: self.prefs.startup_monitor.clone(),

@@ -67,20 +67,57 @@ pub fn build_overlays(
     titlebar(ctx, inputs, actions);
 }
 
-/// Ruler strip thickness (px). 3px shorter than the original 24 (see ticks).
+/// Ruler strip thickness (px).
 const RULER_W: f32 = 21.0;
-/// Tick `(image-pixel interval, on-screen length, coarser interval to skip)`. A
-/// level is skipped once its ticks would be closer than ~3px on screen.
-const RULER_LEVELS: [(f32, f32, f32); 4] = [
-    (100.0, 17.0, 0.0),
-    (50.0, 10.0, 100.0),
-    (10.0, 6.0, 50.0),
-    (5.0, 3.0, 10.0),
-];
+/// On-screen tick lengths (minor, major).
+const TICK_MINOR: f32 = 7.0;
+const TICK_MAJOR: f32 = 14.0;
+/// Minimum on-screen spacing between minor ticks (px). Drives the dynamic step.
+const MIN_TICK_PX: f32 = 6.0;
 
 /// Tick colour: the old gray-210 darkened by 30%.
 fn ruler_tick_stroke() -> egui::Stroke {
     egui::Stroke::new(1.0, egui::Color32::from_gray(147))
+}
+
+/// The smallest "nice" number (1, 2 or 5 × 10ⁿ) ≥ `raw`. Used to pick a ruler
+/// step that keeps a comfortable on-screen spacing at any zoom.
+fn nice_step(raw: f32) -> f32 {
+    let raw = raw.max(f32::MIN_POSITIVE);
+    let pow = 10f32.powf(raw.log10().floor());
+    let m = raw / pow;
+    let nice = if m <= 1.0 {
+        1.0
+    } else if m <= 2.0 {
+        2.0
+    } else if m <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    nice * pow
+}
+
+/// Emit dynamic pixel-ruler ticks over the visible image-pixel range, choosing a
+/// nice minor step so ticks stay ≥ [`MIN_TICK_PX`] apart on screen — so the
+/// finest is one tick per image pixel when zoomed right in, and coarse (not
+/// dense) when zoomed far out. `tick(image_px, is_major)` paints each; majors are
+/// every 5th minor. The step floors at 1px (never finer than a pixel).
+fn pixel_ticks(lo: f32, hi: f32, ppx: f32, extent: f32, mut tick: impl FnMut(f32, bool)) {
+    let minor = nice_step(MIN_TICK_PX / ppx.max(1e-6)).max(1.0);
+    let (a, b) = (lo.min(hi).max(0.0), hi.max(lo).min(extent));
+    let k0 = (a / minor).floor() as i64;
+    let k1 = (b / minor).ceil() as i64;
+    if k1 - k0 > 5000 {
+        return; // degenerate ppx guard
+    }
+    for k in k0..=k1 {
+        let pos = k as f32 * minor;
+        if pos < 0.0 || pos > extent {
+            continue;
+        }
+        tick(pos, k % 5 == 0);
+    }
 }
 
 // Screen ↔ image-coordinate mappings shared by the rulers and the interactive
@@ -212,25 +249,14 @@ fn left_ruler(
             p.rect_filled(rect, 0.0, panel_bg());
             let stroke = ruler_tick_stroke();
             let (py0, py1) = (uv_y(rect.top()) * r.img_h, uv_y(rect.bottom()) * r.img_h);
-            for (interval, len, coarser) in RULER_LEVELS {
-                if interval * ppx_y < 3.0 {
-                    continue;
+            pixel_ticks(py0, py1, ppx_y, r.img_h, |py, major| {
+                let y = ey(py);
+                if y < rect.top() || y > rect.bottom() {
+                    return;
                 }
-                for k in (py0.min(py1) / interval).floor() as i64
-                    ..=(py0.max(py1) / interval).ceil() as i64
-                {
-                    let pos = k as f32 * interval;
-                    if pos < 0.0 || pos > r.img_h || (coarser > 0.0 && (pos % coarser).abs() < 0.5)
-                    {
-                        continue;
-                    }
-                    let y = ey(pos);
-                    if y < rect.top() || y > rect.bottom() {
-                        continue;
-                    }
-                    p.line_segment([egui::pos2(base_x, y), egui::pos2(base_x + len, y)], stroke);
-                }
-            }
+                let len = if major { TICK_MAJOR } else { TICK_MINOR };
+                p.line_segment([egui::pos2(base_x, y), egui::pos2(base_x + len, y)], stroke);
+            });
             resp
         });
     // Keep the ruler alive for the whole spawn-drag, even as the pointer leaves
@@ -280,20 +306,11 @@ fn bottom_ruler_strip(
         uv_x(screen.left()) * r.img_w,
         uv_x(screen.right()) * r.img_w,
     );
-    for (interval, len, coarser) in RULER_LEVELS {
-        if interval * ppx_x < 3.0 {
-            continue;
-        }
-        for k in (px0.min(px1) / interval).floor() as i64..=(px0.max(px1) / interval).ceil() as i64
-        {
-            let pos = k as f32 * interval;
-            if pos < 0.0 || pos > r.img_w || (coarser > 0.0 && (pos % coarser).abs() < 0.5) {
-                continue;
-            }
-            let x = ex(pos);
-            p.line_segment([egui::pos2(x, base_y), egui::pos2(x, base_y - len)], stroke);
-        }
-    }
+    pixel_ticks(px0, px1, ppx_x, r.img_w, |px, major| {
+        let x = ex(px);
+        let len = if major { TICK_MAJOR } else { TICK_MINOR };
+        p.line_segment([egui::pos2(x, base_y), egui::pos2(x, base_y - len)], stroke);
+    });
     // Pull a NEW *horizontal* guide upward out of the (horizontal) bottom ruler.
     ruler_spawn_drag(ui.ctx(), &resp, r, screen, true, guides_len, state, actions);
     resp.dragged()

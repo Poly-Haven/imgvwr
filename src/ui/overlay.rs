@@ -957,23 +957,24 @@ fn metadata_hud(
                                 .selectable(false),
                             );
                             ui.vertical(|ui| {
+                                let (iw, ih) = inputs.image_size;
                                 for (i, g) in inputs.guides.iter().enumerate() {
                                     ui.horizontal(|ui| {
-                                        if clickable(ui.small_button("×")).clicked() {
-                                            actions.push(UiAction::RemoveGuide(i));
-                                        }
+                                        // `V 425px` (vertical → x pixel) / `H 312px`
+                                        // (horizontal → y pixel), remove button at
+                                        // the right.
                                         let horizontal = g[1] >= 0.5;
-                                        let pct = g[0] * 100.0;
-                                        let text = format!(
-                                            "{} {:.1}%",
-                                            if horizontal { "Horizontal" } else { "Vertical" },
-                                            pct
-                                        );
+                                        let (axis, dim) =
+                                            if horizontal { ("H", ih) } else { ("V", iw) };
+                                        let px = (g[0] * dim as f32).round() as i64;
                                         ui.label(
-                                            egui::RichText::new(text)
+                                            egui::RichText::new(format!("{axis} {px}px"))
                                                 .color(egui::Color32::WHITE)
                                                 .size(12.0),
                                         );
+                                        if clickable(ui.small_button("×")).clicked() {
+                                            actions.push(UiAction::RemoveGuide(i));
+                                        }
                                     });
                                 }
                             });

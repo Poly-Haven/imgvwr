@@ -65,6 +65,8 @@ pub struct UiInputs {
     /// Active guides as `[coord (0..1), orientation]` (orientation ≥ 0.5 =
     /// horizontal). Listed in the metadata box with a remove button each.
     pub guides: Vec<[f32; 2]>,
+    /// Loaded image dimensions (px), for the guide list's pixel readout.
+    pub image_size: (u32, u32),
     pub show_help: bool,
     /// Transient bottom-right toast: `(text, alpha)`, drawn while alpha > 0.
     pub toast: Option<(String, f32)>,

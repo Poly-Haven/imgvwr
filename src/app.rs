@@ -2536,6 +2536,7 @@ impl App {
             ruler: self.ruler_info(),
             left_ruler_slide: self.left_ruler_slide,
             guides: self.guides.clone(),
+            image_size: (self.file_info.width, self.file_info.height),
             loading,
             progress,
             loading_name: self.pending_name.clone(),

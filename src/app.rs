@@ -2501,14 +2501,15 @@ impl App {
         // Overlay state, with headless-test overrides applied.
         let forced = self.force_overlay.as_deref();
         let loading = self.is_busy() || forced == Some("loading");
-        // GPU upload phase: real upload fraction. Decode phase: the file-read
-        // fraction when the format streams through the counting reader (e.g. a
-        // big file off a network drive), else indeterminate. Cap the read at 0.99
-        // so the bar doesn't sit at 100% through the (brief) decode/upload tail.
+        // One continuous bar across both phases: the file read is the first
+        // 0→80% and the GPU upload is the final 80→100%, so it fills straight
+        // through instead of zipping to full then restarting. The decode phase is
+        // determinate only when the format streams through the counting reader
+        // (e.g. a big file off a network drive); otherwise it's indeterminate.
         let progress = if self.pending.is_some() {
-            Some(self.upload_progress)
+            Some(0.8 + self.upload_progress.clamp(0.0, 1.0) * 0.2)
         } else if loading {
-            self.decode_progress.fraction().map(|f| f.min(0.99))
+            self.decode_progress.fraction().map(|f| f * 0.8)
         } else {
             None
         };

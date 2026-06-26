@@ -739,8 +739,11 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction
         });
 }
 
+/// Width of the loading box / progress bar (30% wider than the original 190).
+const LOADING_W: f32 = 247.0;
+
 fn loading(ctx: &egui::Context, inputs: &UiInputs) {
-    // Keep the bar animating (determinate fill, or barber-pole when indeterminate).
+    // Keep the bar animating (the barber-pole scrolls every frame).
     ctx.request_repaint();
     let name = inputs.loading_name.as_deref().unwrap_or("Loading");
     let label = match inputs.progress {
@@ -748,7 +751,8 @@ fn loading(ctx: &egui::Context, inputs: &UiInputs) {
         None => format!("{name}…"),
     };
     egui::Area::new(egui::Id::new("imgvwr_loading"))
-        .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::new(12.0, -12.0))
+        // Centred along the bottom edge.
+        .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -12.0))
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame {
@@ -758,7 +762,7 @@ fn loading(ctx: &egui::Context, inputs: &UiInputs) {
                 ..Default::default()
             }
             .show(ui, |ui| {
-                ui.set_width(190.0);
+                ui.set_width(LOADING_W);
                 ui.label(
                     egui::RichText::new(label)
                         .color(egui::Color32::WHITE)
@@ -770,42 +774,44 @@ fn loading(ctx: &egui::Context, inputs: &UiInputs) {
         });
 }
 
-/// A progress bar in the accent colour. `Some(p)` fills `p`; `None` shows a full
-/// bar with animated diagonal "barber-pole" stripes to signal ongoing work.
+/// A progress bar in the accent colour. `Some(p)` fills `p` of the width; `None`
+/// fills the whole bar to signal indeterminate work. Animated diagonal
+/// "barber-pole" stripes scroll across the filled portion in either case.
 fn progress_bar(ui: &mut egui::Ui, value: Option<f32>) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(190.0, 12.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(LOADING_W, 12.0), egui::Sense::hover());
     let painter = ui.painter().with_clip_rect(rect);
     let radius = egui::CornerRadius::same(3);
+    // Track.
     painter.rect_filled(
         rect,
         radius,
         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 28),
     );
-    match value {
-        Some(p) => {
-            let mut fill = rect;
-            fill.set_width(rect.width() * p.clamp(0.0, 1.0));
-            painter.rect_filled(fill, radius, ACCENT);
-        }
-        None => {
-            painter.rect_filled(rect, radius, ACCENT);
-            // Scrolling diagonal stripes (a translucent lighter overlay).
-            let h = rect.height();
-            let stripe = 9.0;
-            let period = stripe * 2.0;
-            let phase = (ui.input(|i| i.time) as f32 * 36.0) % period;
-            let mut x = rect.left() - h - period + phase;
-            let light = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 55);
-            while x < rect.right() + period {
-                let pts = vec![
-                    egui::pos2(x, rect.bottom()),
-                    egui::pos2(x + h, rect.top()),
-                    egui::pos2(x + h + stripe, rect.top()),
-                    egui::pos2(x + stripe, rect.bottom()),
-                ];
-                painter.add(egui::Shape::convex_polygon(pts, light, egui::Stroke::NONE));
-                x += period;
-            }
+    // Filled portion: the whole bar when indeterminate, else the value fraction.
+    let mut fill = rect;
+    if let Some(p) = value {
+        fill.set_width(rect.width() * p.clamp(0.0, 1.0));
+    }
+    painter.rect_filled(fill, radius, ACCENT);
+    // Scrolling diagonal stripes (a translucent lighter overlay) over the filled
+    // portion only — clipped to the fill so they don't bleed onto the track.
+    if fill.width() > 0.5 {
+        let sp = painter.with_clip_rect(fill);
+        let h = rect.height();
+        let stripe = 9.0;
+        let period = stripe * 2.0;
+        let phase = (ui.input(|i| i.time) as f32 * 36.0) % period;
+        let mut x = fill.left() - h - period + phase;
+        let light = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 55);
+        while x < fill.right() + period {
+            let pts = vec![
+                egui::pos2(x, fill.bottom()),
+                egui::pos2(x + h, fill.top()),
+                egui::pos2(x + h + stripe, fill.top()),
+                egui::pos2(x + stripe, fill.bottom()),
+            ];
+            sp.add(egui::Shape::convex_polygon(pts, light, egui::Stroke::NONE));
+            x += period;
         }
     }
 }

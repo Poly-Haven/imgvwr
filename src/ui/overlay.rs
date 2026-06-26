@@ -131,8 +131,13 @@ fn ruler_spawn_drag(
         }
     };
     if resp.drag_started() {
-        // Only begin the gesture when a guide can actually be added; at the cap
-        // the drag is inert (it must never grab a pre-existing guide).
+        // Start every gesture from a clean slate, so a stale index left by an
+        // earlier drag that was interrupted before its drag_stopped (e.g. the
+        // ruler vanished on a P-toggle to panorama, or the window shrank) can't be
+        // inherited. Only begin the gesture when a guide can actually be added; at
+        // the cap guide_spawn stays None, so the drag is inert and never grabs a
+        // pre-existing guide.
+        state.guide_spawn = None;
         if guides_len < crate::renderer::MAX_GUIDES {
             if let Some(pt) = ctx.pointer_interact_pos() {
                 state.guide_spawn = Some(guides_len);

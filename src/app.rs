@@ -1206,6 +1206,7 @@ impl App {
             self.isolate_channel = None;
             self.image_stretch = Vec2::ONE;
             self.guides.clear();
+            self.ui_state.guide_spawn = None;
         }
         self.load_state = LoadState::Loaded;
         self.update_window_title();
@@ -1503,6 +1504,9 @@ impl App {
         self.isolate_channel = None;
         self.sharpness = false;
         self.guides.clear();
+        // Drop any in-flight ruler spawn-drag index so it can't point at a
+        // since-cleared guide (the gesture's release, if any, becomes a no-op).
+        self.ui_state.guide_spawn = None;
         self.diff_slot = None;
         if let Some(gfx) = &mut self.gfx {
             gfx.renderer.set_diff_image(None);

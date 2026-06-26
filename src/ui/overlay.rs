@@ -79,9 +79,9 @@ fn ruler_tick_stroke() -> egui::Stroke {
     egui::Stroke::new(1.0, egui::Color32::from_gray(147))
 }
 
-/// The left pixel ruler (2D only). Reveals on its own slide — near the left edge,
-/// or while the bottom panel is up — and stays while hovered so a guide can be
-/// dragged (or clicked) off it. Spans from just below the titlebar (when it's
+/// The left pixel ruler (2D only). Reveals on its own slide — near the left edge
+/// only — and stays while hovered so a guide can be dragged (or clicked) off it.
+/// Spans from just below the titlebar (when it's
 /// showing) to the bottom edge; the bottom panel, drawn afterwards, covers the
 /// overlapping bottom-left corner so there's no fixed panel-height assumption.
 fn left_ruler(

@@ -234,9 +234,8 @@ pub struct App {
     ui_state: UiState,
     bottom_visible: bool,
     bottom_hide_deadline: Option<Instant>,
-    /// The left ruler reveals independently of the bottom panel (near the left
-    /// edge, or while the bottom panel is up), and stays up while hovered so a
-    /// guide can be dragged off it.
+    /// The left ruler reveals near the left edge only (independent of the bottom
+    /// panel), and stays up while hovered so a guide can be dragged off it.
     left_ruler_visible: bool,
     left_ruler_hide_deadline: Option<Instant>,
     file_info: FileInfo,
@@ -2683,9 +2682,9 @@ impl App {
         }
     }
 
-    /// Reveal the left ruler near the left edge (or while the bottom panel is up,
-    /// so the two rulers frame the image together), and keep it up while the
-    /// cursor is over it so a guide can be dragged off. 2D only.
+    /// Reveal the left ruler near the left edge, and keep it up while the cursor
+    /// is over it so a guide can be dragged off. 2D only. Deliberately NOT tied to
+    /// the bottom panel: hovering the bottom edge shows only the bottom ruler.
     fn tick_left_ruler(&mut self) {
         let scale = self
             .gfx
@@ -2695,8 +2694,7 @@ impl App {
         let near_left = self.cursor_in_window && self.cursor_pos.x <= (44.0 * scale) as f64;
         let eligible =
             !self.window_is_small() && !self.camera.is_panorama() && self.file_info.width != 0;
-        let show =
-            eligible && (near_left || self.bottom_visible || self.ui_state.pointer_over_left_ruler);
+        let show = eligible && (near_left || self.ui_state.pointer_over_left_ruler);
         if show {
             self.left_ruler_visible = true;
             self.left_ruler_hide_deadline = None;

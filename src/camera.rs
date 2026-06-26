@@ -163,6 +163,19 @@ impl CameraController {
         }
     }
 
+    /// Snap the 2D view to centred-and-fit (pan 0, zoom 1) — instant. No-op on
+    /// `Pano`. Used when entering 2D mode in a normal window so the image fills
+    /// the (re-framed) window with no black canvas, rather than carrying a look
+    /// direction across from panorama mode.
+    pub fn center_flat_now(&mut self) {
+        for cam in [&mut self.camera, &mut self.target] {
+            if let Camera::Flat { pan, zoom } = cam {
+                *pan = Vec2::ZERO;
+                *zoom = 1.0;
+            }
+        }
+    }
+
     /// Rotate the panorama look (radians) — instant (drag). No-op on `Flat`.
     pub fn rotate(&mut self, dyaw_rad: f32, dpitch_rad: f32) {
         for cam in [&mut self.camera, &mut self.target] {

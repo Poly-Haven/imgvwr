@@ -1130,12 +1130,19 @@ impl App {
             data.path.display()
         );
 
+        // A panorama opens in panorama mode by default — but if the user had
+        // flipped the *current* panorama to 2D, keep showing panoramas in 2D
+        // across the load (don't yank them back into the sphere).
+        let prev_pano_in_2d =
+            self.loaded_path.is_some() && self.file_info.panorama && !self.camera.is_panorama();
+        let want_pano = equirect && !prev_pano_in_2d;
+
         // Keep the current zoom/pan/exposure when the projection mode matches —
         // for the L lock, and always for a comparator recall (to compare the
         // same region). A 2D <-> panorama change resets to the per-image default.
         let keep_view = (self.locked || for_compare)
             && self.loaded_path.is_some()
-            && self.camera.is_panorama() == equirect;
+            && self.camera.is_panorama() == want_pano;
 
         self.file_info = FileInfo {
             name: data
@@ -1152,7 +1159,7 @@ impl App {
         };
         self.loaded_path = Some(data.path.clone());
         if !keep_view {
-            self.camera = CameraController::for_image(equirect);
+            self.camera = CameraController::for_image(want_pano);
             self.exposure = 0.0;
             self.gamma = 1.0;
             self.wrap_2d = false;
@@ -1182,11 +1189,11 @@ impl App {
         // Choose the OCIO view: panoramas restore the saved view for their
         // extension; HDRIs default to Filmic, everything else to Standard.
         self.select_view_for_load(equirect, &data.path);
-        // Frame the window to the loaded 2D image (panoramas keep the window;
-        // locked/compared views keep the current size for side-by-side compare).
-        // The window was pre-sized at creation for the initial image, so this is
-        // a no-op resize there; for navigation it re-frames and re-centres.
-        if !equirect && !self.locked && !for_compare {
+        // Frame the window to the image whenever it's shown flat (a real 2D image,
+        // or a panorama kept in 2D) so it fills the window with no black canvas.
+        // Panoramas shown in the sphere keep the window; locked/compared views
+        // keep the current size for side-by-side compare.
+        if !want_pano && !self.locked && !for_compare {
             self.resize_window_to_image(data.width, data.height);
         }
         self.apply_debug_overrides();
@@ -1859,7 +1866,18 @@ impl App {
             }
             (_, Some("p")) | (_, Some("P")) => {
                 let want = !self.camera.is_panorama();
+                let max_or_fs = self.fullscreen
+                    || self.gfx.as_ref().is_some_and(|g| g.window.is_maximized());
                 self.camera.set_mode(want);
+                // pano → 2D in a normal window: carrying the look direction across
+                // pans the image partly off the window, leaving black canvas —
+                // which fights "the image is the window". Centre it and re-frame
+                // the window to the image instead. Fullscreen / maximized keeps
+                // the look so a region under inspection stays put.
+                if !want && !max_or_fs {
+                    self.camera.center_flat_now();
+                    self.resize_window_to_image(self.file_info.width, self.file_info.height);
+                }
                 log::info!(
                     "projection -> {}",
                     if self.camera.is_panorama() {

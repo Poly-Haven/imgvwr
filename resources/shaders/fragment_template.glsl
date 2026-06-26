@@ -113,6 +113,12 @@ void main() {
     if (u_diff != 0) {
         texel = vec4(abs(texel.rgb - texture(u_diff_image, uv).rgb), 1.0);
     }
+    // Sharpness checker: |original - 2px-blurred original|, from the ORIGINAL
+    // full-resolution pixels (LOD 0), not the displayed mip. Done here in source
+    // space — like the slot diff — so exposure/view below can amplify it.
+    if (u_sharpness != 0) {
+        texel = vec4(sharp_diff(uv), 1.0);
+    }
 
     color = texel.rgb;
     float out_alpha = texel.a;
@@ -141,14 +147,7 @@ void main() {
     //    paths (do not also fold gamma into __OCIO_APPLY__).
     color = pow(max(color, vec3(0.0)), vec3(1.0 / max(u_gamma, 1e-6)));
 
-    // 5. Sharpness checker: replace the (mip-filtered) display with a high-pass of
-    //    the ORIGINAL full-resolution pixels, so it reveals the source sharpness
-    //    rather than the displayed buffer's.
-    if (u_sharpness != 0) {
-        color = clamp(sharp_highpass(uv), 0.0, 1.0);
-    }
-
-    // 6. Guide lines, drawn last so they sit on top of every mode. The line
+    // 5. Guide lines, drawn last so they sit on top of every mode. The line
     //    sticks to the image (compared in image-uv space) but is a constant 1px
     //    in screen space (distance normalised by the per-pixel uv derivative),
     //    with a 50% black shadow on either side. Works for 2D and panorama alike.

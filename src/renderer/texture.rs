@@ -24,8 +24,9 @@ vec4 sample_image(vec2 uv) { return texture(u_image, uv); }
 vec4 sample_image_grad(vec2 uv, vec2 ddx, vec2 ddy) {
     return textureGrad(u_image, uv, ddx, ddy);
 }
-// Original-resolution high-pass (LOD 0, 2px blur) for the sharpness checker.
-vec3 sharp_highpass(vec2 uv) {
+// Original-resolution sharpness: |LOD0 - (2px-blurred LOD0)|. Returned raw so the
+// exposure / view pipeline downstream can amplify it (same idea as the slot diff).
+vec3 sharp_diff(vec2 uv) {
     vec2 ts = 2.0 / vec2(textureSize(u_image, 0));
     vec3 c = textureLod(u_image, uv, 0.0).rgb;
     vec3 b = (c
@@ -33,7 +34,7 @@ vec3 sharp_highpass(vec2 uv) {
         + textureLod(u_image, uv - vec2(ts.x, 0.0), 0.0).rgb
         + textureLod(u_image, uv + vec2(0.0, ts.y), 0.0).rgb
         + textureLod(u_image, uv - vec2(0.0, ts.y), 0.0).rgb) * 0.2;
-    return vec3(0.5) + (c - b) * 4.0;
+    return abs(c - b);
 }";
 
 /// `__IMAGE_SAMPLER__` for the tiled path.
@@ -86,8 +87,9 @@ vec4 sample_tile_lod0(vec2 uv) {
     return textureLod(u_tiles, vec3(tile_uv, layer), 0.0);
 }
 
-// Original-resolution high-pass (LOD 0, 2px blur) for the sharpness checker.
-vec3 sharp_highpass(vec2 uv) {
+// Original-resolution sharpness: |LOD0 - (2px-blurred LOD0)|, returned raw so the
+// exposure / view pipeline downstream can amplify it (same idea as the slot diff).
+vec3 sharp_diff(vec2 uv) {
     vec2 ts = 2.0 / u_tiled_image_size;
     vec3 c = sample_tile_lod0(uv).rgb;
     vec3 b = (c
@@ -95,7 +97,7 @@ vec3 sharp_highpass(vec2 uv) {
         + sample_tile_lod0(uv - vec2(ts.x, 0.0)).rgb
         + sample_tile_lod0(uv + vec2(0.0, ts.y)).rgb
         + sample_tile_lod0(uv - vec2(0.0, ts.y)).rgb) * 0.2;
-    return vec3(0.5) + (c - b) * 4.0;
+    return abs(c - b);
 }";
 
 /// Border replicated around each tile. Mip level L stays seamless while

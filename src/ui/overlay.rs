@@ -164,8 +164,14 @@ fn degree_ticks(s0: f32, s1: f32, angle_at: impl Fn(f32) -> f32, mut tick: impl 
         prev_raw = raw;
         samples.push((s, acc));
     }
-    let amin = samples.iter().map(|&(_, a)| a).fold(f32::INFINITY, f32::min);
-    let amax = samples.iter().map(|&(_, a)| a).fold(f32::NEG_INFINITY, f32::max);
+    let amin = samples
+        .iter()
+        .map(|&(_, a)| a)
+        .fold(f32::INFINITY, f32::min);
+    let amax = samples
+        .iter()
+        .map(|&(_, a)| a)
+        .fold(f32::NEG_INFINITY, f32::max);
     let minor = nice_degrees((amax - amin).max(1e-4) / len * MIN_TICK_PX);
     if (amax - amin) / minor > 4000.0 {
         return;
@@ -1063,7 +1069,11 @@ fn loading(ctx: &egui::Context, inputs: &UiInputs) {
         Some(p) => format!("{}%", (p * 100.0).round() as i32),
         None => "…".to_string(),
     };
-    let text = |s: String| egui::RichText::new(s).color(egui::Color32::WHITE).size(13.0);
+    let text = |s: String| {
+        egui::RichText::new(s)
+            .color(egui::Color32::WHITE)
+            .size(13.0)
+    };
     egui::Area::new(egui::Id::new("imgvwr_loading"))
         // Centred along the bottom edge.
         .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -12.0))

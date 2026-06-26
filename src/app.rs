@@ -1587,7 +1587,10 @@ impl App {
                 }
             }
             if added > 0 {
-                self.show_toast(format!("Added {added} guide{}", if added == 1 { "" } else { "s" }));
+                self.show_toast(format!(
+                    "Added {added} guide{}",
+                    if added == 1 { "" } else { "s" }
+                ));
                 self.request_redraw();
                 return;
             }

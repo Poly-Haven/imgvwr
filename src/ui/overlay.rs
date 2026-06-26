@@ -47,7 +47,7 @@ pub fn build_overlays(
     }
 
     if inputs.show_help {
-        help_dialog(ctx, actions);
+        help_dialog(ctx, inputs, actions);
     }
 
     settings_dialog(ctx, inputs, state, actions);
@@ -322,13 +322,25 @@ fn minimap(ctx: &egui::Context, inputs: &UiInputs) {
         egui::Id::new("imgvwr_minimap"),
     ));
 
-    // Current-view outline (white), clipped to the panel so a view box larger than
-    // the image, or a wrapped panorama segment, can't spill past the edge.
+    // Current-view region, clipped to the panel so a view box larger than the
+    // image, or a wrapped panorama segment, can't spill past the edge. Each
+    // segment is shaded with 10% white (the 2D box is one rect; a panorama view is
+    // its un-projected quad, split into pieces at the longitude wrap) and outlined.
     let clipped = painter.with_clip_rect(info.rect);
+    let view_fill = egui::Color32::from_white_alpha((a * 26.0).round() as u8);
     let view_stroke = egui::Stroke::new(
         1.0,
         egui::Color32::from_white_alpha((a * 235.0).round() as u8),
     );
+    for seg in &info.view_segments {
+        if seg.len() >= 3 {
+            clipped.add(egui::Shape::convex_polygon(
+                seg.clone(),
+                view_fill,
+                egui::Stroke::NONE,
+            ));
+        }
+    }
     for seg in &info.view_segments {
         if seg.len() >= 2 {
             clipped.add(egui::Shape::line(seg.clone(), view_stroke));
@@ -667,10 +679,20 @@ fn reset_button(ui: &mut egui::Ui, area: egui::Rect, row_center_y: f32) -> egui:
         size,
     );
     let resp = ui.interact(rect, ui.id().with("reset_btn"), egui::Sense::click());
+    // Style it exactly like the other adjustment-row buttons (the +/- steppers):
+    // the same per-state widget visuals (fill, border, expansion, fg colour),
+    // rather than the old bright white chip.
+    let wv = *ui.style().interact(&resp);
+    let r = rect.expand(wv.expansion);
     let painter = ui.painter();
-    let chip = if resp.hovered() { 48 } else { 22 };
-    painter.rect_filled(rect, 5.0, egui::Color32::from_white_alpha(chip));
-    draw_reset_glyph(painter, rect.center(), 6.3, egui::Color32::from_gray(235));
+    painter.rect(
+        r,
+        wv.corner_radius,
+        wv.weak_bg_fill,
+        wv.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    draw_reset_glyph(painter, r.center(), 6.3, wv.fg_stroke.color);
     clickable(resp).on_hover_text("Reset all adjustments (Ctrl+R)")
 }
 
@@ -1508,9 +1530,12 @@ fn toast(ctx: &egui::Context, text: &str, alpha: f32) {
         });
 }
 
-/// Centred hotkey reference (toggled with H, dismissed with H/Esc/Close), laid
-/// out as side-by-side sections to keep it short vertically.
-fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
+/// Centred hotkey reference (toggled with H, dismissed with H/Esc/Close). Sections
+/// are laid out in columns that wrap to as many rows as the window allows; if even
+/// wrapping can't fit them all, the least-important trailing sections are dropped
+/// and a "Show more" button (which goes fullscreen) appears. Sections are listed
+/// most-important first, so dropping from the end keeps the essentials.
+fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
     type Section = (&'static str, &'static [(&'static str, &'static str)]);
     const SECTIONS: &[Section] = &[
         (
@@ -1576,10 +1601,87 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
             ],
         ),
     ];
+    // Layout constants (points). Column gap between sections; vertical gap between
+    // wrapped rows; the chrome heights reserved when deciding how many sections fit.
+    const COL_GAP: f32 = 22.0;
+    const ROW_GAP: f32 = 14.0;
+    const SCREEN_MARGIN: f32 = 24.0; // keep the dialog off the very window edges
+    const FRAME_PAD: f32 = 16.0; // overlay_frame inner margin
+    const TITLE_H: f32 = 34.0; // title label + spacing
+    const FOOTER_H: f32 = 44.0; // spacing + button row
+
+    // Measure with the real body font so the column count and the omission
+    // decision match what egui will actually lay out.
+    let body = ctx
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Body)
+        .cloned()
+        .unwrap_or(egui::FontId::proportional(14.0));
+    let text_w = |s: &str| {
+        ctx.fonts(|f| {
+            f.layout_no_wrap(s.to_string(), body.clone(), egui::Color32::WHITE)
+                .size()
+                .x
+        })
+    };
+    let line_h = ctx.fonts(|f| {
+        f.layout_no_wrap("Mg".to_string(), body.clone(), egui::Color32::WHITE)
+            .size()
+            .y
+    });
+    // Widest single section (its key column + 10px grid gap + action column), so a
+    // row of `cols` such sections is guaranteed to fit `cols * sec_w` of width.
+    let sec_w = SECTIONS
+        .iter()
+        .map(|(_, keys)| {
+            let kw = keys.iter().map(|(k, _)| text_w(k)).fold(0.0, f32::max);
+            let aw = keys.iter().map(|(_, a)| text_w(a)).fold(0.0, f32::max);
+            kw + 10.0 + aw
+        })
+        .fold(1.0, f32::max);
+    let row_h = line_h + 3.0; // grid row + spacing
+    let header_h = line_h + 8.0; // section header + the 4px space under it
+    let section_h = |keys: &[(&str, &str)]| header_h + keys.len() as f32 * row_h;
+
+    let screen = ctx.screen_rect();
+    let avail_w = (screen.width() - 2.0 * (SCREEN_MARGIN + FRAME_PAD)).max(sec_w);
+    let avail_h = screen.height() - 2.0 * (SCREEN_MARGIN + FRAME_PAD) - TITLE_H - FOOTER_H;
+    let cols =
+        (((avail_w + COL_GAP) / (sec_w + COL_GAP)).floor() as usize).clamp(1, SECTIONS.len());
+
+    // Packed height of the first `keep` sections in rows of `cols` (each row as
+    // tall as its tallest section).
+    let packed_h = |keep: usize| {
+        let mut h = 0.0;
+        let mut i = 0;
+        while i < keep {
+            let end = (i + cols).min(keep);
+            let rh = SECTIONS[i..end]
+                .iter()
+                .map(|(_, k)| section_h(k))
+                .fold(0.0, f32::max);
+            h += rh;
+            if end < keep {
+                h += ROW_GAP;
+            }
+            i = end;
+        }
+        h
+    };
+    let mut keep = SECTIONS.len();
+    while keep > 1 && packed_h(keep) > avail_h {
+        keep -= 1;
+    }
+    // Only offer "Show more" → fullscreen when it could actually help (not already
+    // fullscreen); otherwise there's nothing more room to reveal.
+    let truncated = keep < SECTIONS.len() && !inputs.is_fullscreen;
+
     egui::Area::new(egui::Id::new("imgvwr_help"))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             overlay_frame().show(ui, |ui| {
+                ui.set_max_width(avail_w);
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("Keyboard & mouse")
@@ -1589,38 +1691,53 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
                     );
                 });
                 ui.add_space(10.0);
-                ui.horizontal_top(|ui| {
-                    for (i, (title, keys)) in SECTIONS.iter().enumerate() {
-                        if i > 0 {
-                            ui.add_space(22.0);
-                        }
-                        ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(*title).strong().color(ACCENT));
-                            ui.add_space(4.0);
-                            egui::Grid::new(("imgvwr_help", *title))
-                                .num_columns(2)
-                                .spacing([10.0, 3.0])
-                                .show(ui, |ui| {
-                                    for (key, action) in *keys {
-                                        ui.label(
-                                            egui::RichText::new(*key)
-                                                .color(egui::Color32::from_rgb(180, 200, 255)),
-                                        );
-                                        ui.label(
-                                            egui::RichText::new(*action)
-                                                .color(egui::Color32::from_gray(220)),
-                                        );
-                                        ui.end_row();
-                                    }
-                                });
-                        });
+                for row_start in (0..keep).step_by(cols) {
+                    if row_start > 0 {
+                        ui.add_space(ROW_GAP);
                     }
-                });
+                    let row_end = (row_start + cols).min(keep);
+                    ui.horizontal_top(|ui| {
+                        for (j, (title, keys)) in SECTIONS[row_start..row_end].iter().enumerate() {
+                            if j > 0 {
+                                ui.add_space(COL_GAP);
+                            }
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new(*title).strong().color(ACCENT));
+                                ui.add_space(4.0);
+                                egui::Grid::new(("imgvwr_help", *title))
+                                    .num_columns(2)
+                                    .spacing([10.0, 3.0])
+                                    .show(ui, |ui| {
+                                        for (key, action) in *keys {
+                                            ui.label(
+                                                egui::RichText::new(*key)
+                                                    .color(egui::Color32::from_rgb(180, 200, 255)),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(*action)
+                                                    .color(egui::Color32::from_gray(220)),
+                                            );
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                        }
+                    });
+                }
                 ui.add_space(12.0);
                 ui.vertical_centered(|ui| {
-                    if clickable(ui.button("Close")).clicked() {
-                        actions.push(UiAction::CloseHelp);
-                    }
+                    ui.horizontal(|ui| {
+                        if truncated
+                            && clickable(ui.button("Show more"))
+                                .on_hover_text("Go fullscreen to show every shortcut")
+                                .clicked()
+                        {
+                            actions.push(UiAction::ToggleFullscreen);
+                        }
+                        if clickable(ui.button("Close")).clicked() {
+                            actions.push(UiAction::CloseHelp);
+                        }
+                    });
                 });
             });
         });

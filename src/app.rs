@@ -248,9 +248,11 @@ pub struct App {
     /// Deadline for the auto-shown minimap (set on each 2D view change): full
     /// opacity until then, fading over `MINIMAP_FADE` after. `None` = no auto-show.
     minimap_auto_until: Option<Instant>,
-    /// Last 2D `(pan.x, pan.y, zoom)` seen by `render`, to detect a view change
-    /// that should auto-show the minimap. `None` in panorama mode.
-    minimap_prev_view: Option<(f32, f32, f32)>,
+    /// Last view signature `(mode, a, b, c)` seen by `render`, to detect a view
+    /// change that should auto-show the minimap. `mode` is the projection (so a
+    /// P-toggle isn't read as a pan); the floats are `(pan.x, pan.y, zoom)` in 2D
+    /// or `(yaw, pitch, fov)` in panorama.
+    minimap_prev_view: Option<(u8, f32, f32, f32)>,
     /// True while the left button is dragging inside the minimap (navigating).
     minimap_drag: bool,
     /// Headless-test override (debug only): force the minimap fade alpha to a
@@ -860,6 +862,12 @@ impl App {
     /// otherwise re-introduce an offset on top of the recentre).
     fn follow_zoom_with_window(&mut self) -> bool {
         if self.fullscreen {
+            return false;
+        }
+        // With 2D wrap on the image tiles infinitely, so framing the window to it
+        // is meaningless — a zoom should just scale the image in place. Returning
+        // false (as if "capped") makes the caller zoom toward the cursor instead.
+        if self.wrap_2d && matches!(self.camera.camera, Camera::Flat { .. }) {
             return false;
         }
         let Some(zoom) = self.camera.target_zoom() else {
@@ -1665,11 +1673,14 @@ impl App {
             .any(|g| (g[0] - pos).abs() < 1e-3 && (g[1] - orient).abs() < 0.5)
     }
 
-    /// The G key subdivides ONE axis per press, alternating between the two, so
-    /// the density doubles on whichever axis is behind: ½ horizontal, then ½
-    /// vertical, then the quarters horizontal, then vertical, … up to 1/32 on each
-    /// axis. Each press adds every odd-numerator position at that axis's coarsest
-    /// not-yet-complete level, capped at [`crate::renderer::MAX_GUIDES`].
+    /// The G key subdivides ONE axis per press so the grid converges toward
+    /// square cells. The very first guide is always horizontal; after that it
+    /// subdivides whichever axis brings the cell aspect closest to 1:1 — i.e. the
+    /// longer cell edge first. For a 32:1 image that means splitting the width
+    /// (vertical guides) down to 1/32 before the 2nd horizontal guide; for a 2:1
+    /// HDRI it's H, V, V (→ 8 squares), then alternating H/V. Each press adds every
+    /// odd-numerator position at that axis's coarsest not-yet-complete level (½, ¼
+    /// … 1/32), capped at [`crate::renderer::MAX_GUIDES`].
     fn add_next_guide(&mut self) {
         // Completed subdivision levels (denoms 2,4,8,16,32 → max 5) for one axis.
         let completed = |this: &Self, horizontal: bool| -> u32 {
@@ -1689,19 +1700,15 @@ impl App {
             levels
         };
         let (h, v) = (completed(self, true), completed(self, false));
-        // Advance the axis with fewer completed levels (alternating); ties go to
-        // horizontal. Skip an axis already complete to 1/32.
-        let horizontal = if h >= 5 {
-            false
-        } else if v >= 5 {
-            true
+        let aspect = if self.file_info.height > 0 {
+            self.file_info.width as f32 / self.file_info.height as f32
         } else {
-            h <= v
+            1.0
+        };
+        let Some(horizontal) = next_guide_horizontal(h, v, self.guides.is_empty(), aspect) else {
+            return; // both axes full
         };
         let levels = if horizontal { h } else { v };
-        if levels >= 5 {
-            return; // both axes full
-        }
         let denom = 2u32 << levels; // 2, 4, 8, 16, 32
         let mut added = 0;
         for n in (1..denom).step_by(2) {
@@ -2405,11 +2412,6 @@ impl App {
         if self.minimap_on {
             return 1.0;
         }
-        // Auto-show is 2D-only; a deadline left over from 2D must not surface the
-        // minimap after switching to panorama (where M-toggle is the only way in).
-        if !matches!(self.camera.camera, Camera::Flat { .. }) {
-            return 0.0;
-        }
         match self.minimap_auto_until {
             Some(t) => {
                 let now = Instant::now();
@@ -2441,10 +2443,7 @@ impl App {
     /// True while the auto-shown minimap is still holding or fading (drives the
     /// redraw scheduling so the fade animates even when nothing else moves).
     fn minimap_fading(&self) -> bool {
-        if self.minimap_on
-            || !self.minimap_gated_in()
-            || !matches!(self.camera.camera, Camera::Flat { .. })
-        {
+        if self.minimap_on || !self.minimap_gated_in() {
             return false;
         }
         match self.minimap_auto_until {
@@ -3194,6 +3193,7 @@ impl App {
             guide_color: self.prefs.guide_color,
             background_color: self.prefs.background_color,
             is_maximized: self.gfx.as_ref().is_some_and(|g| g.window.is_maximized()),
+            is_fullscreen: self.fullscreen,
             resize_cursor: if self.guide_drag.is_some() {
                 Some(egui::CursorIcon::Grabbing)
             } else if self.dragging || self.window_drag_armed {
@@ -3572,23 +3572,28 @@ impl App {
             .min(0.1);
         let cam_moving = self.camera.animate(dt);
         let tone_moving = self.animate_tone(dt);
-        // Auto-show the navigation minimap on any 2D pan/zoom (no auto-show in
-        // panorama). Comparing the rendered camera each frame catches drags,
+        // Auto-show the navigation minimap on any pan/zoom/look-around (both 2D
+        // and panorama). Comparing the rendered camera each frame catches drags,
         // wheel, numpad, eased animation and minimap-drag navigation in one place.
-        if let Camera::Flat { pan, zoom } = self.camera.camera {
-            let cur = (pan.x, pan.y, zoom);
-            let changed = self.minimap_prev_view.is_some_and(|p| {
-                (p.0 - cur.0).abs() > 1e-5
-                    || (p.1 - cur.1).abs() > 1e-5
-                    || (p.2 - cur.2).abs() > 1e-4
-            });
-            if changed {
+        // The mode tag means a P-toggle (mode change) isn't mistaken for a move.
+        let cur = match self.camera.camera {
+            Camera::Flat { pan, zoom } => (1u8, pan.x, pan.y, zoom),
+            Camera::Pano {
+                yaw_rad,
+                pitch_rad,
+                fov_deg,
+            } => (0u8, yaw_rad, pitch_rad, fov_deg),
+        };
+        if let Some(p) = self.minimap_prev_view {
+            let moved = p.0 == cur.0
+                && ((p.1 - cur.1).abs() > 1e-5
+                    || (p.2 - cur.2).abs() > 1e-5
+                    || (p.3 - cur.3).abs() > 1e-4);
+            if moved {
                 self.minimap_auto_until = Some(now + MINIMAP_HOLD);
             }
-            self.minimap_prev_view = Some(cur);
-        } else {
-            self.minimap_prev_view = None;
         }
+        self.minimap_prev_view = Some(cur);
         // Dev-only: force the settings dialog open for headless verification.
         #[cfg(debug_assertions)]
         if self.force_overlay.as_deref() == Some("settings") {
@@ -3651,7 +3656,17 @@ impl App {
                 .filter(|&i| i < guide_n)
                 .map(|i| i as i32)
                 .unwrap_or(-1),
-            guide_hover_color: inverse_hue(srgb_u8_to_f32(self.prefs.guide_color)),
+            // While grabbing a guide it's drawn in a hue halfway between the base
+            // and the hover (inverse) colour (a 90° rotation); a plain hover uses
+            // the full inverse hue.
+            guide_hover_color: {
+                let base = srgb_u8_to_f32(self.prefs.guide_color);
+                if self.guide_drag.is_some() {
+                    shift_hue(base, 90.0)
+                } else {
+                    inverse_hue(base)
+                }
+            },
             clarity_amount: self.clarity_amount,
             clarity_radius: self.clarity_radius,
             global_alpha: 1.0,
@@ -4429,10 +4444,10 @@ fn srgb_u8_to_f32(c: [u8; 3]) -> [f32; 3] {
     ]
 }
 
-/// Rotate a colour's hue by 180° while keeping its saturation and value, for the
-/// guide hover colour ("always the inverse hue"). Operates in the gamma-encoded
-/// space the colour is picked in (it's a UI accent, not a physical mix).
-fn inverse_hue(rgb: [f32; 3]) -> [f32; 3] {
+/// Rotate a colour's hue by `deg` degrees while keeping its saturation and value.
+/// Operates in the gamma-encoded space the colour is picked in (it's a UI accent,
+/// not a physical mix). Used for the guide hover (180°) and grab (90°) highlights.
+fn shift_hue(rgb: [f32; 3], deg: f32) -> [f32; 3] {
     let (r, g, b) = (rgb[0], rgb[1], rgb[2]);
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
@@ -4447,7 +4462,7 @@ fn inverse_hue(rgb: [f32; 3]) -> [f32; 3] {
     } else {
         60.0 * ((r - g) / d + 4.0)
     };
-    h = (h + 180.0).rem_euclid(360.0); // inverse hue
+    h = (h + deg).rem_euclid(360.0);
     let s = if max <= 1e-6 { 0.0 } else { d / max };
     let v = max;
     // HSV -> RGB.
@@ -4464,6 +4479,40 @@ fn inverse_hue(rgb: [f32; 3]) -> [f32; 3] {
     };
     let m = v - c;
     [r1 + m, g1 + m, b1 + m]
+}
+
+/// The guide hover highlight: the inverse hue (180° rotation) of the base colour.
+fn inverse_hue(rgb: [f32; 3]) -> [f32; 3] {
+    shift_hue(rgb, 180.0)
+}
+
+/// Decide which axis the next G subdivision should split, given the completed
+/// subdivision levels per axis (`h` horizontal, `v` vertical), whether there are
+/// no guides yet, and the image `aspect` (W/H). Returns `Some(true)` for a
+/// horizontal guide level, `Some(false)` for vertical, or `None` when both axes
+/// are already at the 1/32 cap.
+///
+/// The grid converges toward square cells: cell aspect = `aspect · 2^h / 2^v`,
+/// and each press picks the axis whose next level brings `|ln(cell aspect)|`
+/// closest to 0 (subdividing the longer cell edge first). The very first guide is
+/// always horizontal; ties go to horizontal, so once cells are square the axes
+/// then alternate H/V.
+fn next_guide_horizontal(h: u32, v: u32, guides_empty: bool, aspect: f32) -> Option<bool> {
+    if guides_empty {
+        return Some(true);
+    }
+    match (h >= 5, v >= 5) {
+        (true, true) => None,
+        (true, false) => Some(false),
+        (false, true) => Some(true),
+        (false, false) => {
+            use std::f32::consts::LN_2;
+            let ln_a = aspect.max(1e-4).ln();
+            let after_h = (ln_a + (h as f32 + 1.0 - v as f32) * LN_2).abs();
+            let after_v = (ln_a + (h as f32 - v as f32 - 1.0) * LN_2).abs();
+            Some(after_h <= after_v)
+        }
+    }
 }
 
 /// Map a numpad key to a zoom digit 1..=9, else `None`.
@@ -4861,5 +4910,58 @@ mod tests {
         // Grey has no hue to rotate, so it must map to itself.
         let grey = srgb_u8_to_f32([90, 90, 90]);
         assert!(close(inverse_hue(grey), grey));
+    }
+
+    /// Simulate pressing G `n` times for an image of the given aspect, returning
+    /// the axis sequence ('H'/'V', or '.' when both axes are full).
+    fn guide_axis_sequence(aspect: f32, n: usize) -> String {
+        let (mut h, mut v) = (0u32, 0u32);
+        let mut empty = true;
+        let mut out = String::new();
+        for _ in 0..n {
+            match next_guide_horizontal(h, v, empty, aspect) {
+                Some(true) => {
+                    out.push('H');
+                    h += 1;
+                }
+                Some(false) => {
+                    out.push('V');
+                    v += 1;
+                }
+                None => out.push('.'),
+            }
+            empty = false;
+        }
+        out
+    }
+
+    #[test]
+    fn guide_order_first_is_always_horizontal() {
+        // Regardless of aspect, the very first guide is horizontal.
+        for a in [0.25_f32, 0.5, 1.0, 2.0, 32.0] {
+            assert_eq!(&guide_axis_sequence(a, 1), "H", "aspect {a}");
+        }
+    }
+
+    #[test]
+    fn guide_order_hdri_2to1() {
+        // A 2:1 HDRI: H, then V V (→ 8 equal squares), then alternating H/V.
+        assert_eq!(guide_axis_sequence(2.0, 10), "HVVHVHVHVH");
+    }
+
+    #[test]
+    fn guide_order_very_wide_subdivides_long_edge_first() {
+        // A 32:1 image: split the width (vertical guides) down to the 1/32 cap
+        // before the 2nd horizontal guide.
+        assert_eq!(guide_axis_sequence(32.0, 7), "HVVVVVH");
+    }
+
+    #[test]
+    fn guide_order_caps_then_stops() {
+        // Each axis caps at 5 levels (1/32); once both are full, no more are added.
+        let seq = guide_axis_sequence(1.0, 14);
+        assert_eq!(seq.matches('H').count(), 5);
+        assert_eq!(seq.matches('V').count(), 5);
+        assert!(seq.ends_with(".."), "both-full tail: {seq}");
     }
 }

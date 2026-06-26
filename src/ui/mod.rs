@@ -100,6 +100,9 @@ pub struct UiInputs {
     pub guide_color: [u8; 3],
     /// Whether the window is maximized (drives the maximize/restore glyph).
     pub is_maximized: bool,
+    /// Whether the window is fullscreen (so the help dialog hides its "Show more"
+    /// → fullscreen button when there's nothing more fullscreen could reveal).
+    pub is_fullscreen: bool,
     /// Resize cursor for a borderless edge under the pointer (set via egui so it
     /// resets correctly when the pointer leaves the edge).
     pub resize_cursor: Option<egui::CursorIcon>,

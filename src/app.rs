@@ -2584,6 +2584,7 @@ impl App {
             toast: self.toast_render(),
             slot_labels: self.slot_labels(),
             active_slot: self.active_slot,
+            diff_slot: self.diff_slot,
             titlebar_slide: self.titlebar_slide,
             title: {
                 // The borderless titlebar shows the filename; flag always-on-top

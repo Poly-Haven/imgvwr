@@ -75,6 +75,8 @@ pub struct UiInputs {
     pub slot_labels: [Option<String>; 9],
     /// The slot whose image is currently displayed (for flag highlighting).
     pub active_slot: Option<usize>,
+    /// The slot currently being shown as a difference (Alt+N); highlighted too.
+    pub diff_slot: Option<usize>,
 
     // Borderless custom titlebar.
     /// Titlebar slide-in progress, 0 (hidden above the edge) … 1 (fully in).

@@ -901,7 +901,9 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction
                     let Some(label) = label else {
                         continue;
                     };
-                    let active = inputs.active_slot == Some(i);
+                    // Highlight the displayed slot AND (when diffing) the slot
+                    // being compared against, so both ends of a diff stand out.
+                    let active = inputs.active_slot == Some(i) || inputs.diff_slot == Some(i);
                     let (fill, fg) = if active {
                         (ACCENT, egui::Color32::WHITE)
                     } else {

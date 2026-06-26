@@ -1054,7 +1054,9 @@ fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiActio
         chevron,
         egui::RichText::new(current).color(egui::Color32::WHITE),
     );
-    let resp = egui::menu::menu_custom_button(ui, button, |ui| {
+    // The menu state lives in egui's `BarState`, keyed by this ui's id.
+    let bar_id = ui.id();
+    egui::menu::menu_custom_button(ui, button, |ui| {
         for view in inputs.views_for(&active_display) {
             let is_active = inputs
                 .active
@@ -1085,8 +1087,11 @@ fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiActio
             }
         });
     });
-    // `inner` is `Some` only while the menu is open (the closure ran this frame).
-    resp.inner.is_some()
+    // Whether the View menu (or a sub-menu) is open. The menu_custom_button
+    // return's `.inner` is NOT a reliable signal — egui only surfaces it on the
+    // frame the menu *closes*, so it reads false the whole time the menu is open.
+    // The authoritative state is egui's stored BarState for this ui's id.
+    egui::menu::BarState::load(ui.ctx(), bar_id).is_some()
 }
 
 /// Transient bottom-right HUD; `alpha` fades it out (see `App::toast_render`).

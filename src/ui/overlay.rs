@@ -1417,7 +1417,7 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
             &[
                 ("S", "Sharpness (original res)"),
                 ("Alt + middle-drag", "Squash / stretch image"),
-                ("G", "Add guide (½, ¼ … to 1/32)"),
+                ("G", "Add guide level (½, ¼ … 1/32)"),
                 ("Pull from a ruler", "Drag out a guide"),
                 ("Drag / right-click guide", "Move / delete it"),
                 ("Channel boxes (F2)", "Isolate R/G/B/A"),

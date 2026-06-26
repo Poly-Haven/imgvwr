@@ -1565,23 +1565,31 @@ impl App {
             .any(|g| (g[0] - pos).abs() < 1e-3 && (g[1] - orient).abs() < 0.5)
     }
 
-    /// The G key adds the next guide in a fixed sequence: horizontal then vertical
-    /// at 50%, then the quarters (¼, ¾) H then V, then the eighths, and so on —
-    /// always the first canonical position not already present. Stops once the
-    /// grid is complete down to 1/32 divisions on each axis (62 lines).
+    /// The G key adds the next whole subdivision *level* of guides, so the grid
+    /// density doubles with each press rather than creeping one line at a time:
+    /// first ½ (H+V), then the quarters (¼, ¾ H+V), then the eighths, … up to
+    /// 1/32 on each axis (62 lines total). Adds every odd-numerator position at
+    /// the coarsest not-yet-complete level (even numerators belong to a coarser
+    /// level already covered), capped at [`crate::renderer::MAX_GUIDES`].
     fn add_next_guide(&mut self) {
         let mut denom = 2u32;
         while denom <= 32 {
-            // Odd numerators are the positions new at this level (even ones belong
-            // to a coarser level already covered).
+            let mut added = 0;
             for horizontal in [true, false] {
                 for n in (1..denom).step_by(2) {
                     let pos = n as f32 / denom as f32;
-                    if !self.has_guide(pos, horizontal) {
-                        self.add_guide(pos, horizontal);
-                        return;
+                    if !self.has_guide(pos, horizontal)
+                        && self.guides.len() < crate::renderer::MAX_GUIDES
+                    {
+                        self.guides.push([pos, if horizontal { 1.0 } else { 0.0 }]);
+                        added += 1;
                     }
                 }
+            }
+            if added > 0 {
+                self.show_toast(format!("Added {added} guide{}", if added == 1 { "" } else { "s" }));
+                self.request_redraw();
+                return;
             }
             denom *= 2;
         }
@@ -2878,6 +2886,10 @@ impl App {
             UiAction::RemoveGuide(i) => {
                 if i < self.guides.len() {
                     self.guides.remove(i);
+                    // Drop the stale hover index: removing shifts the guides down,
+                    // so a held `hovered_guide` would briefly light up whatever
+                    // guide slid into its slot. Re-set next frame by the UI.
+                    self.ui_state.hovered_guide = None;
                     self.request_redraw();
                 }
             }

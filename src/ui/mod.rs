@@ -128,7 +128,9 @@ impl UiInputs {
 /// The 2D image↔screen mapping the rulers need. Screen UV (`v_uv`, GL y-up) maps
 /// to image uv as `uv = 0.5 + pan + (v_uv - 0.5) * s` (y negated); image pixel =
 /// `uv * size`. Resolution-independent, so the UI applies it against the egui
-/// `screen_rect` (points).
+/// `screen_rect` (points). When `pano` is `Some`, the rulers show longitude /
+/// latitude degrees via that projection instead of pixels, and the 2D fields are
+/// unused (guide grab / ruler-spawn are 2D only).
 #[derive(Clone, Copy)]
 pub struct RulerInfo {
     pub sx: f32,
@@ -137,6 +139,18 @@ pub struct RulerInfo {
     pub pan_v: f32,
     pub img_w: f32,
     pub img_h: f32,
+    pub pano: Option<PanoProj>,
+}
+
+/// Panorama screen→sphere projection params (mirrors the fragment shader's pano
+/// branch), so the rulers can read out the longitude/latitude under each screen
+/// position in degrees.
+#[derive(Clone, Copy)]
+pub struct PanoProj {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub tan_half_fov: f32,
+    pub aspect: f32,
 }
 
 /// Transient UI state that persists across frames.

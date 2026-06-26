@@ -3,7 +3,7 @@
 //! §12.6).
 
 use super::colors::{panel_bg, panel_bg_alpha, ACCENT, PANEL_ALPHA};
-use super::{clickable, RulerInfo, UiAction, UiInputs, UiState};
+use super::{clickable, PanoProj, RulerInfo, UiAction, UiInputs, UiState};
 
 /// Height of the borderless custom titlebar; the top strip is reserved for it so
 /// the slot flags / metadata box never sit under the window controls.
@@ -117,6 +117,73 @@ fn pixel_ticks(lo: f32, hi: f32, ppx: f32, extent: f32, mut tick: impl FnMut(f32
             continue;
         }
         tick(pos, k % 5 == 0);
+    }
+}
+
+/// Nice angle step (1/2/5/10/15/30/45/90/180°) ≥ `raw`, for the panorama rulers.
+fn nice_degrees(raw: f32) -> f32 {
+    const STEPS: [f32; 9] = [1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 45.0, 90.0, 180.0];
+    STEPS.into_iter().find(|&s| s >= raw).unwrap_or(180.0)
+}
+
+/// Rotate a camera-space ray by the panorama yaw/pitch (mirrors the shader's
+/// `rotation_yaw_pitch`), returning the world direction `(x, y, z)`.
+fn pano_rotate(p: &PanoProj, rx: f32, ry: f32, rz: f32) -> (f32, f32, f32) {
+    let (cy, sy) = (p.yaw.cos(), p.yaw.sin());
+    let (cp, sp) = (p.pitch.cos(), p.pitch.sin());
+    let py = cp * ry - sp * rz; // pitch about X …
+    let pz = sp * ry + cp * rz;
+    (cy * rx - sy * pz, py, sy * rx + cy * pz) // … then yaw about Y
+}
+
+/// Emit panorama ruler ticks at degree marks. `angle_at(screen_coord)` gives the
+/// longitude or latitude (degrees) under that screen position. Samples ~1/px,
+/// unwraps the angle across the ±180° seam, picks a nice step keeping ticks ≥
+/// [`MIN_TICK_PX`] apart, and interpolates each crossing's screen position.
+/// `tick(screen_coord, is_major)`; majors are every 5th step.
+fn degree_ticks(s0: f32, s1: f32, angle_at: impl Fn(f32) -> f32, mut tick: impl FnMut(f32, bool)) {
+    let len = (s1 - s0).abs();
+    if len < 2.0 {
+        return;
+    }
+    let n = (len.ceil() as usize).clamp(8, 2048);
+    let mut samples: Vec<(f32, f32)> = Vec::with_capacity(n + 1);
+    let mut prev_raw = angle_at(s0);
+    let mut acc = prev_raw;
+    samples.push((s0, acc));
+    for i in 1..=n {
+        let s = s0 + (s1 - s0) * (i as f32 / n as f32);
+        let raw = angle_at(s);
+        let mut d = raw - prev_raw; // unwrap across the atan2 seam
+        if d > 180.0 {
+            d -= 360.0;
+        } else if d < -180.0 {
+            d += 360.0;
+        }
+        acc += d;
+        prev_raw = raw;
+        samples.push((s, acc));
+    }
+    let amin = samples.iter().map(|&(_, a)| a).fold(f32::INFINITY, f32::min);
+    let amax = samples.iter().map(|&(_, a)| a).fold(f32::NEG_INFINITY, f32::max);
+    let minor = nice_degrees((amax - amin).max(1e-4) / len * MIN_TICK_PX);
+    if (amax - amin) / minor > 4000.0 {
+        return;
+    }
+    for w in samples.windows(2) {
+        let (sa, aa) = w[0];
+        let (sb, ab) = w[1];
+        let k0 = (aa.min(ab) / minor).ceil() as i64;
+        let k1 = (aa.max(ab) / minor).floor() as i64;
+        for k in k0..=k1 {
+            let target = k as f32 * minor;
+            let t = if (ab - aa).abs() < 1e-9 {
+                0.0
+            } else {
+                (target - aa) / (ab - aa)
+            };
+            tick(sa + (sb - sa) * t, k % 5 == 0);
+        }
     }
 }
 
@@ -248,15 +315,27 @@ fn left_ruler(
             let p = ui.painter();
             p.rect_filled(rect, 0.0, panel_bg());
             let stroke = ruler_tick_stroke();
-            let (py0, py1) = (uv_y(rect.top()) * r.img_h, uv_y(rect.bottom()) * r.img_h);
-            pixel_ticks(py0, py1, ppx_y, r.img_h, |py, major| {
-                let y = ey(py);
+            let draw = |y: f32, major: bool| {
                 if y < rect.top() || y > rect.bottom() {
                     return;
                 }
                 let len = if major { TICK_MAJOR } else { TICK_MINOR };
                 p.line_segment([egui::pos2(base_x, y), egui::pos2(base_x + len, y)], stroke);
-            });
+            };
+            if let Some(proj) = r.pano {
+                // Latitude degrees along the centre column (ndc.x = 0).
+                let angle_at = |sy: f32| -> f32 {
+                    let ndc_y = (1.0 - (sy - screen.top()) / vh) * 2.0 - 1.0;
+                    let ry = ndc_y * proj.tan_half_fov;
+                    let inv = 1.0 / (ry * ry + 1.0).sqrt();
+                    let (_, wy, _) = pano_rotate(&proj, 0.0, ry * inv, inv);
+                    wy.clamp(-1.0, 1.0).asin().to_degrees()
+                };
+                degree_ticks(rect.top(), rect.bottom(), angle_at, draw);
+            } else {
+                let (py0, py1) = (uv_y(rect.top()) * r.img_h, uv_y(rect.bottom()) * r.img_h);
+                pixel_ticks(py0, py1, ppx_y, r.img_h, |py, major| draw(ey(py), major));
+            }
             resp
         });
     // Keep the ruler alive for the whole spawn-drag, even as the pointer leaves
@@ -264,17 +343,19 @@ fn left_ruler(
     state.pointer_over_left_ruler = resp.response.contains_pointer() || resp.inner.dragged();
     // Drag a NEW *vertical* guide out of the (vertical) left ruler — Photoshop
     // style: it tracks the pointer's x as you pull it into the image. A plain
-    // click does nothing (no drag → no guide).
-    ruler_spawn_drag(
-        ctx,
-        &resp.inner,
-        &r,
-        screen,
-        false,
-        inputs.guides.len(),
-        state,
-        actions,
-    );
+    // click does nothing. 2D only (the pano ruler is a degree read-out).
+    if r.pano.is_none() {
+        ruler_spawn_drag(
+            ctx,
+            &resp.inner,
+            &r,
+            screen,
+            false,
+            inputs.guides.len(),
+            state,
+            actions,
+        );
+    }
 }
 
 /// The bottom pixel ruler, drawn as the top strip of the bottom panel (so they
@@ -293,24 +374,36 @@ fn bottom_ruler_strip(
     actions: &mut Vec<UiAction>,
 ) -> bool {
     let vw = screen.width();
-    let ex = |px: f32| screen.left() + vw * (0.5 + (px / r.img_w - 0.5 - r.pan_u) / r.sx);
-    let uv_x = |sx: f32| 0.5 + r.pan_u + ((sx - screen.left()) / vw - 0.5) * r.sx;
-    let ppx_x = (vw / (r.img_w * r.sx)).abs();
-
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(vw, RULER_W), egui::Sense::click_and_drag());
     let base_y = rect.bottom();
     let p = ui.painter();
     let stroke = ruler_tick_stroke();
+    let draw = |x: f32, major: bool| {
+        let len = if major { TICK_MAJOR } else { TICK_MINOR };
+        p.line_segment([egui::pos2(x, base_y), egui::pos2(x, base_y - len)], stroke);
+    };
+    if let Some(proj) = r.pano {
+        // Longitude degrees along the centre row (ndc.y = 0). 2D guide spawn is
+        // disabled in pano; the ruler is a degree read-out.
+        let angle_at = |sx: f32| -> f32 {
+            let ndc_x = (sx - screen.left()) / vw * 2.0 - 1.0;
+            let rx = ndc_x * proj.aspect * proj.tan_half_fov;
+            let inv = 1.0 / (rx * rx + 1.0).sqrt();
+            let (wx, _, wz) = pano_rotate(&proj, rx * inv, 0.0, inv);
+            wz.atan2(wx).to_degrees()
+        };
+        degree_ticks(screen.left(), screen.right(), angle_at, draw);
+        return resp.dragged();
+    }
+    let ex = |px: f32| screen.left() + vw * (0.5 + (px / r.img_w - 0.5 - r.pan_u) / r.sx);
+    let uv_x = |sx: f32| 0.5 + r.pan_u + ((sx - screen.left()) / vw - 0.5) * r.sx;
+    let ppx_x = (vw / (r.img_w * r.sx)).abs();
     let (px0, px1) = (
         uv_x(screen.left()) * r.img_w,
         uv_x(screen.right()) * r.img_w,
     );
-    pixel_ticks(px0, px1, ppx_x, r.img_w, |px, major| {
-        let x = ex(px);
-        let len = if major { TICK_MAJOR } else { TICK_MINOR };
-        p.line_segment([egui::pos2(x, base_y), egui::pos2(x, base_y - len)], stroke);
-    });
+    pixel_ticks(px0, px1, ppx_x, r.img_w, |px, major| draw(ex(px), major));
     // Pull a NEW *horizontal* guide upward out of the (horizontal) bottom ruler.
     ruler_spawn_drag(ui.ctx(), &resp, r, screen, true, guides_len, state, actions);
     resp.dragged()
@@ -332,7 +425,9 @@ fn guides_layer(
     let Some(r) = inputs.ruler else {
         return;
     };
-    if inputs.guides.is_empty() {
+    // Guide grab/move is 2D only (the pano on-screen position is a curved
+    // meridian); guides still render and can be removed from the metadata list.
+    if r.pano.is_some() || inputs.guides.is_empty() {
         return;
     }
     let screen = ctx.screen_rect();

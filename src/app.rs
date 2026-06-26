@@ -2135,18 +2135,36 @@ impl App {
         self.cursor_pos.y <= 56.0 * scale
     }
 
-    /// The image↔screen mapping the pixel rulers need (2D only). Mirrors the
-    /// shader's 2D UV mapping so ticks land on real image pixels.
+    /// The image↔screen mapping the rulers need. In 2D it mirrors the shader's UV
+    /// mapping so ticks land on real image pixels; in panorama it carries the
+    /// sphere projection so the rulers can read out longitude/latitude degrees.
     fn ruler_info(&self) -> Option<crate::ui::RulerInfo> {
         // The mapping is needed whenever either ruler might show; each ruler's
         // own slide (bottom panel / left ruler) gates its actual rendering.
-        if self.camera.is_panorama() || self.file_info.width == 0 || self.window_is_small() {
+        if self.file_info.width == 0 || self.window_is_small() {
             return None;
         }
         let (vw, vh) = self.viewport();
         let cam = &self.camera.camera;
         let img_w = self.file_info.width as f32;
         let img_h = self.file_info.height as f32;
+        if self.camera.is_panorama() {
+            // Pano: degree rulers via the projection; the 2D fields go unused.
+            return Some(crate::ui::RulerInfo {
+                sx: 1.0,
+                sy: 1.0,
+                pan_u: 0.0,
+                pan_v: 0.0,
+                img_w,
+                img_h,
+                pano: Some(crate::ui::PanoProj {
+                    yaw: cam.yaw(),
+                    pitch: cam.pitch(),
+                    tan_half_fov: cam.tan_half_fov(),
+                    aspect: (vw / vh).max(1e-4),
+                }),
+            });
+        }
         let image_aspect = (img_w / img_h).max(1e-4);
         let inv_zoom = cam.tan_half_fov();
         Some(crate::ui::RulerInfo {
@@ -2156,6 +2174,7 @@ impl App {
             pan_v: -cam.pitch() / std::f32::consts::PI,
             img_w,
             img_h,
+            pano: None,
         })
     }
 
@@ -2737,8 +2756,8 @@ impl App {
             .map(|g| g.window.scale_factor() as f32)
             .unwrap_or(1.0);
         let near_left = self.cursor_in_window && self.cursor_pos.x <= (44.0 * scale) as f64;
-        let eligible =
-            !self.window_is_small() && !self.camera.is_panorama() && self.file_info.width != 0;
+        // Rulers show in both 2D (pixels) and panorama (degrees).
+        let eligible = !self.window_is_small() && self.file_info.width != 0;
         let show = eligible && (near_left || self.ui_state.pointer_over_left_ruler);
         if show {
             self.left_ruler_visible = true;

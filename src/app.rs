@@ -1725,9 +1725,13 @@ impl App {
             return;
         }
 
-        // Alt + scroll in panorama mode grows/shrinks the window (panoramas have
-        // no 2D zoom to drive the window-follow, so this is the equivalent).
-        if self.camera.is_panorama() && self.modifiers.alt_key() {
+        // Alt + scroll always grows/shrinks the window, in both modes — even when
+        // zoomed into a 2D image past the window-fill cap. A uniform window resize
+        // keeps the visible image region the same (the screen→image scale depends
+        // on the window's aspect, not its size), so the image scales with the
+        // window: it reads as zooming the whole view out/in while the portion of
+        // the image you're looking at stays put.
+        if self.modifiers.alt_key() {
             self.resize_window_by_factor(1.21_f32.powf(steps));
             self.request_redraw();
             return;

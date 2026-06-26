@@ -1505,6 +1505,35 @@ impl App {
         }
     }
 
+    /// Is there already a guide at `pos` (image fraction) with this orientation?
+    fn has_guide(&self, pos: f32, horizontal: bool) -> bool {
+        let orient = if horizontal { 1.0 } else { 0.0 };
+        self.guides
+            .iter()
+            .any(|g| (g[0] - pos).abs() < 1e-3 && (g[1] - orient).abs() < 0.5)
+    }
+
+    /// The G key adds the next guide in a fixed sequence: horizontal then vertical
+    /// at 50%, then the quarters (¼, ¾) H then V, then the eighths, and so on —
+    /// always the first canonical position not already present.
+    fn add_next_guide(&mut self) {
+        let mut denom = 2u32;
+        while denom <= 256 {
+            // Odd numerators are the positions new at this level (even ones belong
+            // to a coarser level already covered).
+            for horizontal in [true, false] {
+                for n in (1..denom).step_by(2) {
+                    let pos = n as f32 / denom as f32;
+                    if !self.has_guide(pos, horizontal) {
+                        self.add_guide(pos, horizontal);
+                        return;
+                    }
+                }
+            }
+            denom *= 2;
+        }
+    }
+
     /// Adjust the Clarity strength (0 = off). Chunky steps; the range goes well
     /// past photographic levels so issues can be cranked into the extreme.
     fn adjust_clarity(&mut self, delta: f32) {
@@ -1942,7 +1971,7 @@ impl App {
                 self.request_redraw();
             }
             // G: add a horizontal guide at 50% image height (pano horizon).
-            (_, Some("g")) | (_, Some("G")) => self.add_guide(0.5, true),
+            (_, Some("g")) | (_, Some("G")) => self.add_next_guide(),
             (_, Some("q")) | (_, Some("Q")) => self.escape_or_exit(event_loop),
             (Key::Named(NamedKey::F2), _) => {
                 self.show_metadata = !self.show_metadata;

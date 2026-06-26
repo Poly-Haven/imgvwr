@@ -34,5 +34,15 @@ cargo build --release
   it. When the effect is off, `Renderer::render` bypasses the whole chain (zero overhead).
 - The camera is an enum (`Pano` | `Flat`) — keep the two states distinct; convert through
   `center_uv` on the P-toggle rather than reusing fields.
+- **Window-follow zoom ease (`ease_window`) must be advanced from `about_to_wait`, never from
+  the `Resized` handler.** Two failure modes this balances, both shipped as bugs before: (1) if
+  the timed render loop *and* a synchronous `Resized` render both present, you get a double
+  present → half-rate "slow-mo" zoom; (2) if the ease self-perpetuates from `Resized` (each step
+  posts the next `SetWindowPos` before the loop yields), the whole chain drains before
+  `about_to_wait` runs → OS scroll input is starved → fast-scroll "shudder". The working shape:
+  advance one step per loop iteration in `about_to_wait` (input already processed), `Poll` while
+  easing, and let the single synchronous `Resized` render present each size once (vsync-paced).
+  `follow_zoom_with_window` frames against the in-flight `window_anim_target` height (not the
+  lagging current size) so zoom gain per notch is scroll-speed-independent.
 - rawler's `raw_metadata` is brittle (rejects some decodable files); raw EXIF orientation is read
   directly from the TIFF tag instead (`read_tiff_orientation` in `image_loader/formats.rs`).

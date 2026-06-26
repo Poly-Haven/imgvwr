@@ -681,19 +681,17 @@ fn titlebar_button(
 }
 
 /// Small numbered flags hanging from the right edge for saved comparator slots,
-/// stacked top to bottom; the active (currently-viewed) slot is filled with the
-/// accent colour. Each flag is clickable (recall the slot) and shows its filename
-/// on hover.
+/// stacked and vertically centred on that edge; the active (currently-viewed)
+/// slot is filled with the accent colour. Each flag is clickable (recall the
+/// slot) and shows its filename on hover.
 fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
     if inputs.slot_labels.iter().all(|s| s.is_none()) {
         return;
     }
     egui::Area::new(egui::Id::new("imgvwr_slots"))
-        // Flush against the right edge, below the reserved titlebar strip.
-        .anchor(
-            egui::Align2::RIGHT_TOP,
-            egui::Vec2::new(0.0, TITLEBAR_H + 4.0),
-        )
+        // Centred vertically on the right edge (clear of the top-right metadata
+        // box, which can then sit closer to the edge).
+        .anchor(egui::Align2::RIGHT_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
@@ -870,10 +868,11 @@ fn metadata_hud(
     state: &mut UiState,
     actions: &mut Vec<UiAction>,
 ) -> bool {
-    // To the left of the right-edge slot-flag column so the two never overlap.
+    // Tucked close to the right edge (the slot flags now sit at the vertical
+    // middle, so the box no longer has to clear a top-right flag column).
     // Slides in from the right edge: at slide 0 it's pushed fully off-screen.
     let slide = inputs.metadata_slide.clamp(0.0, 1.0);
-    let off_x = -34.0 + (1.0 - slide) * 360.0;
+    let off_x = -8.0 + (1.0 - slide) * 360.0;
     let mut view_menu_open = false;
     let resp = egui::Area::new(egui::Id::new("imgvwr_metadata"))
         .anchor(

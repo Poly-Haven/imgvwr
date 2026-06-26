@@ -88,6 +88,14 @@ const TOAST_FADE: Duration = Duration::from_millis(600);
 /// fullscreen toggle (so a double-click-and-drag is treated as a drag).
 const DBLCLICK_DRAG_TOL: f32 = 6.0;
 
+/// Navigation minimap geometry (egui points): longest side and edge margin.
+const MINIMAP_MAX: f32 = 200.0;
+const MINIMAP_MARGIN: f32 = 16.0;
+/// Auto-shown minimap (2D pan/zoom): stays fully visible for `MINIMAP_HOLD` after
+/// the last view change, then fades over `MINIMAP_FADE`.
+const MINIMAP_HOLD: Duration = Duration::from_millis(1800);
+const MINIMAP_FADE: f32 = 0.6;
+
 /// Max decoded images kept in memory for instant navigation (current + a
 /// previous + a next, plus one spare so back-and-forth stays cached). Each entry
 /// can be several GB for 24k+ images, so this is deliberately small.
@@ -183,6 +191,17 @@ enum RenderOutcome {
     Captured,
 }
 
+/// The navigation minimap panel rectangle in physical pixels (top-left origin),
+/// plus the window scale factor so the same rect can be expressed in egui points.
+#[derive(Clone, Copy)]
+struct MinimapMetrics {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    scale: f32,
+}
+
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     initial_path: Option<PathBuf>,
@@ -223,6 +242,17 @@ pub struct App {
     /// (max [`crate::renderer::MAX_GUIDES`]).
     guides: Vec<[f32; 2]>,
     show_metadata: bool,
+    /// Navigation minimap toggled on with M (persists until toggled off). When
+    /// off, the minimap can still appear automatically on 2D pan/zoom.
+    minimap_on: bool,
+    /// Deadline for the auto-shown minimap (set on each 2D view change): full
+    /// opacity until then, fading over `MINIMAP_FADE` after. `None` = no auto-show.
+    minimap_auto_until: Option<Instant>,
+    /// Last 2D `(pan.x, pan.y, zoom)` seen by `render`, to detect a view change
+    /// that should auto-show the minimap. `None` in panorama mode.
+    minimap_prev_view: Option<(f32, f32, f32)>,
+    /// True while the left button is dragging inside the minimap (navigating).
+    minimap_drag: bool,
 
     // Colour management.
     ocio: OcioManager,
@@ -413,6 +443,10 @@ impl App {
             sharpness: false,
             guides: Vec::new(),
             show_metadata: false,
+            minimap_on: false,
+            minimap_auto_until: None,
+            minimap_prev_view: None,
+            minimap_drag: false,
             ocio,
             last_view: None,
             prefs,
@@ -2120,6 +2154,19 @@ impl App {
             }
             // G: add a horizontal guide at 50% image height (pano horizon).
             (_, Some("g")) | (_, Some("G")) => self.add_next_guide(),
+            // M: toggle the navigation minimap (only visible while zoomed in past
+            // fit; it also auto-appears on 2D pan/zoom).
+            (_, Some("m")) | (_, Some("M")) => {
+                self.minimap_on = !self.minimap_on;
+                self.show_toast(
+                    if self.minimap_on {
+                        "Minimap on"
+                    } else {
+                        "Minimap off"
+                    }
+                    .to_string(),
+                );
+            }
             (_, Some("q")) | (_, Some("Q")) => self.escape_or_exit(event_loop),
             (Key::Named(NamedKey::F2), _) => {
                 self.show_metadata = !self.show_metadata;
@@ -2293,6 +2340,243 @@ impl App {
             }
         }
         best.map(|(i, _)| i)
+    }
+
+    // ---- Navigation minimap ----------------------------------------------
+
+    /// The minimap panel rectangle in physical pixels (top-left origin, matching
+    /// `cursor_pos` / `viewport`). Sized to the image aspect, bounded to
+    /// [`MINIMAP_MAX`] points on the long side, anchored bottom-right with a
+    /// [`MINIMAP_MARGIN`]-point gap. `None` when there's no image or the window is
+    /// too small to seat it.
+    fn minimap_metrics(&self) -> Option<MinimapMetrics> {
+        let gfx = self.gfx.as_ref()?;
+        let aspect = gfx.renderer.image_aspect()?; // None when no image is loaded
+        if !aspect.is_finite() || aspect <= 0.0 {
+            return None;
+        }
+        let scale = gfx.window.scale_factor() as f32;
+        let (vw, vh) = self.viewport();
+        let (w_pt, h_pt) = if aspect >= 1.0 {
+            (MINIMAP_MAX, MINIMAP_MAX / aspect)
+        } else {
+            (MINIMAP_MAX * aspect, MINIMAP_MAX)
+        };
+        let (w, h, margin) = (w_pt * scale, h_pt * scale, MINIMAP_MARGIN * scale);
+        let x = vw - margin - w;
+        let y = vh - margin - h;
+        if x < margin || y < margin {
+            return None; // window too small to seat the minimap
+        }
+        Some(MinimapMetrics { x, y, w, h, scale })
+    }
+
+    /// Whether the view is zoomed in enough that part of the image is off-screen,
+    /// so a minimap is actually useful. In panorama this is always true (you never
+    /// see the whole sphere); in 2D it's false at contain-fit and below.
+    fn minimap_gated_in(&self) -> bool {
+        !self.image_fits_viewport()
+    }
+
+    /// Current minimap opacity (0 = hidden). Toggled on → fully opaque; otherwise
+    /// the auto-show fade after a 2D pan/zoom. Always 0 unless zoomed in past fit
+    /// and an image with room for the panel is present.
+    fn minimap_alpha(&self) -> f32 {
+        if self.minimap_metrics().is_none() || !self.minimap_gated_in() {
+            return 0.0;
+        }
+        if self.minimap_on {
+            return 1.0;
+        }
+        // Auto-show is 2D-only; a deadline left over from 2D must not surface the
+        // minimap after switching to panorama (where M-toggle is the only way in).
+        if !matches!(self.camera.camera, Camera::Flat { .. }) {
+            return 0.0;
+        }
+        match self.minimap_auto_until {
+            Some(t) => {
+                let now = Instant::now();
+                if now <= t {
+                    1.0
+                } else {
+                    (1.0 - now.duration_since(t).as_secs_f32() / MINIMAP_FADE).clamp(0.0, 1.0)
+                }
+            }
+            None => 0.0,
+        }
+    }
+
+    /// True when the cursor is over the visible minimap — routes a left-press to
+    /// minimap navigation instead of a pan / guide-grab / window-move.
+    fn minimap_hit(&self) -> bool {
+        if self.minimap_alpha() <= 0.0 {
+            return false;
+        }
+        match self.minimap_metrics() {
+            Some(m) => {
+                let (cx, cy) = (self.cursor_pos.x as f32, self.cursor_pos.y as f32);
+                cx >= m.x && cx <= m.x + m.w && cy >= m.y && cy <= m.y + m.h
+            }
+            None => false,
+        }
+    }
+
+    /// True while the auto-shown minimap is still holding or fading (drives the
+    /// redraw scheduling so the fade animates even when nothing else moves).
+    fn minimap_fading(&self) -> bool {
+        if self.minimap_on
+            || !self.minimap_gated_in()
+            || !matches!(self.camera.camera, Camera::Flat { .. })
+        {
+            return false;
+        }
+        match self.minimap_auto_until {
+            Some(t) => Instant::now() <= t + Duration::from_secs_f32(MINIMAP_FADE),
+            None => false,
+        }
+    }
+
+    /// Half-extent (in image uv) of the on-screen view rectangle along each axis —
+    /// mirrors the shader's 2D uv mapping (and `ruler_info`). Used to draw the 2D
+    /// view box and to clamp minimap navigation so the view stays on-image.
+    fn view_half_extent_uv(&self) -> (f32, f32) {
+        let cam = &self.camera.camera;
+        let (vw, vh) = self.viewport();
+        let image_aspect =
+            (self.file_info.width as f32 / self.file_info.height.max(1) as f32).max(1e-4);
+        let inv = cam.tan_half_fov();
+        let sx = inv * (vw / vh) / image_aspect / self.image_stretch.x;
+        let sy = inv / self.image_stretch.y;
+        (0.5 * sx, 0.5 * sy)
+    }
+
+    /// Snap the view to the image point under a minimap cursor position (physical
+    /// px). 2D centres the pan there (eased, clamped on-image unless wrapping);
+    /// panorama aims the look at that equirectangular point (instant).
+    fn minimap_navigate(&mut self, cursor: PhysicalPosition<f64>) {
+        let Some(m) = self.minimap_metrics() else {
+            return;
+        };
+        let u = ((cursor.x as f32 - m.x) / m.w).clamp(0.0, 1.0);
+        let v = ((cursor.y as f32 - m.y) / m.h).clamp(0.0, 1.0);
+        match self.camera.camera {
+            Camera::Flat { .. } => {
+                let (mut cu, mut cv) = (u, v);
+                if !self.wrap_2d {
+                    // Keep the view rectangle inside the image (like a navigator),
+                    // so clicking near an edge doesn't reveal letterbox.
+                    let (hu, hv) = self.view_half_extent_uv();
+                    cu = if hu * 2.0 >= 1.0 {
+                        0.5
+                    } else {
+                        u.clamp(hu, 1.0 - hu)
+                    };
+                    cv = if hv * 2.0 >= 1.0 {
+                        0.5
+                    } else {
+                        v.clamp(hv, 1.0 - hv)
+                    };
+                }
+                self.camera.set_pan_target(Vec2::new(cu - 0.5, cv - 0.5));
+            }
+            Camera::Pano { .. } => {
+                self.camera.look_at_uv(Vec2::new(u, v));
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Build the UI-side minimap info (panel rect + view outline, in points) for
+    /// this frame, or `None` when the minimap is hidden.
+    fn minimap_info(&self) -> Option<crate::ui::MinimapInfo> {
+        let alpha = self.minimap_alpha();
+        if alpha <= 0.0 {
+            return None;
+        }
+        let m = self.minimap_metrics()?;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(m.x / m.scale, m.y / m.scale),
+            egui::vec2(m.w / m.scale, m.h / m.scale),
+        );
+        let to_pt = |u: f32, v: f32| {
+            egui::pos2(
+                rect.min.x + u * rect.width(),
+                rect.min.y + v * rect.height(),
+            )
+        };
+        let view_segments = match self.camera.camera {
+            Camera::Flat { pan, .. } => {
+                let (hu, hv) = self.view_half_extent_uv();
+                let (cu, cv) = (0.5 + pan.x, 0.5 + pan.y);
+                vec![vec![
+                    to_pt(cu - hu, cv - hv),
+                    to_pt(cu + hu, cv - hv),
+                    to_pt(cu + hu, cv + hv),
+                    to_pt(cu - hu, cv + hv),
+                    to_pt(cu - hu, cv - hv),
+                ]]
+            }
+            Camera::Pano { .. } => self.pano_view_segments(&to_pt),
+        };
+        Some(crate::ui::MinimapInfo {
+            rect,
+            alpha,
+            view_segments,
+        })
+    }
+
+    /// The panorama view region as polylines on the minimap: sample the window
+    /// border, project each point to equirect uv (the shader's pano mapping, via
+    /// [`viewport_uv`](Self::viewport_uv)), map to the panel, and split the path at
+    /// the longitude wrap so a wrap-around view doesn't streak across the minimap.
+    fn pano_view_segments(&self, to_pt: &impl Fn(f32, f32) -> egui::Pos2) -> Vec<Vec<egui::Pos2>> {
+        let (vw, vh) = self.viewport();
+        let (vw, vh) = (vw as f64, vh as f64);
+        const K: usize = 48; // samples per window edge
+        let mut border: Vec<(f64, f64)> = Vec::with_capacity(K * 4 + 1);
+        for i in 0..K {
+            border.push((i as f64 / K as f64 * vw, 0.0)); // top L→R
+        }
+        for i in 0..K {
+            border.push((vw, i as f64 / K as f64 * vh)); // right T→B
+        }
+        for i in 0..K {
+            border.push(((1.0 - i as f64 / K as f64) * vw, vh)); // bottom R→L
+        }
+        for i in 0..K {
+            border.push((0.0, (1.0 - i as f64 / K as f64) * vh)); // left B→T
+        }
+        border.push((0.0, 0.0)); // close the loop
+
+        let mut segs: Vec<Vec<egui::Pos2>> = Vec::new();
+        let mut cur: Vec<egui::Pos2> = Vec::new();
+        let mut prev_u: Option<f32> = None;
+        let flush = |cur: &mut Vec<egui::Pos2>, segs: &mut Vec<Vec<egui::Pos2>>| {
+            if cur.len() >= 2 {
+                segs.push(std::mem::take(cur));
+            } else {
+                cur.clear();
+            }
+        };
+        for (px, py) in border {
+            match self.viewport_uv(px, py) {
+                Some((u, v)) => {
+                    if let Some(pu) = prev_u {
+                        if (u - pu).abs() > 0.5 {
+                            flush(&mut cur, &mut segs); // longitude wrap: break here
+                        }
+                    }
+                    cur.push(to_pt(u, v));
+                    prev_u = Some(u);
+                }
+                None => {
+                    flush(&mut cur, &mut segs);
+                    prev_u = None;
+                }
+            }
+        }
+        flush(&mut cur, &mut segs);
+        segs
     }
 
     /// True when the window is too small to comfortably overlay the auto-hiding
@@ -2576,6 +2860,14 @@ impl App {
         }
         match (state, button) {
             (ElementState::Pressed, MouseButton::Left) => {
+                // A press inside the visible minimap navigates the view and starts
+                // a minimap drag — highest priority (it's a corner overlay drawn on
+                // top), so it pre-empts guide-grab / pan / window-move.
+                if self.minimap_hit() {
+                    self.minimap_drag = true;
+                    self.minimap_navigate(self.cursor_pos);
+                    return;
+                }
                 // Grabbing a guide takes priority over pan/window-move: if the
                 // press lands on a guide line (2D or pano), drag THAT guide and
                 // start no pan. Alt-held presses still move the window (so Alt is
@@ -2626,6 +2918,12 @@ impl App {
                 }
             }
             (ElementState::Released, MouseButton::Left) => {
+                // End a minimap drag (it started no pan/guide gesture).
+                if self.minimap_drag {
+                    self.minimap_drag = false;
+                    self.request_redraw();
+                    return;
+                }
                 // Finish a guide grab: drop it if released off the image (its
                 // coord went outside 0..1), else keep it where it landed.
                 if let Some(idx) = self.guide_drag.take() {
@@ -2708,6 +3006,11 @@ impl App {
         }
         if std::env::var_os("IMGVWR_DEBUG_SHARPNESS").is_some() {
             self.sharpness = true;
+        }
+        if std::env::var_os("IMGVWR_DEBUG_MINIMAP").is_some() {
+            // Force the minimap on for headless capture (pair with a zoomed-in
+            // IMGVWR_DEBUG_ZOOM so it passes the contain-fit gate).
+            self.minimap_on = true;
         }
         if std::env::var_os("IMGVWR_DEBUG_GUIDES").is_some() {
             self.guides = vec![[0.5, 1.0], [0.5, 0.0], [0.25, 0.0]];
@@ -2885,6 +3188,7 @@ impl App {
             } else {
                 None
             },
+            minimap: self.minimap_info(),
         }
     }
 
@@ -3235,6 +3539,23 @@ impl App {
             .min(0.1);
         let cam_moving = self.camera.animate(dt);
         let tone_moving = self.animate_tone(dt);
+        // Auto-show the navigation minimap on any 2D pan/zoom (no auto-show in
+        // panorama). Comparing the rendered camera each frame catches drags,
+        // wheel, numpad, eased animation and minimap-drag navigation in one place.
+        if let Camera::Flat { pan, zoom } = self.camera.camera {
+            let cur = (pan.x, pan.y, zoom);
+            let changed = self.minimap_prev_view.is_some_and(|p| {
+                (p.0 - cur.0).abs() > 1e-5
+                    || (p.1 - cur.1).abs() > 1e-5
+                    || (p.2 - cur.2).abs() > 1e-4
+            });
+            if changed {
+                self.minimap_auto_until = Some(now + MINIMAP_HOLD);
+            }
+            self.minimap_prev_view = Some(cur);
+        } else {
+            self.minimap_prev_view = None;
+        }
         // Dev-only: force the settings dialog open for headless verification.
         #[cfg(debug_assertions)]
         if self.force_overlay.as_deref() == Some("settings") {
@@ -3300,6 +3621,15 @@ impl App {
             guide_hover_color: inverse_hue(srgb_u8_to_f32(self.prefs.guide_color)),
             clarity_amount: self.clarity_amount,
             clarity_radius: self.clarity_radius,
+            global_alpha: 1.0,
+        };
+        // Minimap thumbnail pass parameters (panel rect + fade), gathered before
+        // the mutable gfx borrow. Drawn after the scene, below the egui overlay.
+        let minimap_pass: Option<(MinimapMetrics, f32)> = {
+            let a = self.minimap_alpha();
+            (a > 0.0)
+                .then(|| self.minimap_metrics().map(|m| (m, a)))
+                .flatten()
         };
         let capture_ready = self.capture_ready();
 
@@ -3322,6 +3652,36 @@ impl App {
                 ..base
             };
             gfx.renderer.render(&params);
+
+            // Minimap thumbnail: a fit-the-whole-image 2D view drawn into the
+            // bottom-right corner (GL origin bottom-left), composited over the
+            // scene at the fade alpha. Below the egui border / view box.
+            if let Some((m, alpha)) = minimap_pass {
+                let (gl_x, gl_w, gl_h) =
+                    (m.x.round() as i32, m.w.round() as i32, m.h.round() as i32);
+                let gl_y = (h as f32 - (m.y + m.h)).round() as i32;
+                let mm_params = RenderParams {
+                    viewport: (gl_w, gl_h),
+                    projection_mode: 1,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    half_fov_radians: std::f32::consts::FRAC_PI_4,
+                    tan_half_fov: 1.0,
+                    wrap_2d: false,
+                    nearest: false,
+                    isolate_channel: -1,
+                    stretch: [1.0, 1.0],
+                    sharpness: false,
+                    diff: false,
+                    guide_count: 0,
+                    guide_hover: -1,
+                    clarity_amount: 0.0,
+                    global_alpha: alpha,
+                    ..base
+                };
+                gfx.renderer
+                    .render_minimap(&mm_params, gl_x, gl_y, gl_w, gl_h);
+            }
 
             // egui overlay on top of the scene.
             gfx.egui.run(&gfx.window, |ctx| {
@@ -3477,6 +3837,12 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = position;
                 self.cursor_in_window = true;
+                // Dragging inside the minimap continuously snaps the view to the
+                // pointed-at region (no pan / guide hover during the drag).
+                if self.minimap_drag {
+                    self.minimap_navigate(position);
+                    return;
+                }
                 if self.alt_resize.is_some() {
                     self.update_alt_resize();
                 }
@@ -3651,9 +4017,10 @@ impl ApplicationHandler<UserEvent> for App {
             // promptly. No request_redraw: the Resized render above is the frame;
             // adding one would double-present (the old slow-mo regression).
             event_loop.set_control_flow(ControlFlow::Poll);
-        } else if self.toast_active() || self.animating {
-            // Drive ~60 fps while the toast fades or the zoom/pan eases. Both
-            // settle quickly, after which we fall through to `Wait` (idle 0% CPU).
+        } else if self.toast_active() || self.animating || self.minimap_fading() {
+            // Drive ~60 fps while the toast fades, the zoom/pan eases, or the
+            // auto-shown minimap holds/fades. All settle quickly, after which we
+            // fall through to `Wait` (idle 0% CPU).
             let next = Instant::now() + Duration::from_millis(16);
             event_loop.set_control_flow(ControlFlow::WaitUntil(next));
             self.request_redraw();

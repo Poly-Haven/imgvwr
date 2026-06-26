@@ -34,6 +34,7 @@ for Windows.
 | `P` | Toggle 2D ↔ panorama mode |
 | `W` | Toggle tiled wrap (2D) |
 | `I` | Toggle nearest ↔ bilinear filtering |
+| `M` | Toggle the navigation minimap (auto-shows on 2D pan/zoom; click/drag it to jump) |
 
 ### Tone & files
 

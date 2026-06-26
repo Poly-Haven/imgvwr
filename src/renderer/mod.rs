@@ -76,6 +76,9 @@ pub struct RenderParams {
     pub clarity_amount: f32,
     /// Clarity unsharp-mask blur radius, in viewport pixels.
     pub clarity_radius: f32,
+    /// Whole-pass opacity (1 = opaque). The minimap thumbnail pass uses this to
+    /// fade itself over the scene; the main scene always renders at 1.0.
+    pub global_alpha: f32,
 }
 
 impl Default for RenderParams {
@@ -104,6 +107,7 @@ impl Default for RenderParams {
             guide_hover_color: [0.314, 1.0, 1.0],
             clarity_amount: 0.0,
             clarity_radius: 64.0,
+            global_alpha: 1.0,
         }
     }
 }
@@ -130,6 +134,7 @@ struct Uniforms {
     guide_color: Option<glow::UniformLocation>,
     guide_hover: Option<glow::UniformLocation>,
     guide_hover_color: Option<glow::UniformLocation>,
+    global_alpha: Option<glow::UniformLocation>,
     // Single-texture sampler.
     image: Option<glow::UniformLocation>,
     // Tiled-texture sampler + grid.
@@ -167,6 +172,7 @@ impl Uniforms {
             guide_color: u("u_guide_color"),
             guide_hover: u("u_guide_hover"),
             guide_hover_color: u("u_guide_hover_color"),
+            global_alpha: u("u_global_alpha"),
             image: u("u_image"),
             tiles: u("u_tiles"),
             tile_cols: u("u_tile_cols"),
@@ -444,7 +450,7 @@ impl Renderer {
     }
 
     /// Draw the scene (textured quad through the OCIO/exposure pipeline) into the
-    /// currently-bound framebuffer.
+    /// currently-bound framebuffer, clearing the whole viewport first.
     fn draw_scene(&self, params: &RenderParams) {
         let gl = &self.gl;
         let (w, h) = params.viewport;
@@ -455,14 +461,24 @@ impl Renderer {
             gl.clear_color(bg[0], bg[1], bg[2], 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
         }
+        self.draw_quad(params, 0, 0, w.max(1), h.max(1));
+    }
 
+    /// Draw the textured quad into an explicit sub-viewport `(x, y, w, h)` of the
+    /// bound framebuffer (GL origin bottom-left). The scene aspect is taken from
+    /// `(w, h)`, so a sub-viewport matching the image aspect fits the whole image
+    /// exactly. Does NOT clear — the caller owns clearing / scissoring. Shared by
+    /// the full-screen scene draw and the minimap thumbnail pass.
+    fn draw_quad(&self, params: &RenderParams, vx: i32, vy: i32, vw: i32, vh: i32) {
+        let gl = &self.gl;
         let Some(image) = &self.image else {
             return;
         };
-        let aspect = if h > 0 { w as f32 / h as f32 } else { 1.0 };
+        let aspect = if vh > 0 { vw as f32 / vh as f32 } else { 1.0 };
 
         unsafe {
             gl.use_program(Some(self.program));
+            gl.viewport(vx, vy, vw.max(1), vh.max(1));
 
             let u = &self.uniforms;
             gl.uniform_1_f32(u.yaw.as_ref(), params.yaw);
@@ -472,6 +488,7 @@ impl Renderer {
             gl.uniform_1_f32(u.aspect.as_ref(), aspect);
             gl.uniform_1_f32(u.exposure.as_ref(), params.exposure);
             gl.uniform_1_f32(u.gamma.as_ref(), params.gamma);
+            gl.uniform_1_f32(u.global_alpha.as_ref(), params.global_alpha);
             gl.uniform_1_i32(u.projection_mode.as_ref(), params.projection_mode);
             gl.uniform_1_f32(u.image_aspect.as_ref(), image.aspect);
             gl.uniform_1_i32(
@@ -560,6 +577,32 @@ impl Renderer {
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             gl.bind_vertex_array(None);
             gl.active_texture(glow::TEXTURE0);
+        }
+    }
+
+    /// Draw the minimap thumbnail into a sub-rectangle of the default framebuffer
+    /// (GL origin bottom-left), scissored so it touches only that corner. Composes
+    /// over the already-drawn scene with `params.global_alpha` (the fade), so it is
+    /// NOT cleared first — the thumbnail's own opaque pixels cover the rect, and a
+    /// translucent pass reveals the scene behind as it fades out.
+    ///
+    /// `params` is expected to be a fit-the-whole-image 2D view (projection_mode 1,
+    /// pan 0, `tan_half_fov` 1) whose `(w, h)` aspect matches the image; the caller
+    /// builds it. Clarity is intentionally skipped (this draws the quad directly).
+    pub fn render_minimap(&self, params: &RenderParams, x: i32, y: i32, w: i32, h: i32) {
+        if w <= 0 || h <= 0 || self.image.is_none() {
+            return;
+        }
+        let gl = &self.gl;
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.enable(glow::BLEND);
+            gl.enable(glow::SCISSOR_TEST);
+            gl.scissor(x, y, w, h);
+        }
+        self.draw_quad(params, x, y, w, h);
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
         }
     }
 }

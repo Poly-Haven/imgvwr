@@ -103,6 +103,25 @@ pub struct UiInputs {
     /// Resize cursor for a borderless edge under the pointer (set via egui so it
     /// resets correctly when the pointer leaves the edge).
     pub resize_cursor: Option<egui::CursorIcon>,
+    /// Bottom-right navigation minimap (border + current-view box). `None` when
+    /// hidden; the thumbnail itself is drawn by the GL renderer, not egui.
+    pub minimap: Option<MinimapInfo>,
+}
+
+/// The bottom-right minimap overlay: where to draw the border and the
+/// current-view outline, and at what fade opacity. The low-LOD image thumbnail is
+/// drawn by the GL renderer (so it is tone-mapped / tiled like the main view);
+/// egui only strokes the border and the view-region box on top. All geometry is
+/// in egui points.
+pub struct MinimapInfo {
+    /// The minimap panel rectangle (points).
+    pub rect: egui::Rect,
+    /// Fade opacity, 0..1.
+    pub alpha: f32,
+    /// The current view region as one or more polylines (points). 2D is a single
+    /// closed rectangle; panorama is the rectilinearly un-projected screen border,
+    /// split into segments at the longitude wrap.
+    pub view_segments: Vec<Vec<egui::Pos2>>,
 }
 
 impl UiInputs {

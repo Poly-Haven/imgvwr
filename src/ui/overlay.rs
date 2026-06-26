@@ -52,6 +52,11 @@ pub fn build_overlays(
 
     settings_dialog(ctx, inputs, state, actions);
 
+    // Bottom-right navigation minimap (border + view box over the GL thumbnail).
+    // Drawn before the rulers / bottom panel so those auto-hiding panels sit on
+    // top where they overlap.
+    minimap(ctx, inputs);
+
     // The left pixel ruler (drawn before the bottom panel so the panel covers the
     // overlapping bottom-left corner). The bottom ruler lives inside the panel.
     left_ruler(ctx, inputs, state, actions);
@@ -297,6 +302,49 @@ fn ruler_spawn_drag(
             }
         }
     }
+}
+
+/// Draw the navigation minimap's chrome: a subtle black border around the panel
+/// and the white current-view outline. The thumbnail underneath is rendered by
+/// the GL renderer (so it matches the main view's tone mapping), so this only
+/// strokes lines on top — no interactive widget (clicks are routed in the app's
+/// input layer, like the guides). Everything fades together via `info.alpha`.
+fn minimap(ctx: &egui::Context, inputs: &UiInputs) {
+    let Some(info) = &inputs.minimap else {
+        return;
+    };
+    let a = info.alpha.clamp(0.0, 1.0);
+    if a <= 0.0 {
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::new("imgvwr_minimap"),
+    ));
+
+    // Current-view outline (white), clipped to the panel so a view box larger than
+    // the image, or a wrapped panorama segment, can't spill past the edge.
+    let clipped = painter.with_clip_rect(info.rect);
+    let view_stroke = egui::Stroke::new(
+        1.0,
+        egui::Color32::from_white_alpha((a * 235.0).round() as u8),
+    );
+    for seg in &info.view_segments {
+        if seg.len() >= 2 {
+            clipped.add(egui::Shape::line(seg.clone(), view_stroke));
+        }
+    }
+
+    // Subtle black border (unclipped so the full stroke shows on the panel edge).
+    painter.rect_stroke(
+        info.rect,
+        egui::CornerRadius::same(2),
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_black_alpha((a * 180.0).round() as u8),
+        ),
+        egui::StrokeKind::Outside,
+    );
 }
 
 /// The left pixel ruler (2D only). Reveals on its own slide — near the left edge
@@ -1477,6 +1525,7 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
                 ("P", "Toggle 2D / panorama"),
                 ("W", "Toggle 2D tiled wrap"),
                 ("I", "Nearest / bilinear filtering"),
+                ("M", "Navigation minimap"),
             ],
         ),
         (

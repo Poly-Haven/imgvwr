@@ -25,6 +25,8 @@ uniform vec2  u_guides[64];
 uniform vec3  u_guide_color;         // display-encoded sRGB 0–1
 uniform int   u_guide_hover;         // index of the hovered guide, or -1
 uniform vec3  u_guide_hover_color;   // inverse-hue colour for the hovered guide
+uniform float u_global_alpha;        // whole-frame opacity (1 = opaque); the
+                                     // minimap pass fades its thumbnail with this
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -196,5 +198,5 @@ void main() {
         color = mix(color, vec3(0.0), halo);
         color = mix(color, gcol, line);
     }
-    frag_color = vec4(color, out_alpha);
+    frag_color = vec4(color, out_alpha * u_global_alpha);
 }

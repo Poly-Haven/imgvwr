@@ -205,6 +205,15 @@ impl CameraController {
         }
     }
 
+    /// Aim the panorama look at an equirectangular UV (e.g. a minimap click) —
+    /// instant, like the other panorama look setters. No-op on `Flat`.
+    pub fn look_at_uv(&mut self, uv: Vec2) {
+        if self.is_panorama() {
+            let (yaw, pitch) = uv_to_yaw_pitch(uv);
+            self.snap_look(yaw, pitch);
+        }
+    }
+
     /// Pan in 2D by a UV delta — instant (drag). No-op on `Pano`.
     pub fn pan(&mut self, d_uv: Vec2) {
         for cam in [&mut self.camera, &mut self.target] {
@@ -483,6 +492,31 @@ mod tests {
         }
         // 90° FOV == fit zoom 1.0.
         assert!(approx(fov_to_zoom(FLAT_FIT_FOV_DEG), 1.0, 1e-4));
+    }
+
+    #[test]
+    fn look_at_uv_centers_that_uv() {
+        // The minimap click maps an equirect uv to a look direction; the screen
+        // centre must then sit back on that uv (u periodic, pitch within ±90°).
+        let mut c = CameraController::for_image(true); // panorama
+        for uv in [
+            Vec2::new(0.25, 0.4),
+            Vec2::new(0.8, 0.6),
+            Vec2::new(0.5, 0.5),
+            Vec2::new(0.1, 0.2),
+        ] {
+            c.look_at_uv(uv);
+            let got = c.camera.center_uv();
+            assert!(uv_approx(uv, got, 1e-3), "look_at_uv {uv:?} -> {got:?}");
+        }
+    }
+
+    #[test]
+    fn look_at_uv_is_noop_on_flat() {
+        let mut c = CameraController::for_image(false); // 2D
+        let before = c.camera;
+        c.look_at_uv(Vec2::new(0.3, 0.7));
+        assert_eq!(c.camera, before);
     }
 
     #[test]

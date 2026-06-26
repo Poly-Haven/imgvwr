@@ -2815,6 +2815,7 @@ impl App {
                     self.request_redraw();
                 }
             }
+            UiAction::ResetAdjustments => self.reset_image_processing(),
             UiAction::OpenSettings => {
                 self.ui_state.show_settings = true;
                 self.ui_state.confirm_default = false;

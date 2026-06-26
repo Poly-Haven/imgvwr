@@ -229,60 +229,35 @@ fn bottom_panel(
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(12, 7))
                     .show(ui, |ui| {
-                        ui.set_min_width(screen.width() - 24.0);
-                        // Wrap onto multiple rows when the window is too narrow to
-                        // fit all the sliders in one line.
-                        ui.horizontal_wrapped(|ui| {
-                            // Tone group.
-                            adj_slider(
-                                ui,
-                                "Exposure",
-                                inputs.exposure,
-                                -16.0..=16.0,
-                                0.5,
-                                2,
-                                UiAction::SetExposure,
-                                actions,
-                            );
-                            ui.add_space(12.0);
-                            adj_slider(
-                                ui,
-                                "Gamma",
-                                inputs.gamma,
-                                0.1..=4.0,
-                                0.1,
-                                2,
-                                UiAction::SetGamma,
-                                actions,
-                            );
-                            ui.add_space(12.0);
-                            ui.separator();
-                            ui.add_space(12.0);
-                            // Clarity group (local contrast).
-                            ui.label(
-                                egui::RichText::new("Clarity")
-                                    .color(egui::Color32::from_gray(190)),
-                            );
-                            adj_slider(
-                                ui,
-                                "",
-                                inputs.clarity_amount,
-                                0.0..=10.0,
-                                0.5,
-                                2,
-                                UiAction::SetClarity,
-                                actions,
-                            );
-                            adj_slider(
-                                ui,
-                                "Radius",
-                                inputs.clarity_radius,
-                                8.0..=256.0,
-                                16.0,
-                                0,
-                                UiAction::SetClarityRadius,
-                                actions,
-                            );
+                        // Manual row layout: egui's horizontal_wrapped won't wrap
+                        // between nested groups, so chunk the atomic slider groups
+                        // into rows by available width and centre each row. The
+                        // Reset button is a separate bottom-right area (below), so
+                        // `field` reserves room for it on the right.
+                        const GROUP_W: f32 = 236.0;
+                        let avail = (screen.width() - 24.0).max(GROUP_W);
+                        ui.set_min_width(avail);
+                        let field = (avail - 52.0).max(GROUP_W);
+                        let per_row = ((field / GROUP_W).floor() as usize).clamp(1, 4);
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        ui.vertical(|ui| {
+                            let mut i = 0usize;
+                            while i < 4 {
+                                let n = per_row.min(4 - i);
+                                ui.horizontal(|ui| {
+                                    let row_w = n as f32 * GROUP_W;
+                                    ui.add_space(((field - row_w) * 0.5).max(0.0));
+                                    for _ in 0..n {
+                                        ui.allocate_ui(egui::vec2(GROUP_W, 24.0), |ui| match i {
+                                            0 => adj_slider(ui, "Exposure", inputs.exposure, -16.0..=16.0, 0.5, 2, UiAction::SetExposure, actions),
+                                            1 => adj_slider(ui, "Gamma", inputs.gamma, 0.1..=4.0, 0.1, 2, UiAction::SetGamma, actions),
+                                            2 => adj_slider(ui, "Clarity", inputs.clarity_amount, 0.0..=10.0, 0.5, 2, UiAction::SetClarity, actions),
+                                            _ => adj_slider(ui, "Radius", inputs.clarity_radius, 8.0..=256.0, 16.0, 0, UiAction::SetClarityRadius, actions),
+                                        });
+                                        i += 1;
+                                    }
+                                });
+                            }
                         });
                     });
             });
@@ -291,7 +266,25 @@ fn bottom_panel(
                 egui::Shape::rect_filled(content.response.rect, 0.0, panel_bg()),
             );
         });
-    state.pointer_over_panel = resp.response.contains_pointer();
+    let mut over = resp.response.contains_pointer();
+
+    // Reset button as a separate area pinned to the panel's bottom-right corner,
+    // sliding with it. Decoupled from the slider flow so its placement never
+    // depends on the (variable) group widths.
+    let reset = egui::Area::new(egui::Id::new("imgvwr_reset"))
+        .anchor(
+            egui::Align2::RIGHT_BOTTOM,
+            egui::vec2(-10.0, -10.0 + (1.0 - slide) * 96.0),
+        )
+        .constrain(false)
+        .show(ctx, |ui| {
+            reset_button(ui).on_hover_text("Reset all adjustments (Ctrl+R)")
+        });
+    if reset.inner.clicked() {
+        actions.push(UiAction::ResetAdjustments);
+    }
+    over |= reset.response.contains_pointer();
+    state.pointer_over_panel = over;
 }
 
 /// A labelled slider with `−` / `+` step buttons, emitting `make(value)` on any
@@ -308,20 +301,48 @@ fn adj_slider(
     actions: &mut Vec<UiAction>,
 ) {
     let (lo, hi) = (*range.start(), *range.end());
-    ui.label(egui::RichText::new(label).color(egui::Color32::from_gray(190)));
-    if clickable(ui.small_button("−")).clicked() {
-        actions.push(make((value - step).clamp(lo, hi)));
+    // One atomic group: the label, ± buttons and slider never wrap apart. The
+    // slider is given a FIXED width (add_sized) so the group's measured width
+    // matches what it renders — otherwise the slider expands past the measured
+    // size and the wrap never triggers (groups overflow instead of wrapping).
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(label).color(egui::Color32::from_gray(190)));
+        if clickable(ui.small_button("−")).clicked() {
+            actions.push(make((value - step).clamp(lo, hi)));
+        }
+        let mut v = value;
+        if ui
+            .add_sized(
+                [86.0, 18.0],
+                egui::Slider::new(&mut v, range).fixed_decimals(decimals),
+            )
+            .changed()
+        {
+            actions.push(make(v));
+        }
+        if clickable(ui.small_button("+")).clicked() {
+            actions.push(make((value + step).clamp(lo, hi)));
+        }
+    });
+}
+
+/// The bottom-panel Reset button (right edge): an icon that resets all image
+/// adjustments, same as Ctrl+R.
+fn reset_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 4.0, egui::Color32::from_white_alpha(28));
     }
-    let mut v = value;
-    if ui
-        .add(egui::Slider::new(&mut v, range).fixed_decimals(decimals))
-        .changed()
-    {
-        actions.push(make(v));
-    }
-    if clickable(ui.small_button("+")).clicked() {
-        actions.push(make((value + step).clamp(lo, hi)));
-    }
+    let icon = egui::Image::new(egui::include_image!(
+        "../../resources/icons/ui/arrow-counterclockwise.svg"
+    ))
+    .tint(egui::Color32::from_gray(220));
+    icon.paint_at(
+        ui,
+        egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(15.0)),
+    );
+    clickable(resp)
 }
 
 /// The settings dialog (opened from the toolbar): startup-display picker and the

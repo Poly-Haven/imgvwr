@@ -187,6 +187,8 @@ pub enum UiAction {
     },
     /// Remove the guide at this index (from the metadata box's guide list).
     RemoveGuide(usize),
+    /// Reset all image adjustments (the bottom-panel Reset button = Ctrl+R).
+    ResetAdjustments,
     /// Open the settings dialog (titlebar gear button).
     OpenSettings,
     // Borderless titlebar controls.

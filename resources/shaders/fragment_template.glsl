@@ -27,6 +27,8 @@ uniform int   u_guide_hover;         // index of the hovered guide, or -1
 uniform vec3  u_guide_hover_color;   // inverse-hue colour for the hovered guide
 uniform float u_global_alpha;        // whole-frame opacity (1 = opaque); the
                                      // minimap pass fades its thumbnail with this
+uniform int   u_rotation;            // 2D display rotation, 90° CW quarter-turns 0–3
+                                     // (u_image_aspect is already the rotated aspect)
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -51,6 +53,17 @@ vec2 direction_to_equirect_uv(vec3 dir) {
     float u = 1.0 - (lon / (2.0 * PI) + 0.5);
     float v = 0.5 - lat / PI;
     return vec2(u, v);
+}
+
+// Map a displayed image-uv to the source texture uv for a 90°-CW quarter-turn
+// display rotation `rot` (0–3). The displayed aspect is handled separately (the
+// app feeds the rotated aspect as u_image_aspect), so this is a pure unit-square
+// coordinate swap — undistorted for any image.
+vec2 rotate_uv(vec2 d, int rot) {
+    if (rot == 1) return vec2(d.y, 1.0 - d.x);
+    if (rot == 2) return vec2(1.0 - d.x, 1.0 - d.y);
+    if (rot == 3) return vec2(1.0 - d.y, d.x);
+    return d;
 }
 
 vec3 srgb_to_linear(vec3 c) {
@@ -89,9 +102,11 @@ void main() {
         }
         // When wrapping, GL_REPEAT on both axes tiles the image seamlessly.
         // The 2D coordinate is screen-space-continuous, so implicit-derivative
-        // sampling (and its mip LOD) is correct here.
+        // sampling (and its mip LOD) is correct here. `uv` stays in DISPLAYED
+        // space (guides / bounds compare against it); the image is sampled at the
+        // rotation-permuted source coordinate.
         uv = raw_uv;
-        texel = sample_image(uv);
+        texel = sample_image(rotate_uv(uv, u_rotation));
     } else {
         // -- Rectilinear equirectangular projection ----------------------
         vec2 ndc = (v_uv * 2.0 - 1.0) / u_stretch;

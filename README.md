@@ -31,6 +31,7 @@ for Windows.
 | Numpad `1`–`9` | Zoom in `2^(N-1)×` (1=100%, 2=200%, 3=400%…); with `Ctrl`, zoom out |
 | `Home` / `R` | Reset the view and window to the default |
 | `Backspace` | Centre the image and fit the window to it at the current zoom |
+| `↑` / `↓` | Rotate the image 90° (counter-clockwise / clockwise); remembered per image for the session |
 | `P` | Toggle 2D ↔ panorama mode |
 | `W` | Toggle tiled wrap (2D) |
 | `I` | Toggle nearest ↔ bilinear filtering |

@@ -23,6 +23,7 @@
 //!   * `IMGVWR_DEBUG_WRAP` = `1`
 //!   * `IMGVWR_DEBUG_SLOT` = `1` (pin the loaded image into comparator slot 1)
 
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -242,6 +243,13 @@ pub struct App {
     /// (max [`crate::renderer::MAX_GUIDES`]).
     guides: Vec<[f32; 2]>,
     show_metadata: bool,
+    /// Display rotation of the current 2D image in 90° clockwise quarter-turns
+    /// (0–3), applied in the shader. Persisted per image path for the session in
+    /// [`image_rotations`](Self::image_rotations); not reset by R / Ctrl+R.
+    rotation: u8,
+    /// Per-image-path display rotation, remembered for the session so reopening a
+    /// rotated image (or stepping back to it) restores the rotation.
+    image_rotations: HashMap<PathBuf, u8>,
     /// Navigation minimap toggled on with M (persists until toggled off). When
     /// off, the minimap can still appear automatically on 2D pan/zoom.
     minimap_on: bool,
@@ -449,6 +457,8 @@ impl App {
             sharpness: false,
             guides: Vec::new(),
             show_metadata: false,
+            rotation: 0,
+            image_rotations: HashMap::new(),
             minimap_on: false,
             minimap_auto_until: None,
             minimap_prev_view: None,
@@ -873,7 +883,7 @@ impl App {
         let Some(zoom) = self.camera.target_zoom() else {
             return false;
         };
-        let (img_w, img_h) = (self.file_info.width, self.file_info.height);
+        let (img_w, img_h) = self.display_dims();
         if img_w == 0 || img_h == 0 {
             return false;
         }
@@ -1240,6 +1250,9 @@ impl App {
             panorama: equirect,
         };
         self.loaded_path = Some(data.path.clone());
+        // Restore this image's remembered display rotation (default upright). A
+        // session-only property — kept across navigation / reopen, not persisted.
+        self.rotation = self.image_rotations.get(&data.path).copied().unwrap_or(0);
         if !keep_view {
             self.camera = CameraController::for_image(want_pano);
             self.exposure = 0.0;
@@ -1277,7 +1290,8 @@ impl App {
         // Panoramas shown in the sphere keep the window; locked/compared views
         // keep the current size for side-by-side compare.
         if !want_pano && !self.locked && !for_compare {
-            self.resize_window_to_image(data.width, data.height);
+            let (dw, dh) = self.frame_dims();
+            self.resize_window_to_image(dw, dh);
         }
         self.apply_debug_overrides();
 
@@ -1549,8 +1563,10 @@ impl App {
         // Reset the geometric squash/stretch too.
         self.image_stretch = Vec2::ONE;
         // Re-frame the window to the image's default (framed) size for both 2D
-        // and panorama (panoramas frame to their 2:1 aspect, capped to 90%).
-        self.resize_window_to_image(self.file_info.width, self.file_info.height);
+        // and panorama (2D uses the rotation-aware displayed dims; panoramas frame
+        // to their 2:1 aspect, capped to 90%). Rotation itself is NOT reset.
+        let (dw, dh) = self.frame_dims();
+        self.resize_window_to_image(dw, dh);
         self.request_redraw();
     }
 
@@ -1560,7 +1576,8 @@ impl App {
     fn center_and_fit_window(&mut self) {
         if self.camera.is_panorama() {
             // No 2D zoom to preserve; re-frame the window to the 2:1 image.
-            self.resize_window_to_image(self.file_info.width, self.file_info.height);
+            let (dw, dh) = self.frame_dims();
+            self.resize_window_to_image(dw, dh);
         } else {
             // Centre, then frame the window to the image at the current scale.
             // follow_zoom_with_window keeps the on-screen scale (re-deriving the
@@ -1568,6 +1585,29 @@ impl App {
             self.camera.set_pan_target(Vec2::ZERO);
             self.follow_zoom_with_window();
         }
+        self.request_redraw();
+    }
+
+    /// Rotate the displayed image 90° (`dir` = +1 clockwise, −1 counter-clockwise),
+    /// remembered per image path for the session (restored when the image is
+    /// reopened or stepped back to). The rotation is a display property: it is NOT
+    /// reset by R / Home / Ctrl+R. In 2D the window re-frames to the rotated image
+    /// and recentres; panorama keeps its sphere framing (rotation is inert there
+    /// until the image is viewed in 2D).
+    fn rotate_image(&mut self, dir: i32) {
+        if self.file_info.width == 0 {
+            return;
+        }
+        self.rotation = (self.rotation as i32 + dir).rem_euclid(4) as u8;
+        if let Some(path) = &self.loaded_path {
+            self.image_rotations.insert(path.clone(), self.rotation);
+        }
+        if !self.camera.is_panorama() {
+            self.camera.center_flat_now();
+            let (dw, dh) = self.frame_dims();
+            self.resize_window_to_image(dw, dh);
+        }
+        self.show_toast("Rotated 90°".to_string());
         self.request_redraw();
     }
 
@@ -1700,11 +1740,7 @@ impl App {
             levels
         };
         let (h, v) = (completed(self, true), completed(self, false));
-        let aspect = if self.file_info.height > 0 {
-            self.file_info.width as f32 / self.file_info.height as f32
-        } else {
-            1.0
-        };
+        let aspect = self.display_aspect();
         let Some(horizontal) = next_guide_horizontal(h, v, self.guides.is_empty(), aspect) else {
             return; // both axes full
         };
@@ -1809,7 +1845,7 @@ impl App {
         let mult = 2f32.powi(digit as i32 - 1);
         let pct = if ctrl { 100.0 / mult } else { 100.0 * mult };
         let (_, vh) = self.viewport();
-        let img_h = self.file_info.height.max(1) as f32;
+        let img_h = self.display_dims().1.max(1) as f32;
         let zoom = (pct / 100.0) * (img_h / vh);
         let z0 = self.camera.target_zoom();
         match self.camera.camera {
@@ -2112,7 +2148,8 @@ impl App {
                 // the look so a region under inspection stays put.
                 if !want && !max_or_fs {
                     self.camera.center_flat_now();
-                    self.resize_window_to_image(self.file_info.width, self.file_info.height);
+                    let (dw, dh) = self.frame_dims();
+                    self.resize_window_to_image(dw, dh);
                 }
                 log::info!(
                     "projection -> {}",
@@ -2190,6 +2227,9 @@ impl App {
             (Key::Named(NamedKey::F11), _) => self.toggle_fullscreen(),
             (Key::Named(NamedKey::ArrowRight), _) => self.navigate(1),
             (Key::Named(NamedKey::ArrowLeft), _) => self.navigate(-1),
+            // Up / Down rotate the image 90° (CCW / CW), remembered per image.
+            (Key::Named(NamedKey::ArrowUp), _) => self.rotate_image(-1),
+            (Key::Named(NamedKey::ArrowDown), _) => self.rotate_image(1),
             (Key::Named(NamedKey::Escape), _) => {
                 if self.ui_state.show_help {
                     self.ui_state.show_help = false;
@@ -2254,6 +2294,35 @@ impl App {
             .collect()
     }
 
+    /// The image's displayed pixel dimensions — the source dimensions with width
+    /// and height swapped for a 90°/270° rotation. All the 2D view maths (aspect,
+    /// rulers, fit, minimap) work in displayed space, so they use this, not the raw
+    /// `file_info` dimensions.
+    fn display_dims(&self) -> (u32, u32) {
+        let (w, h) = (self.file_info.width, self.file_info.height);
+        if self.rotation % 2 == 1 {
+            (h, w)
+        } else {
+            (w, h)
+        }
+    }
+
+    /// The displayed aspect (width / height), accounting for rotation.
+    fn display_aspect(&self) -> f32 {
+        let (w, h) = self.display_dims();
+        (w as f32 / h.max(1) as f32).max(1e-4)
+    }
+
+    /// Dimensions to frame the window to: the displayed (rotation-aware) image in
+    /// 2D; the source 2:1 in panorama (rotation doesn't apply to the sphere).
+    fn frame_dims(&self) -> (u32, u32) {
+        if self.camera.is_panorama() {
+            (self.file_info.width, self.file_info.height)
+        } else {
+            self.display_dims()
+        }
+    }
+
     /// Image uv under a screen-pixel position (physical px), mirroring the
     /// shader's 2D / panorama projection. Used for direct guide hit-testing.
     fn viewport_uv(&self, sx: f64, sy: f64) -> Option<(f32, f32)> {
@@ -2267,8 +2336,7 @@ impl App {
         let cam = &self.camera.camera;
         match cam {
             Camera::Flat { .. } => {
-                let image_aspect =
-                    (self.file_info.width as f32 / self.file_info.height as f32).max(1e-4);
+                let image_aspect = self.display_aspect();
                 let inv_zoom = cam.tan_half_fov();
                 let s_x = inv_zoom * (vw / vh) / image_aspect / self.image_stretch.x;
                 let s_y = inv_zoom / self.image_stretch.y;
@@ -2363,7 +2431,10 @@ impl App {
     /// too small to seat it.
     fn minimap_metrics(&self) -> Option<MinimapMetrics> {
         let gfx = self.gfx.as_ref()?;
-        let aspect = gfx.renderer.image_aspect()?; // None when no image is loaded
+        gfx.renderer.image_aspect()?; // None when no image is loaded
+                                      // The thumbnail is rendered rotated, so size the panel to the displayed
+                                      // (rotation-aware) aspect, not the raw texture aspect.
+        let aspect = self.display_aspect();
         if !aspect.is_finite() || aspect <= 0.0 {
             return None;
         }
@@ -2457,8 +2528,7 @@ impl App {
     fn view_half_extent_uv(&self) -> (f32, f32) {
         let cam = &self.camera.camera;
         let (vw, vh) = self.viewport();
-        let image_aspect =
-            (self.file_info.width as f32 / self.file_info.height.max(1) as f32).max(1e-4);
+        let image_aspect = self.display_aspect();
         let inv = cam.tan_half_fov();
         let sx = inv * (vw / vh) / image_aspect / self.image_stretch.x;
         let sy = inv / self.image_stretch.y;
@@ -2740,7 +2810,10 @@ impl App {
                 }),
             });
         }
-        let image_aspect = (img_w / img_h).max(1e-4);
+        // 2D: rulers read out the DISPLAYED image (rotation-aware) pixels.
+        let (dw, dh) = self.display_dims();
+        let (img_w, img_h) = (dw as f32, dh as f32);
+        let image_aspect = self.display_aspect();
         let inv_zoom = cam.tan_half_fov();
         Some(crate::ui::RulerInfo {
             sx: inv_zoom * (vw / vh) / image_aspect / self.image_stretch.x,
@@ -2772,12 +2845,7 @@ impl App {
             return false;
         };
         let (vw, vh) = self.viewport();
-        let aspect = self
-            .gfx
-            .as_ref()
-            .and_then(|g| g.renderer.image_aspect())
-            .unwrap_or(1.0);
-        let fit = (vw / vh / aspect.max(1e-4)).min(1.0);
+        let fit = (vw / vh / self.display_aspect()).min(1.0);
         // Generous tolerance: in the window-follow's hugging regime the target
         // zoom lands at ~1.0 but drifts by up to ~0.1% from integer window
         // rounding, which a tight threshold would flip in and out of. The next
@@ -3120,6 +3188,11 @@ impl App {
         }
         if std::env::var_os("IMGVWR_DEBUG_SHARPNESS").is_some() {
             self.sharpness = true;
+        }
+        if let Ok(v) = std::env::var("IMGVWR_DEBUG_ROTATION") {
+            if let Ok(r) = v.parse::<i32>() {
+                self.rotation = r.rem_euclid(4) as u8;
+            }
         }
         if let Ok(v) = std::env::var("IMGVWR_DEBUG_MINIMAP") {
             // Force the minimap on for headless capture (pair with a zoomed-in
@@ -3765,6 +3838,8 @@ impl App {
             clarity_amount: self.clarity_amount,
             clarity_radius: self.clarity_radius,
             global_alpha: 1.0,
+            // 2D display rotation (ignored by the panorama branch in the shader).
+            rotation: self.rotation as i32,
         };
         // Minimap thumbnail pass parameters (panel rect + fade), gathered before
         // the mutable gfx borrow. Drawn after the scene, below the egui overlay.

@@ -45,6 +45,14 @@ cargo build --release
 - The navigation minimap (`M`) reuses the scene shader via a scissored second `draw_quad` into the
   bottom-right corner (`Renderer::render_minimap`) — so the thumbnail is tone-mapped and tiled like
   the main view; egui only strokes the border + view box on top. Its fade rides `u_global_alpha`.
+- **2D display rotation (Up/Down) is a per-image session property** (`App::rotation` 0–3 CW
+  quarter-turns; remembered in `image_rotations` by path; not reset by R/Ctrl+R). It's applied
+  purely in the shader: `u_image_aspect` is fed the *rotated* aspect and the sampler permutes the
+  uv (`rotate_uv`); the texture is never re-uploaded. Any 2D code that needs the image's aspect or
+  pixel dimensions must use `display_dims()` / `display_aspect()` / `frame_dims()` (rotation-aware),
+  NOT the raw `file_info` dims or `renderer.image_aspect()` — rulers, fit, the minimap, guides and
+  window-framing all do. Guides stay in *displayed* uv (the shader compares them against the
+  pre-permute coordinate).
 - The camera is an enum (`Pano` | `Flat`) — keep the two states distinct; convert through
   `center_uv` on the P-toggle rather than reusing fields.
 - **Window-follow zoom ease (`ease_window`) must be advanced from `about_to_wait`, never from

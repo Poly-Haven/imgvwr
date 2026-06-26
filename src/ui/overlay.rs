@@ -1549,6 +1549,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("Numpad 1–9", "Zoom 2^(N-1)× (Ctrl = out)"),
                 ("Home / R", "Reset view & window"),
                 ("Backspace", "Centre + fit window (keep zoom)"),
+                ("↑ / ↓", "Rotate 90° (remembered)"),
                 ("P", "Toggle 2D / panorama"),
                 ("W", "Toggle 2D tiled wrap"),
                 ("I", "Nearest / bilinear filtering"),

@@ -79,6 +79,9 @@ pub struct RenderParams {
     /// Whole-pass opacity (1 = opaque). The minimap thumbnail pass uses this to
     /// fade itself over the scene; the main scene always renders at 1.0.
     pub global_alpha: f32,
+    /// 2D display rotation in 90° clockwise quarter-turns (0–3). The image is
+    /// sampled at the permuted source coordinate; the aspect is rotated to match.
+    pub rotation: i32,
 }
 
 impl Default for RenderParams {
@@ -108,6 +111,7 @@ impl Default for RenderParams {
             clarity_amount: 0.0,
             clarity_radius: 64.0,
             global_alpha: 1.0,
+            rotation: 0,
         }
     }
 }
@@ -135,6 +139,7 @@ struct Uniforms {
     guide_hover: Option<glow::UniformLocation>,
     guide_hover_color: Option<glow::UniformLocation>,
     global_alpha: Option<glow::UniformLocation>,
+    rotation: Option<glow::UniformLocation>,
     // Single-texture sampler.
     image: Option<glow::UniformLocation>,
     // Tiled-texture sampler + grid.
@@ -173,6 +178,7 @@ impl Uniforms {
             guide_hover: u("u_guide_hover"),
             guide_hover_color: u("u_guide_hover_color"),
             global_alpha: u("u_global_alpha"),
+            rotation: u("u_rotation"),
             image: u("u_image"),
             tiles: u("u_tiles"),
             tile_cols: u("u_tile_cols"),
@@ -490,7 +496,15 @@ impl Renderer {
             gl.uniform_1_f32(u.gamma.as_ref(), params.gamma);
             gl.uniform_1_f32(u.global_alpha.as_ref(), params.global_alpha);
             gl.uniform_1_i32(u.projection_mode.as_ref(), params.projection_mode);
-            gl.uniform_1_f32(u.image_aspect.as_ref(), image.aspect);
+            gl.uniform_1_i32(u.rotation.as_ref(), params.rotation);
+            // A 90°/270° display rotation swaps the displayed aspect; the shader's
+            // 2D mapping fits the image against this rotated aspect.
+            let aspect = if params.rotation & 1 == 1 {
+                1.0 / image.aspect
+            } else {
+                image.aspect
+            };
+            gl.uniform_1_f32(u.image_aspect.as_ref(), aspect);
             gl.uniform_1_i32(
                 u.input_is_encoded_srgb.as_ref(),
                 image.is_encoded_srgb as i32,

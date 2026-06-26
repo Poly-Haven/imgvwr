@@ -233,6 +233,11 @@ pub struct App {
     ui_state: UiState,
     bottom_visible: bool,
     bottom_hide_deadline: Option<Instant>,
+    /// The left ruler reveals independently of the bottom panel (near the left
+    /// edge, or while the bottom panel is up), and stays up while hovered so a
+    /// guide can be dragged off it.
+    left_ruler_visible: bool,
+    left_ruler_hide_deadline: Option<Instant>,
     file_info: FileInfo,
     loaded_path: Option<PathBuf>,
     /// File name of the in-flight / last-attempted load (for overlays).
@@ -275,6 +280,7 @@ pub struct App {
     titlebar_slide: f32,
     metadata_slide: f32,
     bottom_slide: f32,
+    left_ruler_slide: f32,
     /// Active Alt+right-drag resize: the edge(s) being dragged. Resized manually
     /// (not via the OS loop, which is left-button only) so it ends on release.
     alt_resize: Option<ResizeDirection>,
@@ -402,6 +408,8 @@ impl App {
             ui_state: UiState::default(),
             bottom_visible: false,
             bottom_hide_deadline: None,
+            left_ruler_visible: false,
+            left_ruler_hide_deadline: None,
             file_info: FileInfo::default(),
             loaded_path: None,
             pending_name: None,
@@ -451,6 +459,7 @@ impl App {
             titlebar_slide: 0.0,
             metadata_slide: 0.0,
             bottom_slide: 0.0,
+            left_ruler_slide: 0.0,
             alt_resize: None,
             alt_resize_origin: (0, 0, 0, 0),
             alt_resize_press: (0.0, 0.0),
@@ -2039,11 +2048,9 @@ impl App {
     /// The image↔screen mapping the pixel rulers need (2D only). Mirrors the
     /// shader's 2D UV mapping so ticks land on real image pixels.
     fn ruler_info(&self) -> Option<crate::ui::RulerInfo> {
-        if self.camera.is_panorama()
-            || self.file_info.width == 0
-            || self.bottom_slide <= 0.001
-            || self.window_is_small()
-        {
+        // The mapping is needed whenever either ruler might show; each ruler's
+        // own slide (bottom panel / left ruler) gates its actual rendering.
+        if self.camera.is_panorama() || self.file_info.width == 0 || self.window_is_small() {
             return None;
         }
         let (vw, vh) = self.viewport();
@@ -2059,7 +2066,6 @@ impl App {
             pan_v: -cam.pitch() / std::f32::consts::PI,
             img_w,
             img_h,
-            slide: self.bottom_slide,
         })
     }
 
@@ -2472,6 +2478,7 @@ impl App {
             clarity_amount: self.clarity_amount,
             clarity_radius: self.clarity_radius,
             ruler: self.ruler_info(),
+            left_ruler_slide: self.left_ruler_slide,
             loading,
             progress,
             loading_name: self.pending_name.clone(),
@@ -2611,6 +2618,37 @@ impl App {
                 Some(t) if Instant::now() >= t => {
                     self.bottom_visible = false;
                     self.bottom_hide_deadline = None;
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// Reveal the left ruler near the left edge (or while the bottom panel is up,
+    /// so the two rulers frame the image together), and keep it up while the
+    /// cursor is over it so a guide can be dragged off. 2D only.
+    fn tick_left_ruler(&mut self) {
+        let scale = self
+            .gfx
+            .as_ref()
+            .map(|g| g.window.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let near_left = self.cursor_in_window && self.cursor_pos.x <= (44.0 * scale) as f64;
+        let eligible = !self.window_is_small() && !self.camera.is_panorama() && self.file_info.width != 0;
+        let show = eligible
+            && (near_left || self.bottom_visible || self.ui_state.pointer_over_left_ruler);
+        if show {
+            self.left_ruler_visible = true;
+            self.left_ruler_hide_deadline = None;
+        } else if self.left_ruler_visible {
+            match self.left_ruler_hide_deadline {
+                None => {
+                    self.left_ruler_hide_deadline =
+                        Some(Instant::now() + Duration::from_millis(100));
+                }
+                Some(t) if Instant::now() >= t => {
+                    self.left_ruler_visible = false;
+                    self.left_ruler_hide_deadline = None;
                 }
                 Some(_) => {}
             }
@@ -2816,6 +2854,7 @@ impl App {
             self.ui_state.show_settings = true;
         }
         self.tick_bottom_panel();
+        self.tick_left_ruler();
         self.tick_metadata();
 
         // Slide the auto-hiding panels in/out from their edges over SLIDE_SECS,
@@ -2823,11 +2862,15 @@ impl App {
         let tb_t = self.titlebar_should_show() as i32 as f32;
         let md_t = self.metadata_should_show() as i32 as f32;
         let bp_t = self.bottom_visible as i32 as f32;
+        let lr_t = self.left_ruler_visible as i32 as f32;
         self.titlebar_slide = approach(self.titlebar_slide, tb_t, dt);
         self.metadata_slide = approach(self.metadata_slide, md_t, dt);
         self.bottom_slide = approach(self.bottom_slide, bp_t, dt);
-        let slides_moving =
-            self.titlebar_slide != tb_t || self.metadata_slide != md_t || self.bottom_slide != bp_t;
+        self.left_ruler_slide = approach(self.left_ruler_slide, lr_t, dt);
+        let slides_moving = self.titlebar_slide != tb_t
+            || self.metadata_slide != md_t
+            || self.bottom_slide != bp_t
+            || self.left_ruler_slide != lr_t;
 
         // Keep scheduling timed frames while the camera, tone, or panels are
         // moving (the window geometry self-drives via Resized events, so it's not
@@ -3041,6 +3084,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.update_alt_resize();
                 }
                 self.tick_bottom_panel();
+                self.tick_left_ruler();
                 self.tick_metadata();
                 self.request_redraw();
             }

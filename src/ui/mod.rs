@@ -44,6 +44,9 @@ pub struct UiInputs {
     pub clarity_radius: f32,
     /// Image↔screen mapping for the pixel rulers (2D only; `None` hides them).
     pub ruler: Option<RulerInfo>,
+    /// Left-ruler reveal progress, 0 (hidden off the left) … 1 (fully in). The
+    /// bottom ruler rides the bottom panel's `bottom_slide` (drawn merged with it).
+    pub left_ruler_slide: f32,
 
     // Overlays (Commit 9).
     pub loading: bool,
@@ -123,8 +126,6 @@ pub struct RulerInfo {
     pub pan_v: f32,
     pub img_w: f32,
     pub img_h: f32,
-    /// Reveal progress (shared with the bottom panel).
-    pub slide: f32,
 }
 
 /// Transient UI state that persists across frames.
@@ -134,6 +135,8 @@ pub struct UiState {
     pub pointer_over_panel: bool,
     /// Updated after each egui pass: is the pointer over the metadata box?
     pub pointer_over_metadata: bool,
+    /// Updated after each egui pass: is the pointer over the left ruler?
+    pub pointer_over_left_ruler: bool,
     /// Whether the H help dialog is open.
     pub show_help: bool,
     /// Whether the settings dialog is open.

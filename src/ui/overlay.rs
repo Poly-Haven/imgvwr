@@ -3,7 +3,7 @@
 //! §12.6).
 
 use super::colors::{panel_bg, panel_bg_alpha, ACCENT, PANEL_ALPHA};
-use super::{clickable, UiAction, UiInputs, UiState};
+use super::{clickable, RulerInfo, UiAction, UiInputs, UiState};
 
 /// Height of the borderless custom titlebar; the top strip is reserved for it so
 /// the slot flags / metadata box never sit under the window controls.
@@ -51,114 +51,77 @@ pub fn build_overlays(
 
     settings_dialog(ctx, inputs, state, actions);
 
-    // Pixel rulers along the left/bottom edges (drag from them to add a guide).
-    rulers(ctx, inputs, actions);
+    // The left pixel ruler (drawn before the bottom panel so the panel covers the
+    // overlapping bottom-left corner). The bottom ruler lives inside the panel.
+    left_ruler(ctx, inputs, state, actions);
 
-    // Auto-hiding bottom panel with the tone (and, later, more) sliders.
+    // Auto-hiding bottom panel (tone sliders + the merged bottom ruler).
     bottom_panel(ctx, inputs, state, actions);
 
     // Auto-hiding borderless titlebar, drawn last so its controls sit on top.
     titlebar(ctx, inputs, actions);
 }
 
-/// Pixel rulers on the left and bottom edges (2D only). Ticks land on real image
-/// pixels: 20px @100, 12px @50, 7px @10, 4px @5 (a level is skipped once its ticks
-/// would be closer than ~3px on screen). Dragging from a ruler into the image adds
-/// a guide. Reveals/slides with the bottom panel.
-fn rulers(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
+/// Ruler strip thickness (px). 3px shorter than the original 24 (see ticks).
+const RULER_W: f32 = 21.0;
+/// Tick `(image-pixel interval, on-screen length, coarser interval to skip)`. A
+/// level is skipped once its ticks would be closer than ~3px on screen.
+const RULER_LEVELS: [(f32, f32, f32); 4] = [
+    (100.0, 17.0, 0.0),
+    (50.0, 10.0, 100.0),
+    (10.0, 6.0, 50.0),
+    (5.0, 3.0, 10.0),
+];
+
+/// Tick colour: the old gray-210 darkened by 30%.
+fn ruler_tick_stroke() -> egui::Stroke {
+    egui::Stroke::new(1.0, egui::Color32::from_gray(147))
+}
+
+/// The left pixel ruler (2D only). Reveals on its own slide — near the left edge,
+/// or while the bottom panel is up — and stays while hovered so a guide can be
+/// dragged (or clicked) off it. Spans from just below the titlebar (when it's
+/// showing) to the bottom edge; the bottom panel, drawn afterwards, covers the
+/// overlapping bottom-left corner so there's no fixed panel-height assumption.
+fn left_ruler(
+    ctx: &egui::Context,
+    inputs: &UiInputs,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+) {
     let Some(r) = inputs.ruler else {
+        state.pointer_over_left_ruler = false;
         return;
     };
-    let slide = r.slide.clamp(0.0, 1.0);
+    let slide = inputs.left_ruler_slide.clamp(0.0, 1.0);
     if slide <= 0.001 {
+        state.pointer_over_left_ruler = false;
         return;
     }
     let screen = ctx.screen_rect();
-    let (vw, vh) = (screen.width(), screen.height());
-    // image pixel -> screen position (egui points), mirroring the 2D shader.
-    let ex = |px: f32| screen.left() + vw * (0.5 + (px / r.img_w - 0.5 - r.pan_u) / r.sx);
+    let vh = screen.height();
     let ey = |py: f32| screen.top() + vh * (0.5 - (0.5 + r.pan_v - py / r.img_h) / r.sy);
-    // screen position -> image uv (0..1).
-    let uv_x = |sx: f32| 0.5 + r.pan_u + ((sx - screen.left()) / vw - 0.5) * r.sx;
     let uv_y = |sy: f32| 0.5 + r.pan_v - ((1.0 - (sy - screen.top()) / vh) - 0.5) * r.sy;
-
-    let ppx_x = (vw / (r.img_w * r.sx)).abs();
     let ppx_y = (vh / (r.img_h * r.sy)).abs();
-    const LEVELS: [(f32, f32, f32); 4] = [
-        (100.0, 20.0, 0.0),
-        (50.0, 12.0, 100.0),
-        (10.0, 7.0, 50.0),
-        (5.0, 4.0, 10.0),
-    ];
-    const RW: f32 = 24.0; // ruler strip thickness
-    const PANEL_H: f32 = 52.0; // keep the bottom ruler above the slider panel
-    let tick_col = egui::Color32::from_gray(210);
-    let stroke = egui::Stroke::new(1.0, tick_col);
 
-    // --- Bottom ruler (x-axis): a strip above the panel, ticks pointing up. ---
-    let base_y = screen.bottom() - PANEL_H + (1.0 - slide) * (PANEL_H + RW + 12.0);
-    let bottom_rect = egui::Rect::from_min_max(
-        egui::pos2(screen.left(), base_y - RW),
-        egui::pos2(screen.right(), base_y),
+    // Below the titlebar only while it's actually revealed (follows its slide).
+    let top = screen.top() + TITLEBAR_H * inputs.titlebar_slide.clamp(0.0, 1.0);
+    let base_x = screen.left() - (1.0 - slide) * (RULER_W + 12.0);
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(base_x, top),
+        egui::pos2(base_x + RULER_W, screen.bottom()),
     );
-    let bottom = egui::Area::new(egui::Id::new("imgvwr_ruler_bottom"))
-        .fixed_pos(bottom_rect.min)
+    let resp = egui::Area::new(egui::Id::new("imgvwr_ruler_left"))
+        .fixed_pos(rect.min)
         .order(egui::Order::Middle)
         .constrain(false)
         .show(ctx, |ui| {
-            let (_, resp) = ui.allocate_exact_size(bottom_rect.size(), egui::Sense::drag());
+            let (_, resp) = ui.allocate_exact_size(rect.size(), egui::Sense::click_and_drag());
             let p = ui.painter();
-            p.rect_filled(bottom_rect, 0.0, panel_bg());
-            let (px0, px1) = (
-                uv_x(screen.left()) * r.img_w,
-                uv_x(screen.right()) * r.img_w,
-            );
-            for (interval, len, coarser) in LEVELS {
-                if interval * ppx_x < 3.0 {
-                    continue;
-                }
-                for k in (px0.min(px1) / interval).floor() as i64
-                    ..=(px0.max(px1) / interval).ceil() as i64
-                {
-                    let pos = k as f32 * interval;
-                    if pos < 0.0 || pos > r.img_w || (coarser > 0.0 && (pos % coarser).abs() < 0.5)
-                    {
-                        continue;
-                    }
-                    let x = ex(pos);
-                    p.line_segment([egui::pos2(x, base_y), egui::pos2(x, base_y - len)], stroke);
-                }
-            }
-            resp
-        });
-    if bottom.inner.drag_stopped() {
-        if let Some(pt) = ctx.pointer_interact_pos() {
-            actions.push(UiAction::AddGuide {
-                coord: uv_x(pt.x),
-                horizontal: false,
-            });
-        }
-    }
-
-    // --- Left ruler (y-axis): a strip on the left edge, ticks pointing right. ---
-    let base_x = screen.left() - (1.0 - slide) * (RW + 12.0);
-    let left_rect = egui::Rect::from_min_max(
-        egui::pos2(base_x, screen.top() + TITLEBAR_H),
-        egui::pos2(base_x + RW, screen.bottom() - PANEL_H),
-    );
-    let left = egui::Area::new(egui::Id::new("imgvwr_ruler_left"))
-        .fixed_pos(left_rect.min)
-        .order(egui::Order::Middle)
-        .constrain(false)
-        .show(ctx, |ui| {
-            let (_, resp) = ui.allocate_exact_size(left_rect.size(), egui::Sense::drag());
-            let p = ui.painter();
-            p.rect_filled(left_rect, 0.0, panel_bg());
-            let (py0, py1) = (
-                uv_y(left_rect.top()) * r.img_h,
-                uv_y(left_rect.bottom()) * r.img_h,
-            );
-            for (interval, len, coarser) in LEVELS {
+            p.rect_filled(rect, 0.0, panel_bg());
+            let stroke = ruler_tick_stroke();
+            let (py0, py1) = (uv_y(rect.top()) * r.img_h, uv_y(rect.bottom()) * r.img_h);
+            for (interval, len, coarser) in RULER_LEVELS {
                 if interval * ppx_y < 3.0 {
                     continue;
                 }
@@ -171,16 +134,58 @@ fn rulers(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
                         continue;
                     }
                     let y = ey(pos);
+                    if y < rect.top() || y > rect.bottom() {
+                        continue;
+                    }
                     p.line_segment([egui::pos2(base_x, y), egui::pos2(base_x + len, y)], stroke);
                 }
             }
             resp
         });
-    if left.inner.drag_stopped() {
+    state.pointer_over_left_ruler = resp.response.contains_pointer();
+    if resp.inner.drag_stopped() || resp.inner.clicked() {
         if let Some(pt) = ctx.pointer_interact_pos() {
             actions.push(UiAction::AddGuide {
                 coord: uv_y(pt.y),
                 horizontal: true,
+            });
+        }
+    }
+}
+
+/// The bottom pixel ruler, drawn as the top strip of the bottom panel (so they
+/// share one background rect — no gap). Ticks point up toward the image; dragging
+/// or clicking it adds a vertical guide.
+fn bottom_ruler_strip(ui: &mut egui::Ui, r: &RulerInfo, screen: egui::Rect, actions: &mut Vec<UiAction>) {
+    let vw = screen.width();
+    let ex = |px: f32| screen.left() + vw * (0.5 + (px / r.img_w - 0.5 - r.pan_u) / r.sx);
+    let uv_x = |sx: f32| 0.5 + r.pan_u + ((sx - screen.left()) / vw - 0.5) * r.sx;
+    let ppx_x = (vw / (r.img_w * r.sx)).abs();
+
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(vw, RULER_W), egui::Sense::click_and_drag());
+    let base_y = rect.bottom();
+    let p = ui.painter();
+    let stroke = ruler_tick_stroke();
+    let (px0, px1) = (uv_x(screen.left()) * r.img_w, uv_x(screen.right()) * r.img_w);
+    for (interval, len, coarser) in RULER_LEVELS {
+        if interval * ppx_x < 3.0 {
+            continue;
+        }
+        for k in (px0.min(px1) / interval).floor() as i64..=(px0.max(px1) / interval).ceil() as i64 {
+            let pos = k as f32 * interval;
+            if pos < 0.0 || pos > r.img_w || (coarser > 0.0 && (pos % coarser).abs() < 0.5) {
+                continue;
+            }
+            let x = ex(pos);
+            p.line_segment([egui::pos2(x, base_y), egui::pos2(x, base_y - len)], stroke);
+        }
+    }
+    if resp.drag_stopped() || resp.clicked() {
+        if let Some(pt) = ui.ctx().pointer_interact_pos() {
+            actions.push(UiAction::AddGuide {
+                coord: uv_x(pt.x),
+                horizontal: false,
             });
         }
     }
@@ -200,76 +205,90 @@ fn bottom_panel(
         return;
     }
     // A full-width bar anchored to the bottom edge, slid down off-screen at
-    // slide 0 (constrain(false) lets it leave the viewport while animating).
+    // slide 0 (constrain(false) lets it leave the viewport while animating). The
+    // bottom ruler and the sliders are drawn into ONE area over a single shared
+    // background rect, so there's never a gap between them — nor a wrong-sized one
+    // after the sliders wrap and the window grows back.
     let slide = inputs.bottom_slide.clamp(0.0, 1.0);
     let screen = ctx.screen_rect();
-    let frame = egui::Frame {
-        fill: panel_bg(),
-        inner_margin: egui::Margin::symmetric(12, 7),
-        ..Default::default()
-    };
     let resp = egui::Area::new(egui::Id::new("imgvwr_bottom"))
-        .anchor(
-            egui::Align2::LEFT_BOTTOM,
-            egui::vec2(0.0, (1.0 - slide) * 64.0),
-        )
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(0.0, (1.0 - slide) * 96.0))
         .constrain(false)
         .show(ctx, |ui| {
             ui.set_width(screen.width());
-            frame.show(ui, |ui| {
-                ui.set_min_width(screen.width() - 24.0);
-                // Wrap onto multiple rows when the window is too narrow to fit
-                // all the sliders in one line.
-                ui.horizontal_wrapped(|ui| {
-                    // Tone group.
-                    adj_slider(
-                        ui,
-                        "Exposure",
-                        inputs.exposure,
-                        -16.0..=16.0,
-                        0.5,
-                        2,
-                        UiAction::SetExposure,
-                        actions,
-                    );
-                    ui.add_space(12.0);
-                    adj_slider(
-                        ui,
-                        "Gamma",
-                        inputs.gamma,
-                        0.1..=4.0,
-                        0.1,
-                        2,
-                        UiAction::SetGamma,
-                        actions,
-                    );
-                    ui.add_space(12.0);
-                    ui.separator();
-                    ui.add_space(12.0);
-                    // Clarity group (local contrast).
-                    ui.label(egui::RichText::new("Clarity").color(egui::Color32::from_gray(190)));
-                    adj_slider(
-                        ui,
-                        "",
-                        inputs.clarity_amount,
-                        0.0..=10.0,
-                        0.5,
-                        2,
-                        UiAction::SetClarity,
-                        actions,
-                    );
-                    adj_slider(
-                        ui,
-                        "Radius",
-                        inputs.clarity_radius,
-                        8.0..=256.0,
-                        16.0,
-                        0,
-                        UiAction::SetClarityRadius,
-                        actions,
-                    );
-                });
+            // Background filled in once the content rect is known, so the ruler
+            // strip and the sliders sit on exactly one rect.
+            let bg = ui.painter().add(egui::Shape::Noop);
+            let content = ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                // Bottom ruler (2D only) flush at the top of the panel.
+                if let Some(r) = &inputs.ruler {
+                    bottom_ruler_strip(ui, r, screen, actions);
+                }
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(12, 7))
+                    .show(ui, |ui| {
+                        ui.set_min_width(screen.width() - 24.0);
+                        // Wrap onto multiple rows when the window is too narrow to
+                        // fit all the sliders in one line.
+                        ui.horizontal_wrapped(|ui| {
+                            // Tone group.
+                            adj_slider(
+                                ui,
+                                "Exposure",
+                                inputs.exposure,
+                                -16.0..=16.0,
+                                0.5,
+                                2,
+                                UiAction::SetExposure,
+                                actions,
+                            );
+                            ui.add_space(12.0);
+                            adj_slider(
+                                ui,
+                                "Gamma",
+                                inputs.gamma,
+                                0.1..=4.0,
+                                0.1,
+                                2,
+                                UiAction::SetGamma,
+                                actions,
+                            );
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+                            // Clarity group (local contrast).
+                            ui.label(
+                                egui::RichText::new("Clarity")
+                                    .color(egui::Color32::from_gray(190)),
+                            );
+                            adj_slider(
+                                ui,
+                                "",
+                                inputs.clarity_amount,
+                                0.0..=10.0,
+                                0.5,
+                                2,
+                                UiAction::SetClarity,
+                                actions,
+                            );
+                            adj_slider(
+                                ui,
+                                "Radius",
+                                inputs.clarity_radius,
+                                8.0..=256.0,
+                                16.0,
+                                0,
+                                UiAction::SetClarityRadius,
+                                actions,
+                            );
+                        });
+                    });
             });
+            ui.painter().set(
+                bg,
+                egui::Shape::rect_filled(content.response.rect, 0.0, panel_bg()),
+            );
         });
     state.pointer_over_panel = resp.response.contains_pointer();
 }

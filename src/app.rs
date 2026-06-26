@@ -738,6 +738,10 @@ impl App {
         // Stop DWM drawing the legacy non-client frame (it flashes the old-style
         // caption/border on focus change for an undecorated window).
         disable_dwm_decorations(&window);
+        // Suppress the classic GDI non-client frame paint on focus change /
+        // restore (winit keeps WS_CAPTION for Aero-snap and repaints it via
+        // DefWindowProc on WM_NCACTIVATE — the old-style titlebar flash).
+        suppress_nonclient_frame(&window);
 
         Ok(Gfx {
             gl,
@@ -3577,6 +3581,75 @@ fn disable_dwm_decorations(window: &Window) {
 
 #[cfg(not(windows))]
 fn disable_dwm_decorations(_window: &Window) {}
+
+/// Subclass the window proc to stop the classic GDI non-client frame from being
+/// painted on focus change and restore-from-minimize.
+///
+/// winit deliberately keeps `WS_CAPTION | WS_SIZEBOX` even for `with_decorations
+/// (false)` windows (it needs them for Aero snap) and implements "borderless"
+/// only by overriding `WM_NCCALCSIZE` to expand the client area over the whole
+/// window. The frame is therefore invisible *except* when `DefWindowProc`
+/// repaints it directly: on `WM_NCACTIVATE` (to show the active/inactive caption)
+/// and `WM_NCPAINT`. Those paints flash the old-style titlebar before our GL
+/// content redraws over it. winit's own `WM_NCACTIVATE` handler forwards to
+/// `DefWindowProc` with the real `lParam`, so it can't be fixed from the winit
+/// side — we wrap winit's proc and:
+///   * `WM_NCACTIVATE`: forward to winit with `lParam = -1`. winit still updates
+///     its active-focus state from `wParam`, but the `-1` tells the inner
+///     `DefWindowProc` not to repaint the non-client area (the Chromium trick).
+///   * `WM_NCPAINT`: swallow (return 0) — the client covers the whole window, so
+///     there is never anything legitimate to paint in the non-client area.
+///
+/// Everything else chains unchanged to winit's proc.
+#[cfg(windows)]
+fn suppress_nonclient_frame(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, SetWindowLongPtrW, GWLP_WNDPROC, WM_NCACTIVATE, WM_NCPAINT,
+    };
+
+    type WndProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
+    // The original winit window proc, saved so our wrapper can chain to it. The
+    // app owns exactly one window for its lifetime, so a single static suffices.
+    static WINIT_PROC: AtomicIsize = AtomicIsize::new(0);
+
+    unsafe extern "system" fn wrapper(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        let winit_proc: WndProc =
+            unsafe { std::mem::transmute(WINIT_PROC.load(Ordering::Relaxed)) };
+        match msg {
+            // Suppress the active/inactive caption repaint but let winit keep
+            // tracking focus (it reads wParam, not lParam).
+            WM_NCACTIVATE => unsafe { CallWindowProcW(Some(winit_proc), hwnd, msg, wp, -1) },
+            // Nothing legitimate lives in the non-client area; never paint it.
+            WM_NCPAINT => 0,
+            _ => unsafe { CallWindowProcW(Some(winit_proc), hwnd, msg, wp, lp) },
+        }
+    }
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = win32.hwnd.get() as HWND;
+    // Install once: swap in our wrapper and remember winit's proc. Guard against
+    // a double-install (which would chain the wrapper to itself → recursion).
+    if WINIT_PROC.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    // SAFETY: `hwnd` is a live top-level window owned by `window`; `wrapper` has
+    // the correct WNDPROC ABI and chains to the proc we displace.
+    unsafe {
+        let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, wrapper as *const () as isize);
+        WINIT_PROC.store(prev, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(windows))]
+fn suppress_nonclient_frame(_window: &Window) {}
 
 /// Set the window's title-bar (small) and taskbar (big) icons from the bundled
 /// multi-resolution `app_icon.ico`, picking the exact native pixel sizes so they

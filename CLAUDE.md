@@ -36,6 +36,15 @@ cargo build --release
   renders into an offscreen RGBA16F target and effects run as fullscreen passes composited to the
   default framebuffer. Clarity lives there; focus peaking / false-colour / slot-diff should reuse
   it. When the effect is off, `Renderer::render` bypasses the whole chain (zero overhead).
+- **Any GL pass drawn after the scene but before `egui.paint` must set its own `blend_func`.**
+  egui_glow sets a *premultiplied* func (`ONE, ONE_MINUS_SRC_ALPHA`) every paint and never restores
+  it, so the next frame the default-framebuffer blend func is egui's, not the renderer's init-time
+  `SRC_ALPHA, ONE_MINUS_SRC_ALPHA`. The opaque main scene survives this by luck (over a cleared
+  opaque bg, opaque src → identical result); a *translucent* pass (the minimap fade is the first)
+  composites additively/blown-out unless it sets `blend_func` itself. See `render_minimap`.
+- The navigation minimap (`M`) reuses the scene shader via a scissored second `draw_quad` into the
+  bottom-right corner (`Renderer::render_minimap`) — so the thumbnail is tone-mapped and tiled like
+  the main view; egui only strokes the border + view box on top. Its fade rides `u_global_alpha`.
 - The camera is an enum (`Pano` | `Flat`) — keep the two states distinct; convert through
   `center_uv` on the P-toggle rather than reusing fields.
 - **Window-follow zoom ease (`ease_window`) must be advanced from `about_to_wait`, never from

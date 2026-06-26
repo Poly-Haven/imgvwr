@@ -943,10 +943,11 @@ fn loading(ctx: &egui::Context, inputs: &UiInputs) {
     // Keep the bar animating (the barber-pole scrolls every frame).
     ctx.request_repaint();
     let name = inputs.loading_name.as_deref().unwrap_or("Loading");
-    let label = match inputs.progress {
-        Some(p) => format!("{name}  {}%", (p * 100.0).round() as i32),
-        None => format!("{name}…"),
+    let right = match inputs.progress {
+        Some(p) => format!("{}%", (p * 100.0).round() as i32),
+        None => "…".to_string(),
     };
+    let text = |s: String| egui::RichText::new(s).color(egui::Color32::WHITE).size(13.0);
     egui::Area::new(egui::Id::new("imgvwr_loading"))
         // Centred along the bottom edge.
         .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -12.0))
@@ -960,20 +961,33 @@ fn loading(ctx: &egui::Context, inputs: &UiInputs) {
             }
             .show(ui, |ui| {
                 ui.set_width(LOADING_W);
-                ui.label(
-                    egui::RichText::new(label)
-                        .color(egui::Color32::WHITE)
-                        .size(13.0),
-                );
+                // Filename on the left, percentage flush to the right edge (the
+                // percentage is reserved first so a long name can't push it off).
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(text(right));
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(egui::Label::new(text(name.to_string())).truncate());
+                        });
+                    });
+                });
                 ui.add_space(4.0);
                 progress_bar(ui, inputs.progress);
             });
         });
 }
 
-/// A progress bar in the accent colour. `Some(p)` fills `p` of the width; `None`
-/// fills the whole bar to signal indeterminate work. Animated diagonal
-/// "barber-pole" stripes scroll across the filled portion in either case.
+/// Colours cycled by the progress bar's diagonal "barber-pole" bands.
+const BARBER_COLORS: [egui::Color32; 4] = [
+    egui::Color32::from_rgb(190, 111, 255),
+    egui::Color32::from_rgb(243, 130, 55),
+    egui::Color32::from_rgb(65, 187, 217),
+    egui::Color32::from_rgb(161, 208, 77),
+];
+
+/// A progress bar filled with scrolling diagonal "barber-pole" bands cycling
+/// [`BARBER_COLORS`]. `Some(p)` fills `p` of the width; `None` fills the whole bar
+/// to signal indeterminate work.
 fn progress_bar(ui: &mut egui::Ui, value: Option<f32>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(LOADING_W, 12.0), egui::Sense::hover());
     let painter = ui.painter().with_clip_rect(rect);
@@ -985,30 +999,35 @@ fn progress_bar(ui: &mut egui::Ui, value: Option<f32>) {
         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 28),
     );
     // Filled portion: the whole bar when indeterminate, else the value fraction.
+    // The accent base under the bands keeps the rounded corners reading cleanly.
     let mut fill = rect;
     if let Some(p) = value {
         fill.set_width(rect.width() * p.clamp(0.0, 1.0));
     }
     painter.rect_filled(fill, radius, ACCENT);
-    // Scrolling diagonal stripes (a translucent lighter overlay) over the filled
-    // portion only — clipped to the fill so they don't bleed onto the track.
+    // Abutting diagonal colour bands tiling the filled portion, scrolling with
+    // time so the colours travel along the bar. Clipped to the fill.
     if fill.width() > 0.5 {
         let sp = painter.with_clip_rect(fill);
         let h = rect.height();
-        let stripe = 9.0;
-        let period = stripe * 2.0;
-        let phase = (ui.input(|i| i.time) as f32 * 36.0) % period;
-        let mut x = fill.left() - h - period + phase;
-        let light = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 55);
-        while x < fill.right() + period {
+        const BAND: f32 = 13.0;
+        const SPEED: f32 = 32.0;
+        let t = ui.input(|i| i.time) as f32 * SPEED;
+        let scroll = (t / BAND).floor() as i64;
+        let phase = t.rem_euclid(BAND);
+        let mut x = fill.left() - h - BAND + phase;
+        let mut k = 0i64;
+        while x < fill.right() + BAND {
+            let c = BARBER_COLORS[((k - scroll).rem_euclid(4)) as usize];
             let pts = vec![
                 egui::pos2(x, fill.bottom()),
                 egui::pos2(x + h, fill.top()),
-                egui::pos2(x + h + stripe, fill.top()),
-                egui::pos2(x + stripe, fill.bottom()),
+                egui::pos2(x + h + BAND, fill.top()),
+                egui::pos2(x + BAND, fill.bottom()),
             ];
-            sp.add(egui::Shape::convex_polygon(pts, light, egui::Stroke::NONE));
-            x += period;
+            sp.add(egui::Shape::convex_polygon(pts, c, egui::Stroke::NONE));
+            x += BAND;
+            k += 1;
         }
     }
 }

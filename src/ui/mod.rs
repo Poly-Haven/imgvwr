@@ -62,6 +62,9 @@ pub struct UiInputs {
     pub channel_count: u8,
     /// Currently isolated channel (0=R 1=G 2=B 3=A), `None` = all.
     pub isolate_channel: Option<u8>,
+    /// Active guides as `[coord (0..1), orientation]` (orientation ≥ 0.5 =
+    /// horizontal). Listed in the metadata box with a remove button each.
+    pub guides: Vec<[f32; 2]>,
     pub show_help: bool,
     /// Transient bottom-right toast: `(text, alpha)`, drawn while alpha > 0.
     pub toast: Option<(String, f32)>,
@@ -182,6 +185,8 @@ pub enum UiAction {
         coord: f32,
         horizontal: bool,
     },
+    /// Remove the guide at this index (from the metadata box's guide list).
+    RemoveGuide(usize),
     /// Open the settings dialog (titlebar gear button).
     OpenSettings,
     // Borderless titlebar controls.

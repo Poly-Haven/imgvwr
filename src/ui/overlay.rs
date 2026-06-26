@@ -852,6 +852,38 @@ fn metadata_hud(
                             });
                             ui.end_row();
                         }
+                        // Guides: list each active guide with a remove button.
+                        if !inputs.guides.is_empty() {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("Guides")
+                                        .color(egui::Color32::from_gray(150)),
+                                )
+                                .selectable(false),
+                            );
+                            ui.vertical(|ui| {
+                                for (i, g) in inputs.guides.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        if clickable(ui.small_button("×")).clicked() {
+                                            actions.push(UiAction::RemoveGuide(i));
+                                        }
+                                        let horizontal = g[1] >= 0.5;
+                                        let pct = g[0] * 100.0;
+                                        let text = format!(
+                                            "{} {:.1}%",
+                                            if horizontal { "Horizontal" } else { "Vertical" },
+                                            pct
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(text)
+                                                .color(egui::Color32::WHITE)
+                                                .size(12.0),
+                                        );
+                                    });
+                                }
+                            });
+                            ui.end_row();
+                        }
                     });
             });
         });

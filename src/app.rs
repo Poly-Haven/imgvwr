@@ -2511,6 +2511,7 @@ impl App {
             clarity_radius: self.clarity_radius,
             ruler: self.ruler_info(),
             left_ruler_slide: self.left_ruler_slide,
+            guides: self.guides.clone(),
             loading,
             progress,
             loading_name: self.pending_name.clone(),
@@ -2808,6 +2809,12 @@ impl App {
                 self.request_redraw();
             }
             UiAction::AddGuide { coord, horizontal } => self.add_guide(coord, horizontal),
+            UiAction::RemoveGuide(i) => {
+                if i < self.guides.len() {
+                    self.guides.remove(i);
+                    self.request_redraw();
+                }
+            }
             UiAction::OpenSettings => {
                 self.ui_state.show_settings = true;
                 self.ui_state.confirm_default = false;

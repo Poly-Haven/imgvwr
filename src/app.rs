@@ -1502,6 +1502,23 @@ impl App {
         self.request_redraw();
     }
 
+    /// Backspace: centre the image and fit the window to it at the CURRENT zoom
+    /// (unlike Home, which also resets the zoom). The on-screen pixel scale is
+    /// preserved — only the pan recentres and the window resizes to hug the image.
+    fn center_and_fit_window(&mut self) {
+        if self.camera.is_panorama() {
+            // No 2D zoom to preserve; re-frame the window to the 2:1 image.
+            self.resize_window_to_image(self.file_info.width, self.file_info.height);
+        } else {
+            // Centre, then frame the window to the image at the current scale.
+            // follow_zoom_with_window keeps the on-screen scale (re-deriving the
+            // zoom value for the resized window) rather than changing zoom.
+            self.camera.set_pan_target(Vec2::ZERO);
+            self.follow_zoom_with_window();
+        }
+        self.request_redraw();
+    }
+
     // ---- toast HUD -------------------------------------------------------
 
     fn show_toast(&mut self, text: String) {
@@ -1586,36 +1603,60 @@ impl App {
             .any(|g| (g[0] - pos).abs() < 1e-3 && (g[1] - orient).abs() < 0.5)
     }
 
-    /// The G key adds the next whole subdivision *level* of guides, so the grid
-    /// density doubles with each press rather than creeping one line at a time:
-    /// first ½ (H+V), then the quarters (¼, ¾ H+V), then the eighths, … up to
-    /// 1/32 on each axis (62 lines total). Adds every odd-numerator position at
-    /// the coarsest not-yet-complete level (even numerators belong to a coarser
-    /// level already covered), capped at [`crate::renderer::MAX_GUIDES`].
+    /// The G key subdivides ONE axis per press, alternating between the two, so
+    /// the density doubles on whichever axis is behind: ½ horizontal, then ½
+    /// vertical, then the quarters horizontal, then vertical, … up to 1/32 on each
+    /// axis. Each press adds every odd-numerator position at that axis's coarsest
+    /// not-yet-complete level, capped at [`crate::renderer::MAX_GUIDES`].
     fn add_next_guide(&mut self) {
-        let mut denom = 2u32;
-        while denom <= 32 {
-            let mut added = 0;
-            for horizontal in [true, false] {
-                for n in (1..denom).step_by(2) {
-                    let pos = n as f32 / denom as f32;
-                    if !self.has_guide(pos, horizontal)
-                        && self.guides.len() < crate::renderer::MAX_GUIDES
-                    {
-                        self.guides.push([pos, if horizontal { 1.0 } else { 0.0 }]);
-                        added += 1;
-                    }
+        // Completed subdivision levels (denoms 2,4,8,16,32 → max 5) for one axis.
+        let completed = |this: &Self, horizontal: bool| -> u32 {
+            let mut levels = 0u32;
+            let mut denom = 2u32;
+            while denom <= 32 {
+                let full = (1..denom)
+                    .step_by(2)
+                    .all(|n| this.has_guide(n as f32 / denom as f32, horizontal));
+                if full {
+                    levels += 1;
+                    denom *= 2;
+                } else {
+                    break;
                 }
             }
-            if added > 0 {
-                self.show_toast(format!(
-                    "Added {added} guide{}",
-                    if added == 1 { "" } else { "s" }
-                ));
-                self.request_redraw();
-                return;
+            levels
+        };
+        let (h, v) = (completed(self, true), completed(self, false));
+        // Advance the axis with fewer completed levels (alternating); ties go to
+        // horizontal. Skip an axis already complete to 1/32.
+        let horizontal = if h >= 5 {
+            false
+        } else if v >= 5 {
+            true
+        } else {
+            h <= v
+        };
+        let levels = if horizontal { h } else { v };
+        if levels >= 5 {
+            return; // both axes full
+        }
+        let denom = 2u32 << levels; // 2, 4, 8, 16, 32
+        let mut added = 0;
+        for n in (1..denom).step_by(2) {
+            if self.guides.len() >= crate::renderer::MAX_GUIDES {
+                break;
             }
-            denom *= 2;
+            let pos = n as f32 / denom as f32;
+            if !self.has_guide(pos, horizontal) {
+                self.guides.push([pos, if horizontal { 1.0 } else { 0.0 }]);
+                added += 1;
+            }
+        }
+        if added > 0 {
+            let axis = if horizontal { "horizontal" } else { "vertical" };
+            let s = if added == 1 { "" } else { "s" };
+            self.show_toast(format!("Added {added} {axis} guide{s}"));
+            self.request_redraw();
         }
     }
 
@@ -1970,7 +2011,7 @@ impl App {
             (_, Some("'")) => self.adjust_clarity(0.5),
             // Ctrl+R: reset all image-processing adjustments.
             (_, Some("r")) | (_, Some("R")) if ctrl => self.reset_image_processing(),
-            // R (no Ctrl): reset the view, same as Home / Backspace.
+            // R (no Ctrl): reset the view + window, same as Home.
             (_, Some("r")) | (_, Some("R")) => self.reset_view_full(),
             (_, Some("a")) | (_, Some("A")) => {
                 self.always_on_top = !self.always_on_top;
@@ -2062,9 +2103,9 @@ impl App {
                 self.show_metadata = !self.show_metadata;
                 log::info!("metadata overlay -> {}", self.show_metadata);
             }
-            (Key::Named(NamedKey::Home), _) | (Key::Named(NamedKey::Backspace), _) => {
-                self.reset_view_full()
-            }
+            (Key::Named(NamedKey::Home), _) => self.reset_view_full(),
+            // Backspace: centre + fit the window at the current zoom (keeps scale).
+            (Key::Named(NamedKey::Backspace), _) => self.center_and_fit_window(),
             (Key::Named(NamedKey::F11), _) => self.toggle_fullscreen(),
             (Key::Named(NamedKey::ArrowRight), _) => self.navigate(1),
             (Key::Named(NamedKey::ArrowLeft), _) => self.navigate(-1),
@@ -3471,6 +3512,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         self.prefs.save();
+        // Release egui's GL resources (textures/buffers) before the painter is
+        // dropped, else it warns "You forgot to call destroy() on the egui glow
+        // painter" — e.g. when quitting while an image is still loading. The GL
+        // context is still current from the last render.
+        if let Some(gfx) = &mut self.gfx {
+            gfx.egui.destroy();
+        }
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {

@@ -1015,7 +1015,10 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction
         .anchor(egui::Align2::RIGHT_CENTER, egui::Vec2::ZERO)
         .constrain(false)
         .show(ctx, |ui| {
-            ui.vertical(|ui| {
+            // Right-align the column (Align::Max): the "1" glyph is narrower than
+            // other digits, so a left-aligned stack left its flag short of the
+            // edge. Right-aligning pins every flag flush to the window edge.
+            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
                 for (i, label) in inputs.slot_labels.iter().enumerate() {
                     let Some(label) = label else {
@@ -1295,15 +1298,23 @@ fn metadata_hud(
                             );
                             ui.vertical(|ui| {
                                 let (iw, ih) = inputs.image_size;
-                                for (i, g) in inputs.guides.iter().enumerate() {
-                                    ui.horizontal(|ui| {
-                                        // `V 425px` (vertical → x pixel) / `H 312px`
-                                        // (horizontal → y pixel), remove button at
-                                        // the right.
-                                        let horizontal = g[1] >= 0.5;
+                                // `V 425px` (vertical → x pixel) / `H 312px`
+                                // (horizontal → y pixel), remove button on the right.
+                                // Sorted alphabetically (H before V, then by pixel),
+                                // keeping each row's original guide index for removal.
+                                let mut rows: Vec<(usize, &str, i64)> = inputs
+                                    .guides
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, g)| {
                                         let (axis, dim) =
-                                            if horizontal { ("H", ih) } else { ("V", iw) };
-                                        let px = (g[0] * dim as f32).round() as i64;
+                                            if g[1] >= 0.5 { ("H", ih) } else { ("V", iw) };
+                                        (i, axis, (g[0] * dim as f32).round() as i64)
+                                    })
+                                    .collect();
+                                rows.sort_by(|a, b| a.1.cmp(b.1).then(a.2.cmp(&b.2)));
+                                for (i, axis, px) in rows {
+                                    ui.horizontal(|ui| {
                                         ui.label(
                                             egui::RichText::new(format!("{axis} {px}px"))
                                                 .color(egui::Color32::WHITE)
@@ -1504,7 +1515,8 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
                 ("Wheel", "Zoom (2D) / FOV (pano)"),
                 ("Shift / Ctrl + wheel", "Pan horizontally / vertically"),
                 ("Numpad 1–9", "Zoom 2^(N-1)× (Ctrl = out)"),
-                ("Home / Backspace / R", "Reset view & window"),
+                ("Home / R", "Reset view & window"),
+                ("Backspace", "Centre + fit window (keep zoom)"),
                 ("P", "Toggle 2D / panorama"),
                 ("W", "Toggle 2D tiled wrap"),
                 ("I", "Nearest / bilinear filtering"),

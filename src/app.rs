@@ -3272,7 +3272,16 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             _ => false,
                         };
-                    if !resized && !egui_consumed {
+                    // Presses only start a gesture when egui didn't take them (and
+                    // it isn't a border resize). RELEASES are always processed, so
+                    // an app-started pan/stretch is always ended even if the
+                    // pointer happened to end over a guide strip (which egui would
+                    // consume) — otherwise `dragging` stuck on and panning broke.
+                    let process = match state {
+                        ElementState::Released => true,
+                        ElementState::Pressed => !resized && !egui_consumed,
+                    };
+                    if process {
                         self.on_mouse_button(state, button);
                     }
                 }

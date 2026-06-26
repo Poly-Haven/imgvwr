@@ -336,7 +336,7 @@ fn guides_layer(
         return;
     }
     let screen = ctx.screen_rect();
-    const HALF: f32 = 4.0; // hit half-thickness around the line (px)
+    const HALF: f32 = 7.0; // hit half-thickness around the line (px), generous to grab
     egui::Area::new(egui::Id::new("imgvwr_guides"))
         .order(egui::Order::Background)
         .fixed_pos(screen.min)

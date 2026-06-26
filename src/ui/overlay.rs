@@ -1173,7 +1173,7 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
                 ("Alt + drag · titlebar", "Move window"),
                 ("Window edges", "Drag to resize"),
                 ("Alt + right-drag", "Resize (by third)"),
-                ("Alt + scroll (pano)", "Grow / shrink window"),
+                ("Alt + scroll", "Grow / shrink window"),
                 ("A", "Always on top"),
                 ("F / F11 / dbl-click", "Toggle fullscreen"),
                 ("Esc / Q", "Exit fullscreen / quit"),
@@ -1184,7 +1184,7 @@ fn help_dialog(ctx: &egui::Context, actions: &mut Vec<UiAction>) {
             &[
                 ("S", "Sharpness (original res)"),
                 ("Alt + middle-drag", "Squash / stretch image"),
-                ("G", "Guide at the horizon"),
+                ("G", "Add guide (½, ¼, ⅛, …)"),
                 ("Drag from a ruler", "Add a guide line"),
                 ("Channel boxes (F2)", "Isolate R/G/B/A"),
             ],

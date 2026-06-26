@@ -52,11 +52,12 @@ for Windows.
 
 | Input | Action |
 |---|---|
-| `S` | Sharpness checker — high-pass of the **original** resolution |
-| `G` | Add a horizontal guide at the horizon (50% image height) |
-| Drag from a ruler | Add a guide line (rulers reveal with the bottom panel, 2D) |
-| `Alt` + middle-drag | Squash / stretch the image non-uniformly (line straightness) |
+| `S` | Sharpness checker — `\|original − blurred\|`, amplifiable by exposure |
+| `G` | Add the next guide in sequence (50%, then quarters, eighths…) |
+| Drag / click a ruler | Add a guide line (left ruler near the left edge; bottom ruler with the panel; 2D) |
+| `Alt` + middle-drag | Squash / stretch the image non-uniformly, unbounded (line straightness) |
 | Channel boxes (`F2`) | Click to isolate R / G / B / A as greyscale |
+| Guides list (`F2`) | Remove individual guides; bottom-panel **↺** or `Ctrl+R` resets all |
 
 ### Window (borderless)
 
@@ -65,7 +66,7 @@ for Windows.
 | `Alt` + drag · titlebar drag · 2D-fit body drag | Move the window |
 | Drag a window edge / corner | Resize |
 | `Alt` + right-drag | Resize; edge(s) chosen by the cursor's third of the window |
-| `Alt` + scroll (panorama) | Grow / shrink the window |
+| `Alt` + scroll | Grow / shrink the window (both modes; zooms the whole view) |
 | `A` | Toggle always-on-top |
 | `F` / `F11` / double-click | Toggle fullscreen |
 | `Escape` / `Q` | Exit fullscreen or close |

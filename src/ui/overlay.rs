@@ -36,8 +36,9 @@ pub fn build_overlays(
     slot_flags(ctx, inputs, actions);
 
     state.pointer_over_metadata = if inputs.metadata_slide > 0.001 && !inputs.metadata.is_empty() {
-        metadata_hud(ctx, inputs, actions)
+        metadata_hud(ctx, inputs, state, actions)
     } else {
+        state.view_menu_open = false;
         false
     };
 
@@ -777,7 +778,12 @@ fn hint(ctx: &egui::Context) {
 /// Draw the F2 metadata box (top-right, below the slot flags). Returns whether
 /// it should stay revealed — the pointer is over it, or its View dropdown menu is
 /// open (so navigating into the menu doesn't dismiss the box and close the menu).
-fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) -> bool {
+fn metadata_hud(
+    ctx: &egui::Context,
+    inputs: &UiInputs,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+) -> bool {
     // To the left of the right-edge slot-flag column so the two never overlap.
     // Slides in from the right edge: at slide 0 it's pushed fully off-screen.
     let slide = inputs.metadata_slide.clamp(0.0, 1.0);
@@ -849,6 +855,7 @@ fn metadata_hud(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActi
                     });
             });
         });
+    state.view_menu_open = view_menu_open;
     resp.response.contains_pointer() || view_menu_open
 }
 
@@ -922,7 +929,17 @@ fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiActio
         .map(|(d, _)| d.clone())
         .or_else(|| inputs.displays().first().cloned())
         .unwrap_or_default();
-    let resp = ui.menu_button(format!("{current}  ▾"), |ui| {
+    // The trigger uses an SVG chevron icon (not a font glyph) before the current
+    // view name. The nested "Display" sub-menus get egui's own ▸ arrow, so they
+    // carry no manual one (that produced a double arrow).
+    let chevron = egui::Image::new(egui::include_image!(
+        "../../resources/icons/ui/chevron-down.svg"
+    ))
+    .tint(egui::Color32::WHITE)
+    .fit_to_exact_size(egui::vec2(10.0, 10.0));
+    let button =
+        egui::Button::image_and_text(chevron, egui::RichText::new(current).color(egui::Color32::WHITE));
+    let resp = egui::menu::menu_custom_button(ui, button, |ui| {
         for view in inputs.views_for(&active_display) {
             let is_active = inputs
                 .active
@@ -937,9 +954,9 @@ fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiActio
             }
         }
         ui.separator();
-        ui.menu_button("Display  ›", |ui| {
+        ui.menu_button("Display", |ui| {
             for display in inputs.displays() {
-                ui.menu_button(format!("{display}  ›"), |ui| {
+                ui.menu_button(display.clone(), |ui| {
                     for view in inputs.views_for(&display) {
                         if ui.selectable_label(false, &view).clicked() {
                             actions.push(UiAction::SetView {

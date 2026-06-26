@@ -338,6 +338,10 @@ pub struct App {
     // F2 metadata box hover-reveal (near the top-right corner).
     metadata_hover: bool,
     metadata_hide_deadline: Option<Instant>,
+    /// Keeps the metadata box revealed for a grace period while/after its View
+    /// menu is open, so moving into the (popup) menu doesn't dismiss the box and
+    /// close the menu out from under the cursor.
+    metadata_menu_grace: Option<Instant>,
 
     /// In-progress adoption waiting on the incremental GPU upload.
     pending: Option<PendingAdopt>,
@@ -450,6 +454,7 @@ impl App {
             diff_slot: None,
             metadata_hover: false,
             metadata_hide_deadline: None,
+            metadata_menu_grace: None,
             pending: None,
             upload_progress: 0.0,
             last_frame: None,
@@ -2098,14 +2103,12 @@ impl App {
         })
     }
 
-    /// Whether the F2 metadata box should be revealed: toggled on (F2), the
-    /// cursor near the top-right on a large-enough window, or hovering the box.
+    /// Whether the F2 metadata box should be revealed: toggled on (F2), or the
+    /// debounced hover state (`metadata_hover`, set in `tick_metadata` from the
+    /// corner hover / pointer-over / open-menu, on a large-enough window).
     fn metadata_should_show(&self) -> bool {
         let forced = cfg!(debug_assertions) && self.force_overlay.as_deref() == Some("metadata");
-        self.show_metadata
-            || (self.metadata_hover && !self.window_is_small())
-            || self.ui_state.pointer_over_metadata
-            || forced
+        self.show_metadata || (self.metadata_hover && !self.window_is_small()) || forced
     }
 
     /// True in 2D when the whole image is visible (zoom ≤ contain-fit), so it
@@ -2685,7 +2688,7 @@ impl App {
     }
 
     /// Temporarily reveal the F2 metadata box when the cursor is near the
-    /// top-right corner (or hovering the box itself).
+    /// top-right corner (or hovering the box, or while its View menu is open).
     fn tick_metadata(&mut self) {
         let scale = self
             .gfx
@@ -2693,18 +2696,30 @@ impl App {
             .map(|g| g.window.scale_factor() as f32)
             .unwrap_or(1.0);
         let (vw, _) = self.viewport();
+        // Keep the box up for a grace period while/after the View menu is open so
+        // moving into the (popup) menu doesn't dismiss the box under the cursor.
+        if self.ui_state.view_menu_open {
+            self.metadata_menu_grace = Some(Instant::now() + Duration::from_millis(400));
+        }
+        let menu_sticky = self.ui_state.view_menu_open
+            || self
+                .metadata_menu_grace
+                .is_some_and(|t| Instant::now() < t);
         // A small top-right corner triangle (~80px legs): reveal only when the
         // cursor is inside the diagonal from (w-80, 0) to (w, 80).
         let edge = (80.0 * scale) as f64;
-        let near_corner =
-            self.cursor_in_window && (vw as f64 - self.cursor_pos.x) + self.cursor_pos.y <= edge;
-        if near_corner || self.ui_state.pointer_over_metadata {
+        let near_corner = self.cursor_in_window
+            && (vw as f64 - self.cursor_pos.x) + self.cursor_pos.y <= edge
+            && !self.window_is_small();
+        if near_corner || self.ui_state.pointer_over_metadata || menu_sticky {
             self.metadata_hover = true;
             self.metadata_hide_deadline = None;
         } else if self.metadata_hover {
+            // Debounced collapse: a generous delay so micro-movements near the
+            // reveal edge don't spam the box open/closed when the mouse is still.
             match self.metadata_hide_deadline {
                 None => {
-                    self.metadata_hide_deadline = Some(Instant::now() + Duration::from_millis(120));
+                    self.metadata_hide_deadline = Some(Instant::now() + Duration::from_millis(350));
                 }
                 Some(t) if Instant::now() >= t => {
                     self.metadata_hover = false;

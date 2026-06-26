@@ -137,6 +137,9 @@ pub struct UiState {
     pub pointer_over_metadata: bool,
     /// Updated after each egui pass: is the pointer over the left ruler?
     pub pointer_over_left_ruler: bool,
+    /// Updated after each egui pass: is the metadata box's View menu (or one of
+    /// its sub-menus) open? Keeps the box revealed while navigating the menu.
+    pub view_menu_open: bool,
     /// Whether the H help dialog is open.
     pub show_help: bool,
     /// Whether the settings dialog is open.

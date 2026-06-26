@@ -74,7 +74,8 @@ vec3 srgb_to_linear(vec3 c) {
 }
 
 void main() {
-    vec2 uv;
+    vec2 uv;       // displayed image uv (guides / bounds compare against this)
+    vec2 src_uv;   // source-texture uv to sample (uv permuted by 2D rotation)
     vec3 color;
     vec4 texel;
 
@@ -106,7 +107,8 @@ void main() {
         // space (guides / bounds compare against it); the image is sampled at the
         // rotation-permuted source coordinate.
         uv = raw_uv;
-        texel = sample_image(rotate_uv(uv, u_rotation));
+        src_uv = rotate_uv(uv, u_rotation);
+        texel = sample_image(src_uv);
     } else {
         // -- Rectilinear equirectangular projection ----------------------
         vec2 ndc = (v_uv * 2.0 - 1.0) / u_stretch;
@@ -125,6 +127,7 @@ void main() {
         if (abs(ddx.x) > 0.5) ddx.x -= sign(ddx.x);
         if (abs(ddy.x) > 0.5) ddy.x -= sign(ddy.x);
         texel = sample_image_grad(uv, ddx, ddy);
+        src_uv = uv; // no rotation in panorama
     }
 
     // Slot difference: the absolute per-pixel difference vs the comparator slot,
@@ -146,13 +149,17 @@ void main() {
             if (abs(ddxd.x) > 0.5) ddxd.x -= sign(ddxd.x);
             if (abs(ddyd.x) > 0.5) ddyd.x -= sign(ddyd.x);
         }
-        texel = vec4(textureGrad(u_diff_image, uv, ddxd, ddyd).rgb, 1.0);
+        // Sample in SOURCE space (src_uv = uv rotated) so the diff lines up with
+        // the displayed, rotated image. The 2D gradient is a pure axis swap under a
+        // 90° turn, so the displayed-space derivatives select the same mip.
+        texel = vec4(textureGrad(u_diff_image, src_uv, ddxd, ddyd).rgb, 1.0);
     }
     // Sharpness checker: |original - 2px-blurred original|, from the ORIGINAL
     // full-resolution pixels (LOD 0), not the displayed mip. Done here in source
-    // space — like the slot diff — so exposure/view below can amplify it.
+    // space — like the slot diff — so exposure/view below can amplify it (sampled
+    // at src_uv so it matches the rotated image).
     if (u_sharpness != 0) {
-        texel = vec4(sharp_diff(uv), 1.0);
+        texel = vec4(sharp_diff(src_uv), 1.0);
     }
 
     color = texel.rgb;

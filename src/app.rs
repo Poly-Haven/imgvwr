@@ -1468,10 +1468,12 @@ impl App {
         }
     }
 
-    /// `(zoom, image_height)` of the current 2D view, for native-scale matching.
+    /// `(zoom, displayed_image_height)` of the current 2D view, for native-scale
+    /// matching. Uses the rotation-aware displayed height so two comparator slots
+    /// with different rotations still match at their native pixel scale.
     fn flat_scale_ref(&self) -> Option<(f32, f32)> {
         match self.camera.camera {
-            Camera::Flat { zoom, .. } => Some((zoom, self.file_info.height.max(1) as f32)),
+            Camera::Flat { zoom, .. } => Some((zoom, self.display_dims().1.max(1) as f32)),
             Camera::Pano { .. } => None,
         }
     }
@@ -1481,7 +1483,7 @@ impl App {
     /// image is shown at its native resolution rather than scaled to match.
     fn preserve_native_scale(&mut self, old: Option<(f32, f32)>) {
         if let (Some((old_zoom, old_h)), Camera::Flat { .. }) = (old, self.camera.camera) {
-            let new_h = self.file_info.height.max(1) as f32;
+            let new_h = self.display_dims().1.max(1) as f32;
             // Instant (no easing) — a comparator A/B should snap, not animate.
             self.camera.set_zoom_now(old_zoom * new_h / old_h);
         }
@@ -1822,7 +1824,9 @@ impl App {
 
     /// Target 2D zoom as a percentage where 100% == 1 image px : 1 monitor px.
     fn flat_zoom_percent(&self) -> Option<f32> {
-        let img_h = self.file_info.height;
+        // Rotation-aware displayed height — the basis set_exact_zoom uses, so the
+        // toast reads the % the user actually dialled in.
+        let img_h = self.display_dims().1;
         if img_h == 0 {
             return None;
         }
@@ -1947,15 +1951,13 @@ impl App {
             }
             Camera::Flat { .. } => {
                 let inv_zoom = self.camera.camera.tan_half_fov();
-                let image_aspect = self
-                    .gfx
-                    .as_ref()
-                    .and_then(|g| g.renderer.image_aspect())
-                    .unwrap_or(1.0);
+                // Rotation-aware (displayed) aspect, matching the shader / viewport_uv,
+                // so a drag follows the cursor 1:1 at every rotation.
+                let image_aspect = self.display_aspect();
                 // Match the shader's screen→image scale (which divides by the
                 // squash/stretch) so the image follows the cursor 1:1 regardless
                 // of squash — otherwise a narrow squash slows panning to a crawl.
-                let sx = inv_zoom * (vw / vh) / image_aspect.max(1e-4) / self.image_stretch.x;
+                let sx = inv_zoom * (vw / vh) / image_aspect / self.image_stretch.x;
                 let sy = inv_zoom / self.image_stretch.y;
                 // Grab feel: content follows the cursor. Panning is unbounded —
                 // the image may be moved freely past the viewport edge.
@@ -2040,12 +2042,8 @@ impl App {
             return;
         }
         let (vw, vh) = self.viewport();
-        let aspect = self
-            .gfx
-            .as_ref()
-            .and_then(|g| g.renderer.image_aspect())
-            .unwrap_or(1.0)
-            .max(1e-4);
+        // Rotation-aware aspect so zoom stays pinned to the cursor at every rotation.
+        let aspect = self.display_aspect();
         // UV offset of the cursor from the view centre, per unit inverse-zoom.
         let off = Vec2::new(
             (self.cursor_pos.x as f32 - vw * 0.5) / (aspect * vh),
@@ -2069,12 +2067,8 @@ impl App {
             }
             Camera::Flat { .. } => {
                 let inv_zoom = self.camera.camera.tan_half_fov();
-                let image_aspect = self
-                    .gfx
-                    .as_ref()
-                    .and_then(|g| g.renderer.image_aspect())
-                    .unwrap_or(1.0);
-                let sx = inv_zoom * (vw / vh) / image_aspect.max(1e-4);
+                let image_aspect = self.display_aspect(); // rotation-aware
+                let sx = inv_zoom * (vw / vh) / image_aspect;
                 let sy = inv_zoom;
                 let k = 0.15 * steps;
                 // Eased (wheel) pan — eases to target, unlike a direct drag.
@@ -3325,7 +3319,9 @@ impl App {
             ruler: self.ruler_info(),
             left_ruler_slide: self.left_ruler_slide,
             guides: self.guides.clone(),
-            image_size: (self.file_info.width, self.file_info.height),
+            // Displayed (rotation-aware) dims: guides are in displayed uv, so the
+            // meta-box pixel readout (`V 425px`) reports displayed pixels.
+            image_size: self.display_dims(),
             loading,
             progress,
             loading_name: self.pending_name.clone(),

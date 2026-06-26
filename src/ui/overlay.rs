@@ -890,8 +890,10 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction
     }
     egui::Area::new(egui::Id::new("imgvwr_slots"))
         // Centred vertically on the right edge (clear of the top-right metadata
-        // box, which can then sit closer to the edge).
+        // box, which can then sit closer to the edge). constrain(false) so it sits
+        // flush against the edge rather than being nudged inward by egui.
         .anchor(egui::Align2::RIGHT_CENTER, egui::Vec2::ZERO)
+        .constrain(false)
         .show(ctx, |ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);

@@ -24,6 +24,9 @@ vec4 sample_image(vec2 uv) { return texture(u_image, uv); }
 vec4 sample_image_grad(vec2 uv, vec2 ddx, vec2 ddy) {
     return textureGrad(u_image, uv, ddx, ddy);
 }
+// Trilinear sample at an explicit LOD (the slot diff samples both images this way
+// so identical content matches exactly at every zoom).
+vec4 sample_image_lod(vec2 uv, float lod) { return textureLod(u_image, uv, lod); }
 // Original-resolution sharpness: |LOD0 - (2px-blurred LOD0)|. Returned raw so the
 // exposure / view pipeline downstream can amplify it (same idea as the slot diff).
 vec3 sharp_diff(vec2 uv) {
@@ -76,16 +79,19 @@ vec4 sample_image_grad(vec2 uv, vec2 duvdx, vec2 duvdy) {
                             (duvdy * u_tiled_image_size) / u_layer_size);
 }
 
-// LOD-0 point sample of the tiled image at UV.
-vec4 sample_tile_lod0(vec2 uv) {
+// Trilinear sample of the tiled image at an explicit LOD (slot diff matches LODs).
+vec4 sample_image_lod(vec2 uv, float lod) {
     vec2 cpx = clamp(uv * u_tiled_image_size, vec2(0.0), u_tiled_image_size - vec2(0.5));
     float fcol = clamp(floor(cpx.x / u_tile_size), 0.0, float(u_tile_cols - 1));
     float frow = clamp(floor(cpx.y / u_tile_size), 0.0, float(u_tile_rows - 1));
     vec2 in_tile = cpx - vec2(fcol, frow) * u_tile_size;
     vec2 tile_uv = (in_tile + vec2(u_tile_border)) / u_layer_size;
     float layer = frow * float(u_tile_cols) + fcol;
-    return textureLod(u_tiles, vec3(tile_uv, layer), 0.0);
+    return textureLod(u_tiles, vec3(tile_uv, layer), lod);
 }
+
+// LOD-0 point sample of the tiled image at UV.
+vec4 sample_tile_lod0(vec2 uv) { return sample_image_lod(uv, 0.0); }
 
 // Original-resolution sharpness: |LOD0 - (2px-blurred LOD0)|, returned raw so the
 // exposure / view pipeline downstream can amplify it (same idea as the slot diff).

@@ -109,9 +109,19 @@ void main() {
 
     // Slot difference: the absolute difference vs the comparator slot, computed
     // here (in source space) so the exposure / view / clarity below all act on
-    // the displayed difference itself.
+    // the displayed difference itself. Both images are sampled at the SAME
+    // explicit isotropic LOD with the same trilinear filter, so identical content
+    // differs by exactly 0 at every zoom — sampling each via its own implicit /
+    // anisotropic LOD left a residual difference when minified that only vanished
+    // at LOD 0.
     if (u_diff != 0) {
-        texel = vec4(abs(texel.rgb - texture(u_diff_image, uv).rgb), 1.0);
+        vec2 dsz = vec2(textureSize(u_diff_image, 0));
+        vec2 dudx = dFdx(uv) * dsz;
+        vec2 dudy = dFdy(uv) * dsz;
+        float lod = max(0.0, 0.5 * log2(max(dot(dudx, dudx), dot(dudy, dudy))));
+        vec3 a = sample_image_lod(uv, lod).rgb;
+        vec3 b = textureLod(u_diff_image, uv, lod).rgb;
+        texel = vec4(abs(a - b), 1.0);
     }
     // Sharpness checker: |original - 2px-blurred original|, from the ORIGINAL
     // full-resolution pixels (LOD 0), not the displayed mip. Done here in source

@@ -1080,6 +1080,13 @@ impl App {
         for_compare: bool,
         old_scale: Option<(f32, f32)>,
     ) {
+        // Changing the displayed image (folder navigation or a comparator-slot
+        // recall) ends any active slot-difference view.
+        if self.diff_slot.take().is_some() {
+            if let Some(gfx) = &mut self.gfx {
+                gfx.renderer.set_diff_image(None);
+            }
+        }
         if !for_compare {
             log::info!(
                 "decoded in {:.2}s, uploading {}",

@@ -3363,15 +3363,21 @@ impl App {
                 self.rotation = r.rem_euclid(4) as u8;
             }
         }
-        if let Ok(v) = std::env::var("IMGVWR_DEBUG_MINIMAP") {
-            // Force the minimap on for headless capture (pair with a zoomed-in
-            // IMGVWR_DEBUG_ZOOM so it passes the contain-fit gate). A value in
-            // (0,1) also forces that fade alpha, to verify the cross-fade.
+        // Force the minimap on for headless capture (pair with a zoomed-in
+        // IMGVWR_DEBUG_ZOOM so it passes the contain-fit gate).
+        if std::env::var_os("IMGVWR_DEBUG_MINIMAP").is_some() {
             self.minimap_on = true;
-            if let Ok(a) = v.parse::<f32>() {
-                if a > 0.0 && a < 1.0 {
-                    self.debug_minimap_alpha = Some(a);
-                }
+        }
+        // A value in (0,1) also forces that fade alpha, to verify the cross-fade.
+        // The forced-alpha field is debug-only, so this is cfg-gated (the whole fn
+        // already no-ops in release, but it must still compile there).
+        #[cfg(debug_assertions)]
+        if let Some(a) = std::env::var("IMGVWR_DEBUG_MINIMAP")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            if a > 0.0 && a < 1.0 {
+                self.debug_minimap_alpha = Some(a);
             }
         }
         if std::env::var_os("IMGVWR_DEBUG_GUIDES").is_some() {

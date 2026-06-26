@@ -196,6 +196,44 @@ enum RenderOutcome {
     Captured,
 }
 
+/// Max entries kept on the undo (and redo) stack.
+const UNDO_LIMIT: usize = 256;
+
+/// A snapshot of the undoable editing state: guides, image adjustments and toggle
+/// modes. Navigation / positioning (pan, zoom, look, projection) and the per-image
+/// rotation are deliberately excluded.
+#[derive(Clone, PartialEq)]
+struct UndoState {
+    guides: Vec<[f32; 2]>,
+    exposure_target: f32,
+    gamma_target: f32,
+    clarity_amount: f32,
+    clarity_radius: f32,
+    isolate_channel: Option<u8>,
+    sharpness: bool,
+    wrap_2d: bool,
+    nearest_filter: bool,
+    image_stretch: Vec2,
+}
+
+impl UndoState {
+    /// The "no edits" baseline a freshly-loaded image starts from.
+    fn fresh() -> Self {
+        Self {
+            guides: Vec::new(),
+            exposure_target: 0.0,
+            gamma_target: 1.0,
+            clarity_amount: 0.0,
+            clarity_radius: 64.0,
+            isolate_channel: None,
+            sharpness: false,
+            wrap_2d: false,
+            nearest_filter: false,
+            image_stretch: Vec2::ONE,
+        }
+    }
+}
+
 /// The navigation minimap panel rectangle in physical pixels (top-left origin),
 /// plus the window scale factor so the same rect can be expressed in egui points.
 #[derive(Clone, Copy)]
@@ -254,6 +292,12 @@ pub struct App {
     /// Per-image-path display rotation, remembered for the session so reopening a
     /// rotated image (or stepping back to it) restores the rotation.
     image_rotations: HashMap<PathBuf, u8>,
+    /// Undo / redo of editing state (guides, adjustments, toggle modes). The
+    /// baseline is the last-committed snapshot; a change away from it (outside a
+    /// gesture) pushes the baseline onto `undo_stack`. Cleared on each image load.
+    undo_stack: Vec<UndoState>,
+    redo_stack: Vec<UndoState>,
+    undo_baseline: UndoState,
     /// Navigation minimap toggled on with M (persists until toggled off). When
     /// off, the minimap can still appear automatically on 2D pan/zoom.
     minimap_on: bool,
@@ -463,6 +507,9 @@ impl App {
             show_metadata: false,
             rotation: 0,
             image_rotations: HashMap::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            undo_baseline: UndoState::fresh(),
             minimap_on: false,
             minimap_auto_until: None,
             minimap_prev_view: None,
@@ -1346,6 +1393,8 @@ impl App {
         // The new image starts settled — freeze the easing target at the camera
         // we just configured (incl. any debug override) so it doesn't animate in.
         self.camera.settle();
+        // Undo never crosses an image load: start a fresh stack at this state.
+        self.reset_undo();
         self.request_redraw();
     }
 
@@ -1679,6 +1728,100 @@ impl App {
         }
         self.show_toast("Adjustments reset".to_string());
         self.request_redraw();
+    }
+
+    // ---- undo / redo -----------------------------------------------------
+
+    /// Snapshot the current undoable editing state.
+    fn undo_snapshot(&self) -> UndoState {
+        UndoState {
+            guides: self.guides.clone(),
+            exposure_target: self.exposure_target,
+            gamma_target: self.gamma_target,
+            clarity_amount: self.clarity_amount,
+            clarity_radius: self.clarity_radius,
+            isolate_channel: self.isolate_channel,
+            sharpness: self.sharpness,
+            wrap_2d: self.wrap_2d,
+            nearest_filter: self.nearest_filter,
+            image_stretch: self.image_stretch,
+        }
+    }
+
+    /// True while a continuous edit gesture is in progress — its many per-frame
+    /// changes coalesce into one undo entry, committed when the gesture ends.
+    fn undo_gesture_active(&self) -> bool {
+        self.guide_drag.is_some() || self.ui_state.guide_spawn.is_some() || self.stretching
+    }
+
+    /// Called once per frame after input: if the editing state changed away from
+    /// the baseline (and no gesture is mid-flight), push the old baseline onto the
+    /// undo stack so the change can be undone. A new change invalidates redo.
+    /// `egui_busy` is egui's "using the pointer" flag, so a slider drag (which
+    /// emits a value every frame) coalesces into one entry on release.
+    fn commit_undo_if_changed(&mut self, egui_busy: bool) {
+        if egui_busy || self.undo_gesture_active() {
+            return;
+        }
+        let cur = self.undo_snapshot();
+        if cur != self.undo_baseline {
+            let old = std::mem::replace(&mut self.undo_baseline, cur);
+            push_capped(&mut self.undo_stack, old, UNDO_LIMIT);
+            self.redo_stack.clear();
+        }
+    }
+
+    /// Reset undo/redo to the freshly-loaded image's state (undo never crosses an
+    /// image load). Call at the end of a load.
+    fn reset_undo(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.undo_baseline = self.undo_snapshot();
+    }
+
+    /// Apply a snapshot to the live state (instant — tone is snapped, not eased).
+    fn restore_undo_state(&mut self, s: UndoState) {
+        self.guides = s.guides;
+        self.exposure_target = s.exposure_target;
+        self.exposure = s.exposure_target;
+        self.gamma_target = s.gamma_target;
+        self.gamma = s.gamma_target;
+        self.clarity_amount = s.clarity_amount;
+        self.clarity_radius = s.clarity_radius;
+        self.isolate_channel = s.isolate_channel;
+        self.sharpness = s.sharpness;
+        self.wrap_2d = s.wrap_2d;
+        self.nearest_filter = s.nearest_filter;
+        self.image_stretch = s.image_stretch;
+        // Cancel any in-flight ruler spawn so its release can't touch the restored
+        // guides, and clear the hover highlight.
+        self.ui_state.guide_spawn = None;
+        self.ui_state.hovered_guide = None;
+        self.request_redraw();
+    }
+
+    fn undo(&mut self) {
+        let Some(prev) = self.undo_stack.pop() else {
+            self.show_toast("Nothing to undo".to_string());
+            return;
+        };
+        let cur = self.undo_snapshot();
+        push_capped(&mut self.redo_stack, cur, UNDO_LIMIT);
+        self.undo_baseline = prev.clone();
+        self.restore_undo_state(prev);
+        self.show_toast("Undo".to_string());
+    }
+
+    fn redo(&mut self) {
+        let Some(next) = self.redo_stack.pop() else {
+            self.show_toast("Nothing to redo".to_string());
+            return;
+        };
+        let cur = self.undo_snapshot();
+        push_capped(&mut self.undo_stack, cur, UNDO_LIMIT);
+        self.undo_baseline = next.clone();
+        self.restore_undo_state(next);
+        self.show_toast("Redo".to_string());
     }
 
     /// Add a guide line (image coord 0..1; `horizontal` = a constant-image-y
@@ -2111,6 +2254,15 @@ impl App {
             (_, Some("]")) => self.adjust_clarity_radius(16.0),
             (_, Some(";")) => self.adjust_clarity(-0.5),
             (_, Some("'")) => self.adjust_clarity(0.5),
+            // Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo (editing state only).
+            (_, Some("z")) | (_, Some("Z")) if ctrl => {
+                if self.modifiers.shift_key() {
+                    self.redo();
+                } else {
+                    self.undo();
+                }
+            }
+            (_, Some("y")) | (_, Some("Y")) if ctrl => self.redo(),
             // Ctrl+R: reset all image-processing adjustments.
             (_, Some("r")) | (_, Some("R")) if ctrl => self.reset_image_processing(),
             // R (no Ctrl): reset the view + window, same as Home.
@@ -3869,6 +4021,11 @@ impl App {
 
         let mut actions: Vec<UiAction> = Vec::new();
         let mut grabbed: Option<(i32, i32, Vec<u8>)> = None;
+        // egui "is dragging a widget" this frame — coalesces slider drags into one
+        // undo entry (set inside the gfx borrow below; only read on the path that
+        // sets it, hence the allow for the otherwise-overwritten initial value).
+        #[allow(unused_assignments)]
+        let mut egui_busy = false;
 
         {
             let ui_state = &mut self.ui_state;
@@ -3921,6 +4078,7 @@ impl App {
             gfx.egui.run(&gfx.window, |ctx| {
                 ui::build(ctx, &inputs, ui_state, &mut actions);
             });
+            egui_busy = gfx.egui.egui_ctx.is_using_pointer();
             gfx.egui.paint(&gfx.window);
 
             if capture_ready {
@@ -3948,6 +4106,10 @@ impl App {
         for action in actions {
             self.handle_ui_action(action);
         }
+
+        // Record an undo entry if this frame's input changed the editing state
+        // (after the UI actions and key handling above; coalesced during gestures).
+        self.commit_undo_if_changed(egui_busy);
 
         if let Some((w, h, buf)) = grabbed {
             self.write_capture(w as u32, h as u32, buf);
@@ -4673,6 +4835,18 @@ fn inverse_hue(rgb: [f32; 3]) -> [f32; 3] {
     shift_hue(rgb, 180.0)
 }
 
+/// Push `item` onto `stack`, dropping the oldest entry first if it's at `cap`, so
+/// the stack never exceeds `cap` (the undo / redo history bound).
+fn push_capped<T>(stack: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        return;
+    }
+    if stack.len() >= cap {
+        stack.remove(0);
+    }
+    stack.push(item);
+}
+
 /// Decide which axis the next G subdivision should split, given the completed
 /// subdivision levels per axis (`h` horizontal, `v` vertical), whether there are
 /// no guides yet, and the image `aspect` (W/H). Returns `Some(true)` for a
@@ -5141,6 +5315,18 @@ mod tests {
         // A 32:1 image: split the width (vertical guides) down to the 1/32 cap
         // before the 2nd horizontal guide.
         assert_eq!(guide_axis_sequence(32.0, 7), "HVVVVVH");
+    }
+
+    #[test]
+    fn push_capped_drops_oldest_at_cap() {
+        let mut s: Vec<i32> = Vec::new();
+        for i in 0..300 {
+            push_capped(&mut s, i, 256);
+        }
+        assert_eq!(s.len(), 256);
+        // Oldest 44 (0..44) were dropped; the window is 44..300.
+        assert_eq!(*s.first().unwrap(), 44);
+        assert_eq!(*s.last().unwrap(), 299);
     }
 
     #[test]

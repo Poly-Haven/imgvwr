@@ -1564,6 +1564,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("[ / ]", "Clarity radius −/+"),
                 ("; / '", "Clarity strength −/+"),
                 ("Ctrl + R", "Reset all adjustments"),
+                ("Ctrl + Z / Y", "Undo / redo edits"),
                 ("T", "Standard / last view transform"),
                 ("O", "Open file…"),
                 ("← / →", "Previous / next image"),

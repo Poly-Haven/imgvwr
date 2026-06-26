@@ -46,6 +46,7 @@ for Windows.
 | `[` / `]` | Clarity (local contrast) radius −/+ |
 | `;` / `'` | Clarity strength −/+ (0 = off; crank high to make issues pop) |
 | `Ctrl + R` | Reset all adjustments (exposure, gamma, clarity, channel, sharpness, diff) |
+| `Ctrl + Z` / `Ctrl + Shift + Z` (or `Ctrl + Y`) | Undo / redo edits — guides, adjustments and toggle modes (not navigation); up to 256 steps, per image |
 | `T` | Toggle Standard ↔ last-used view transform |
 | `O` | Open file… |
 | `←` / `→` | Previous / next image in the folder (alphabetical) |

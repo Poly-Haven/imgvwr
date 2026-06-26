@@ -309,30 +309,21 @@ fn bottom_panel(
                         });
                     });
             });
-            ui.painter().set(
-                bg,
-                egui::Shape::rect_filled(content.response.rect, 0.0, panel_bg()),
-            );
+            let content_rect = content.response.rect;
+            ui.painter()
+                .set(bg, egui::Shape::rect_filled(content_rect, 0.0, panel_bg()));
+            // Reset button, pinned to the panel's bottom-right corner — drawn into
+            // the SAME area, on top of the background, so its hit-test is
+            // unambiguous. (A separate overlapping area had its clicks swallowed
+            // by the panel and rendered faint behind the panel background.) Its
+            // placement is the area's right edge, independent of the slider group
+            // widths (the slider rows already reserve room for it on the right).
+            reset_button(ui, content_rect)
         });
-    let mut over = resp.response.contains_pointer();
-
-    // Reset button as a separate area pinned to the panel's bottom-right corner,
-    // sliding with it. Decoupled from the slider flow so its placement never
-    // depends on the (variable) group widths.
-    let reset = egui::Area::new(egui::Id::new("imgvwr_reset"))
-        .anchor(
-            egui::Align2::RIGHT_BOTTOM,
-            egui::vec2(-10.0, -10.0 + (1.0 - slide) * 96.0),
-        )
-        .constrain(false)
-        .show(ctx, |ui| {
-            reset_button(ui).on_hover_text("Reset all adjustments (Ctrl+R)")
-        });
-    if reset.inner.clicked() {
+    if resp.inner.clicked() {
         actions.push(UiAction::ResetAdjustments);
     }
-    over |= reset.response.contains_pointer();
-    state.pointer_over_panel = over;
+    state.pointer_over_panel = resp.response.contains_pointer();
 }
 
 /// A labelled slider with `−` / `+` step buttons, emitting `make(value)` on any
@@ -374,23 +365,29 @@ fn adj_slider(
     });
 }
 
-/// The bottom-panel Reset button (right edge): an icon that resets all image
-/// adjustments, same as Ctrl+R.
-fn reset_button(ui: &mut egui::Ui) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
-    if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, 4.0, egui::Color32::from_white_alpha(28));
-    }
+/// The bottom-panel Reset button: an icon that resets all image adjustments
+/// (same as Ctrl+R), drawn at the bottom-right corner of the panel `area` rect.
+/// Carries a permanent subtle chip so it reads as a button (not faint icon).
+fn reset_button(ui: &mut egui::Ui, area: egui::Rect) -> egui::Response {
+    let size = egui::vec2(35.0, 30.0);
+    let pad = 8.0;
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(area.right() - pad - size.x, area.bottom() - pad - size.y),
+        size,
+    );
+    let resp = ui.interact(rect, ui.id().with("reset_btn"), egui::Sense::click());
+    let chip = if resp.hovered() { 52 } else { 26 };
+    ui.painter()
+        .rect_filled(rect, 5.0, egui::Color32::from_white_alpha(chip));
     let icon = egui::Image::new(egui::include_image!(
         "../../resources/icons/ui/arrow-counterclockwise.svg"
     ))
-    .tint(egui::Color32::from_gray(220));
+    .tint(egui::Color32::from_gray(235));
     icon.paint_at(
         ui,
-        egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(15.0)),
+        egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(19.0)),
     );
-    clickable(resp)
+    clickable(resp).on_hover_text("Reset all adjustments (Ctrl+R)")
 }
 
 /// The settings dialog (opened from the toolbar): startup-display picker and the

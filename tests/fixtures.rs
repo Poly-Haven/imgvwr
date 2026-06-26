@@ -4,7 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use imgvwr::image_loader::{load_image, probe_dimensions, ImageData, PixelBuffer};
+use std::sync::Arc;
+
+use imgvwr::image_loader::{load_image, probe_dimensions, ImageData, PixelBuffer, ReadProgress};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -14,7 +16,8 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn load(name: &str) -> ImageData {
-    load_image(&fixture(name)).unwrap_or_else(|e| panic!("failed to load {name}: {e:#}"))
+    let progress = Arc::new(ReadProgress::default());
+    load_image(&fixture(name), &progress).unwrap_or_else(|e| panic!("failed to load {name}: {e:#}"))
 }
 
 #[test]

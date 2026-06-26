@@ -4,22 +4,65 @@
 //! sRGB-encoded (`is_encoded_srgb = true`); float formats (EXR / HDR / float
 //! TIFF / developed RAW float) are treated as scene-linear.
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use image::{DynamicImage, ImageDecoder};
 
-use super::{ImageData, PixelBuffer};
+use super::{ImageData, PixelBuffer, ReadProgress};
+
+/// A `Read`/`Seek` wrapper that tallies bytes read into a shared [`ReadProgress`]
+/// so the loading bar can track a slow (e.g. network-drive) file read. Streams —
+/// it never buffers the whole file, so there's no extra memory or I/O cost.
+struct CountingReader<R> {
+    inner: R,
+    progress: Arc<ReadProgress>,
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.progress.read.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+impl<R: Seek> Seek for CountingReader<R> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+/// Open `path`, record its size as the progress total, and wrap it in a
+/// byte-counting reader.
+fn counting_open(
+    path: &Path,
+    progress: &Arc<ReadProgress>,
+) -> Result<CountingReader<std::fs::File>> {
+    let file =
+        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+    progress.total.store(total, Ordering::Relaxed);
+    progress.read.store(0, Ordering::Relaxed);
+    Ok(CountingReader {
+        inner: file,
+        progress: progress.clone(),
+    })
+}
 
 /// Decode an 8/16/32-bit image via the `image` crate (PNG, JPEG, BMP, TIFF,
 /// WebP, GIF, ICO, TGA, PNM, **and Radiance HDR**, plus the generic fallback).
-pub fn load_via_image(path: &Path) -> Result<ImageData> {
+pub fn load_via_image(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> {
     // Disable the decoder's default allocation limits: the primary workload is
     // very large (24k+) images and we assume sufficient memory (§1, §8.1). Go
     // through the decoder (not image::open) so the embedded ICC profile can be
-    // read before the pixels are decoded.
-    let mut reader = image::ImageReader::open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?
+    // read before the pixels are decoded. The file is read through a counting
+    // reader so the loading bar tracks the (network-)read.
+    let counting = counting_open(path, progress)?;
+    let mut reader = image::ImageReader::new(std::io::BufReader::new(counting))
         .with_guessed_format()
         .with_context(|| format!("failed to detect format of {}", path.display()))?;
     reader.no_limits();
@@ -323,8 +366,8 @@ fn apply_orientation_f32(
 // Without the `ocio` feature the Err arm is a plain `Err(e)`, which clippy
 // flags as a needless match; the OpenEXR fallback (with the feature) is not.
 #[cfg_attr(not(feature = "ocio"), allow(clippy::needless_match))]
-pub fn load_exr(path: &Path) -> Result<ImageData> {
-    match load_exr_rust(path) {
+pub fn load_exr(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> {
+    match load_exr_rust(path, progress) {
         Ok(data) => Ok(data),
         Err(e) => {
             // The pure-Rust exr crate cannot decode DWAA/DWAB (and a few other)
@@ -345,16 +388,17 @@ pub fn load_exr(path: &Path) -> Result<ImageData> {
     }
 }
 
-fn load_exr_rust(path: &Path) -> Result<ImageData> {
+fn load_exr_rust(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> {
     use exr::prelude::*;
 
+    // Read through a counting reader so the loading bar tracks the file read.
     let image = read()
         .no_deep_data()
         .largest_resolution_level()
         .all_channels()
         .first_valid_layer()
         .all_attributes()
-        .from_file(path)
+        .from_unbuffered(counting_open(path, progress)?)
         .map_err(|e| anyhow!("EXR decode failed: {e}"))?;
 
     let layer = &image.layer_data;

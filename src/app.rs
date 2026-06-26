@@ -347,6 +347,10 @@ pub struct App {
     pending: Option<PendingAdopt>,
     /// Upload fraction (0..1) while `pending`, for the progress bar.
     upload_progress: f32,
+    /// File-read progress for the in-flight decode, shared with the load thread,
+    /// so the loading bar is determinate while reading (e.g. off a network drive)
+    /// for the formats that stream through a counting reader.
+    decode_progress: Arc<crate::image_loader::ReadProgress>,
 
     /// Timestamp of the previous rendered frame, for frame-rate-independent
     /// easing (`None` until the first frame).
@@ -457,6 +461,7 @@ impl App {
             metadata_menu_grace: None,
             pending: None,
             upload_progress: 0.0,
+            decode_progress: Arc::new(crate::image_loader::ReadProgress::default()),
             last_frame: None,
             last_window_ease: None,
             animating: false,
@@ -1018,13 +1023,17 @@ impl App {
         self.load_state = LoadState::Loading;
         log::info!("loading (gen {gen}) {}", path.display());
 
+        // Fresh progress for this load; the main loop polls it for the bar.
+        self.decode_progress = Arc::new(crate::image_loader::ReadProgress::default());
+        let progress = self.decode_progress.clone();
         let tx = self.load_tx.clone();
         let proxy = self.proxy.clone();
         std::thread::Builder::new()
             .name(format!("image-load-{gen}"))
             .spawn(move || {
-                let result = match std::panic::catch_unwind(AssertUnwindSafe(|| load_image(&path)))
-                {
+                let result = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    load_image(&path, &progress)
+                })) {
                     Ok(Ok(data)) => Ok(data),
                     Ok(Err(e)) => Err(format!("{e:#}")),
                     Err(_) => Err("decoder panicked".to_string()),
@@ -1375,8 +1384,11 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name(format!("image-preload-{gen}"))
             .spawn(move || {
-                let result = match std::panic::catch_unwind(AssertUnwindSafe(|| load_image(&path)))
-                {
+                // Preload is a silent look-ahead, so its read progress is unused.
+                let progress = Arc::new(crate::image_loader::ReadProgress::default());
+                let result = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    load_image(&path, &progress)
+                })) {
                     Ok(Ok(data)) => Ok(data),
                     Ok(Err(e)) => Err(format!("{e:#}")),
                     Err(_) => Err("decoder panicked".to_string()),
@@ -1913,8 +1925,8 @@ impl App {
             }
             (_, Some("p")) | (_, Some("P")) => {
                 let want = !self.camera.is_panorama();
-                let max_or_fs = self.fullscreen
-                    || self.gfx.as_ref().is_some_and(|g| g.window.is_maximized());
+                let max_or_fs =
+                    self.fullscreen || self.gfx.as_ref().is_some_and(|g| g.window.is_maximized());
                 self.camera.set_mode(want);
                 // pano → 2D in a normal window: carrying the look direction across
                 // pans the image partly off the window, leaving black canvas —
@@ -2489,8 +2501,17 @@ impl App {
         // Overlay state, with headless-test overrides applied.
         let forced = self.force_overlay.as_deref();
         let loading = self.is_busy() || forced == Some("loading");
-        // Determinate during the GPU upload phase, indeterminate while decoding.
-        let progress = self.pending.as_ref().map(|_| self.upload_progress);
+        // GPU upload phase: real upload fraction. Decode phase: the file-read
+        // fraction when the format streams through the counting reader (e.g. a
+        // big file off a network drive), else indeterminate. Cap the read at 0.99
+        // so the bar doesn't sit at 100% through the (brief) decode/upload tail.
+        let progress = if self.pending.is_some() {
+            Some(self.upload_progress)
+        } else if loading {
+            self.decode_progress.fraction().map(|f| f.min(0.99))
+        } else {
+            None
+        };
         let error = match &self.load_state {
             LoadState::Failed(e) => Some(e.clone()),
             _ if forced == Some("error") => Some("Example decode error: unsupported format".into()),
@@ -2668,9 +2689,10 @@ impl App {
             .map(|g| g.window.scale_factor() as f32)
             .unwrap_or(1.0);
         let near_left = self.cursor_in_window && self.cursor_pos.x <= (44.0 * scale) as f64;
-        let eligible = !self.window_is_small() && !self.camera.is_panorama() && self.file_info.width != 0;
-        let show = eligible
-            && (near_left || self.bottom_visible || self.ui_state.pointer_over_left_ruler);
+        let eligible =
+            !self.window_is_small() && !self.camera.is_panorama() && self.file_info.width != 0;
+        let show =
+            eligible && (near_left || self.bottom_visible || self.ui_state.pointer_over_left_ruler);
         if show {
             self.left_ruler_visible = true;
             self.left_ruler_hide_deadline = None;
@@ -2704,9 +2726,7 @@ impl App {
             self.metadata_menu_grace = Some(Instant::now() + Duration::from_millis(400));
         }
         let menu_sticky = self.ui_state.view_menu_open
-            || self
-                .metadata_menu_grace
-                .is_some_and(|t| Instant::now() < t);
+            || self.metadata_menu_grace.is_some_and(|t| Instant::now() < t);
         // A small top-right corner triangle (~80px legs): reveal only when the
         // cursor is inside the diagonal from (w-80, 0) to (w, 80).
         let edge = (80.0 * scale) as f64;

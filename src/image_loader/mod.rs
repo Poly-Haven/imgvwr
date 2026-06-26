@@ -3,8 +3,27 @@
 mod formats;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
+
+/// File-read progress shared with the loader thread so the loading bar can show
+/// real progress while reading a (possibly slow, network-drive) file rather than
+/// an indeterminate spinner. `total == 0` means "unknown" (indeterminate).
+#[derive(Default)]
+pub struct ReadProgress {
+    pub read: AtomicU64,
+    pub total: AtomicU64,
+}
+
+impl ReadProgress {
+    /// Fraction read so far (0..1), or `None` while the total is unknown.
+    pub fn fraction(&self) -> Option<f32> {
+        let total = self.total.load(Ordering::Relaxed);
+        (total > 0)
+            .then(|| (self.read.load(Ordering::Relaxed) as f32 / total as f32).clamp(0.0, 1.0))
+    }
+}
 
 /// A decoded image, normalised to 4-channel RGBA interleaved.
 ///
@@ -137,7 +156,7 @@ pub fn probe_dimensions(path: &Path) -> Option<(u32, u32)> {
 
 /// Decode an image file into RGBA `ImageData`, dispatching on the (lower-cased)
 /// file extension. See plans/rewrite.md §8.2.
-pub fn load_image(path: &Path) -> Result<ImageData> {
+pub fn load_image(path: &Path, progress: &std::sync::Arc<ReadProgress>) -> Result<ImageData> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -145,13 +164,14 @@ pub fn load_image(path: &Path) -> Result<ImageData> {
         .to_ascii_lowercase();
 
     if ext == "exr" {
-        formats::load_exr(path)
+        formats::load_exr(path, progress)
     } else if RAW_EXTS.contains(&ext.as_str()) {
+        // rawler reads the file internally; leave the read indeterminate.
         formats::load_raw(path)
     } else {
         // PNG/JPEG/BMP/TIFF/WebP/GIF/ICO/TGA/PNM, Radiance HDR, and anything
         // else the `image` crate recognises.
-        formats::load_via_image(path)
+        formats::load_via_image(path, progress)
     }
 }
 

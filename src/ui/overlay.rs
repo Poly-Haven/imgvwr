@@ -543,7 +543,7 @@ fn bottom_panel(
                 } else {
                     false
                 };
-                egui::Frame::NONE
+                let sliders = egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(12, 7))
                     .show(ui, |ui| {
                         // Manual row layout: egui's horizontal_wrapped won't wrap
@@ -613,19 +613,20 @@ fn bottom_panel(
                             }
                         });
                     });
-                strip_dragged
+                (strip_dragged, sliders.response.rect)
             });
             let content_rect = content.response.rect;
-            let strip_dragged = content.inner;
+            let (strip_dragged, slider_rect) = content.inner;
             ui.painter()
                 .set(bg, egui::Shape::rect_filled(content_rect, 0.0, panel_bg()));
-            // Reset button, pinned to the panel's bottom-right corner — drawn into
-            // the SAME area, on top of the background, so its hit-test is
-            // unambiguous. (A separate overlapping area had its clicks swallowed
-            // by the panel and rendered faint behind the panel background.) Its
-            // placement is the area's right edge, independent of the slider group
-            // widths (the slider rows already reserve room for it on the right).
-            (reset_button(ui, content_rect), strip_dragged)
+            // Reset button, pinned to the panel's right edge and vertically aligned
+            // with the slider rows. Drawn into the SAME area, on top of the
+            // background, so its hit-test is unambiguous; placed independently of
+            // the slider group widths (the rows reserve room for it on the right).
+            (
+                reset_button(ui, content_rect, slider_rect.center().y),
+                strip_dragged,
+            )
         });
     let (reset_resp, strip_dragged) = resp.inner;
     if reset_resp.clicked() {
@@ -675,29 +676,55 @@ fn adj_slider(
     });
 }
 
-/// The bottom-panel Reset button: an icon that resets all image adjustments
-/// (same as Ctrl+R), drawn at the bottom-right corner of the panel `area` rect.
-/// Carries a permanent subtle chip so it reads as a button (not faint icon).
-fn reset_button(ui: &mut egui::Ui, area: egui::Rect) -> egui::Response {
-    let size = egui::vec2(35.0, 30.0);
-    let pad = 8.0;
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(area.right() - pad - size.x, area.bottom() - pad - size.y),
+/// The bottom-panel Reset button: a custom-drawn counter-clockwise circular
+/// arrow (the thin SVG aliased badly at this size) that resets all image
+/// adjustments (same as Ctrl+R). Sized to the adjustment row height and centred
+/// vertically on the slider rows (`row_center_y`), pinned to the panel's right
+/// edge.
+fn reset_button(ui: &mut egui::Ui, area: egui::Rect, row_center_y: f32) -> egui::Response {
+    let size = egui::vec2(24.0, 22.0);
+    let pad = 11.0;
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(area.right() - pad - size.x * 0.5, row_center_y),
         size,
     );
     let resp = ui.interact(rect, ui.id().with("reset_btn"), egui::Sense::click());
-    let chip = if resp.hovered() { 52 } else { 26 };
-    ui.painter()
-        .rect_filled(rect, 5.0, egui::Color32::from_white_alpha(chip));
-    let icon = egui::Image::new(egui::include_image!(
-        "../../resources/icons/ui/arrow-counterclockwise.svg"
-    ))
-    .tint(egui::Color32::from_gray(235));
-    icon.paint_at(
-        ui,
-        egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(19.0)),
-    );
+    let painter = ui.painter();
+    let chip = if resp.hovered() { 48 } else { 22 };
+    painter.rect_filled(rect, 5.0, egui::Color32::from_white_alpha(chip));
+    draw_reset_glyph(painter, rect.center(), 6.3, egui::Color32::from_gray(235));
     clickable(resp).on_hover_text("Reset all adjustments (Ctrl+R)")
+}
+
+/// Draw a crisp counter-clockwise "reset" circular arrow centred at `c`, radius
+/// `r` — an anti-aliased arc stroke plus a filled triangular arrowhead, so it
+/// stays sharp at small sizes (unlike the hairline SVG).
+fn draw_reset_glyph(painter: &egui::Painter, c: egui::Pos2, r: f32, color: egui::Color32) {
+    use std::f32::consts::PI;
+    let stroke = egui::Stroke::new(1.7, color);
+    // ~295° arc, swept counter-clockwise (decreasing angle in egui's y-down
+    // space); the open wedge (top-right) carries the arrowhead.
+    let (a0, a1) = (1.42 * PI, -0.22 * PI);
+    let n = 40;
+    let pts: Vec<egui::Pos2> = (0..=n)
+        .map(|i| {
+            let a = a0 + (a1 - a0) * (i as f32 / n as f32);
+            egui::pos2(c.x + r * a.cos(), c.y + r * a.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(pts.clone(), stroke));
+    // Arrowhead at the arc end, pointing along its travel direction.
+    let tip = pts[n];
+    let fwd = (pts[n] - pts[n - 1]).normalized();
+    let perp = egui::vec2(-fwd.y, fwd.x);
+    let (hl, hw) = (r * 1.05, r * 0.72);
+    let apex = tip + fwd * (hl * 0.45);
+    let base = tip - fwd * (hl * 0.55);
+    painter.add(egui::Shape::convex_polygon(
+        vec![apex, base + perp * hw, base - perp * hw],
+        color,
+        egui::Stroke::NONE,
+    ));
 }
 
 /// The settings dialog (opened from the toolbar): startup-display picker and the

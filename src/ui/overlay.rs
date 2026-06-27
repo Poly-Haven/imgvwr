@@ -1044,11 +1044,28 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction
         .anchor(egui::Align2::RIGHT_CENTER, egui::Vec2::ZERO)
         .constrain(false)
         .show(ctx, |ui| {
-            // Right-align the column (Align::Max): the "1" glyph is narrower than
-            // other digits, so a left-aligned stack left its flag short of the
-            // edge. Right-aligning pins every flag flush to the window edge.
-            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+            // Left-aligned column (Align::Min) so the Area hugs its content. A
+            // right-aligned (Align::Max) column instead claims the *full* available
+            // width to find a right edge to align against — ballooning this
+            // RIGHT_CENTER Area across the whole window, whose interact rect then
+            // swallows every click in that horizontal band (the dead-zone bug).
+            // To still pin the narrow "1" flag flush to the edge, give every flag
+            // the same width: size each cell to the widest digit and centre it.
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
+                let cell_w = (1..=9)
+                    .map(|n| {
+                        ui.fonts(|f| {
+                            f.layout_no_wrap(
+                                n.to_string(),
+                                egui::FontId::proportional(13.0),
+                                egui::Color32::WHITE,
+                            )
+                            .size()
+                            .x
+                        })
+                    })
+                    .fold(0.0_f32, f32::max);
                 for (i, label) in inputs.slot_labels.iter().enumerate() {
                     let Some(label) = label else {
                         continue;
@@ -1075,12 +1092,15 @@ fn slot_flags(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction
                         ..Default::default()
                     }
                     .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new((i + 1).to_string())
-                                .color(fg)
-                                .size(13.0)
-                                .strong(),
-                        );
+                        ui.set_min_width(cell_w);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new((i + 1).to_string())
+                                    .color(fg)
+                                    .size(13.0)
+                                    .strong(),
+                            );
+                        });
                     });
                     let resp = clickable(inner.response.interact(egui::Sense::click()))
                         .on_hover_text(label);
@@ -1878,4 +1898,93 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 });
             });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    /// Build a stack of mock flags (like `slot_flags`) inside a RIGHT_CENTER
+    /// Area and return the resulting Area rect (laid out against a 1000x800
+    /// screen). Runs two frames so the area geometry settles.
+    fn flag_area_rect(layout: egui::Layout, cell_w: Option<f32>) -> egui::Rect {
+        let ctx = egui::Context::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut rect = egui::Rect::NOTHING;
+        for _ in 0..2 {
+            let _ = ctx.run(input(), |ctx| {
+                let resp = egui::Area::new(egui::Id::new("test_slots"))
+                    .anchor(egui::Align2::RIGHT_CENTER, egui::Vec2::ZERO)
+                    .constrain(false)
+                    .show(ctx, |ui| {
+                        ui.with_layout(layout, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
+                            for n in 1..=3 {
+                                egui::Frame {
+                                    fill: egui::Color32::DARK_GRAY,
+                                    inner_margin: egui::Margin::symmetric(7, 3),
+                                    ..Default::default()
+                                }
+                                .show(ui, |ui| {
+                                    if let Some(w) = cell_w {
+                                        ui.set_min_width(w);
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(n.to_string())
+                                                    .size(13.0)
+                                                    .strong(),
+                                            );
+                                        });
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new(n.to_string()).size(13.0).strong(),
+                                        );
+                                    }
+                                });
+                            }
+                        });
+                    });
+                rect = resp.response.rect;
+            });
+        }
+        rect
+    }
+
+    #[test]
+    fn slot_flag_area_does_not_span_full_width() {
+        // Root cause: a top_down(Align::Max) column expands to the full available
+        // width to have a right edge to align against, so the RIGHT_CENTER Area's
+        // interact rect spans the whole window and egui swallows clicks to the left
+        // of the flags. Align::Min + uniform-width cells keeps it tight.
+        let max = flag_area_rect(egui::Layout::top_down(egui::Align::Max), None);
+        let min_uniform =
+            flag_area_rect(egui::Layout::top_down(egui::Align::Min), Some(11.0));
+        eprintln!(
+            "Align::Max width={} (screen 1000), Align::Min+uniform width={}",
+            max.width(),
+            min_uniform.width()
+        );
+        // The buggy layout balloons to (nearly) the full 1000px screen width.
+        assert!(
+            max.width() > 500.0,
+            "expected Align::Max to span the screen, got {}",
+            max.width()
+        );
+        // The fix stays tight to the flags (a single digit + 2*7 margin ~= 25px).
+        assert!(
+            min_uniform.width() < 60.0,
+            "expected the fixed layout to hug the flags, got {}",
+            min_uniform.width()
+        );
+        // And it must still hang flush against the right screen edge.
+        assert!(
+            (min_uniform.max.x - 1000.0).abs() < 0.5,
+            "flags should be flush right, right edge at {}",
+            min_uniform.max.x
+        );
+    }
 }

@@ -155,6 +155,48 @@ struct Toast {
     born: Instant,
 }
 
+/// Background backdrop presets, cycled by the `B` key. `UserSetting` uses the
+/// configured `background_color`; the others override it for the session only
+/// (not persisted, not part of undo).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BgPreset {
+    UserSetting,
+    Black,
+    Checker,
+    White,
+}
+
+impl BgPreset {
+    fn next(self) -> Self {
+        match self {
+            BgPreset::UserSetting => BgPreset::Black,
+            BgPreset::Black => BgPreset::Checker,
+            BgPreset::Checker => BgPreset::White,
+            BgPreset::White => BgPreset::UserSetting,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            BgPreset::UserSetting => "Default",
+            BgPreset::Black => "Black",
+            BgPreset::Checker => "Checkerboard",
+            BgPreset::White => "White",
+        }
+    }
+
+    /// The solid clear colour (sRGB 0–1) and whether to draw the checkerboard.
+    /// `user` is the configured `background_color` for the `UserSetting` preset.
+    fn resolve(self, user: [u8; 3]) -> ([f32; 3], bool) {
+        match self {
+            BgPreset::UserSetting => (srgb_u8_to_f32(user), false),
+            BgPreset::Black => ([0.0, 0.0, 0.0], false),
+            BgPreset::Checker => (srgb_u8_to_f32(user), true),
+            BgPreset::White => ([1.0, 1.0, 1.0], false),
+        }
+    }
+}
+
 /// An image whose GPU upload is in progress; the view state is applied once the
 /// incremental upload completes (`finalize_adopt`).
 struct PendingAdopt {
@@ -296,6 +338,9 @@ pub struct App {
     /// builds), forces bilinear minification even for 8-bit images so the Lanczos
     /// path can be compared. Always false in release.
     debug_no_lanczos: bool,
+    /// Background backdrop preset (B key); session-only, defaults to the
+    /// configured `background_color`.
+    bg_preset: BgPreset,
     /// Undo / redo of editing state (guides, adjustments, toggle modes). The
     /// baseline is the last-committed snapshot; a change away from it (outside a
     /// gesture) pushes the baseline onto `undo_stack`. Cleared on each image load.
@@ -512,6 +557,7 @@ impl App {
             rotation: 0,
             image_rotations: HashMap::new(),
             debug_no_lanczos: false,
+            bg_preset: BgPreset::UserSetting,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             undo_baseline: UndoState::fresh(),
@@ -2325,6 +2371,12 @@ impl App {
                 }
                 log::info!("2D wrap -> {}", self.wrap_2d);
             }
+            // B: cycle the background backdrop (configured / black / checkerboard /
+            // white). Session-only; not persisted, not part of undo.
+            (_, Some("b")) | (_, Some("B")) => {
+                self.bg_preset = self.bg_preset.next();
+                self.show_toast(format!("Background: {}", self.bg_preset.label()));
+            }
             (_, Some("t")) | (_, Some("T")) => self.toggle_view_transform(),
             (_, Some("o")) | (_, Some("O")) => self.open_file_dialog(),
             (_, Some("l")) | (_, Some("L")) => {
@@ -3367,6 +3419,15 @@ impl App {
         if std::env::var_os("IMGVWR_DEBUG_NO_LANCZOS").is_some() {
             self.debug_no_lanczos = true;
         }
+        // Force a background preset (the B-key cycle) for headless capture.
+        if let Ok(v) = std::env::var("IMGVWR_DEBUG_BG") {
+            self.bg_preset = match v.as_str() {
+                "black" => BgPreset::Black,
+                "checker" => BgPreset::Checker,
+                "white" => BgPreset::White,
+                _ => BgPreset::UserSetting,
+            };
+        }
         if let Ok(v) = std::env::var("IMGVWR_DEBUG_ROTATION") {
             if let Ok(r) = v.parse::<i32>() {
                 self.rotation = r.rem_euclid(4) as u8;
@@ -3794,6 +3855,8 @@ impl App {
             UiAction::SetBackgroundColor(color) => {
                 self.prefs.background_color = color;
                 self.prefs.save();
+                // Show the just-picked colour live even if a B-key preset was active.
+                self.bg_preset = BgPreset::UserSetting;
                 self.request_redraw();
             }
             UiAction::SetChannelIsolate(channel) => {
@@ -3983,6 +4046,7 @@ impl App {
         let mut guide_arr = [[0.0f32; 2]; crate::renderer::MAX_GUIDES];
         let guide_n = self.guides.len().min(crate::renderer::MAX_GUIDES);
         guide_arr[..guide_n].copy_from_slice(&self.guides[..guide_n]);
+        let (bg_color, bg_checker) = self.bg_preset.resolve(self.prefs.background_color);
         let base = RenderParams {
             viewport: (1, 1),
             exposure: self.exposure,
@@ -3994,7 +4058,8 @@ impl App {
             tan_half_fov: cam.tan_half_fov(),
             wrap_2d: self.wrap_2d,
             nearest: self.nearest_filter,
-            background: srgb_u8_to_f32(self.prefs.background_color),
+            background: bg_color,
+            bg_checker,
             isolate_channel: self.isolate_channel.map(|c| c as i32).unwrap_or(-1),
             stretch: [self.image_stretch.x, self.image_stretch.y],
             sharpness: self.sharpness,

@@ -1587,6 +1587,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("W", "Toggle 2D tiled wrap"),
                 ("I", "Nearest / bilinear filtering"),
                 ("M", "Navigation minimap"),
+                ("B", "Cycle background backdrop"),
             ],
         ),
         (

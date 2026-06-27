@@ -39,9 +39,24 @@ cargo build --release
 - **Any GL pass drawn after the scene but before `egui.paint` must set its own `blend_func`.**
   egui_glow sets a *premultiplied* func (`ONE, ONE_MINUS_SRC_ALPHA`) every paint and never restores
   it, so the next frame the default-framebuffer blend func is egui's, not the renderer's init-time
-  `SRC_ALPHA, ONE_MINUS_SRC_ALPHA`. The opaque main scene survives this by luck (over a cleared
-  opaque bg, opaque src → identical result); a *translucent* pass (the minimap fade is the first)
-  composites additively/blown-out unless it sets `blend_func` itself. See `render_minimap`.
+  `SRC_ALPHA, ONE_MINUS_SRC_ALPHA`. `draw_scene` now sets `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` itself
+  every frame (it used to rely on luck — opaque src over an opaque cleared bg is identical under
+  either func — which silently mis-composited *transparent* images and the checkerboard showing
+  through them). `render_minimap` likewise sets its own func for the fade. Keep this rule for any new
+  pass.
+- **Background backdrop is a `BgPreset` cycle (B key): configured colour / black / grey checkerboard
+  / white** (`App::bg_preset`, session-only — not persisted, not in `UndoState`). Solid presets feed
+  `RenderParams::background` (the `glClear`); the checkerboard is a dedicated fullscreen pass
+  (`bg_program`, `resources/shaders/background.glsl`, keyed off `gl_FragCoord`) drawn in `draw_scene`
+  *before* the image when `params.bg_checker`, so transparency / letterboxing reveals it. The default
+  `background_color` is 25% grey (`[64,64,64]`); existing users keep their saved value. Force a preset
+  headlessly with `IMGVWR_DEBUG_BG=black|checker|white|user`.
+- **The colour-management UI is two single-level dropdowns (Display + View), not a nested submenu.**
+  egui 0.31 has no API to open a submenu leftward (`SubMenu` always positions right, then clamps
+  against the screen edge — cramped, since the metadata box is top-right). So `view_dropdown` +
+  `display_dropdown` are separate `menu_custom_button`s; the View list follows the active display, and
+  switching display keeps the current view if valid else reverts to Standard→Raw→first
+  (`eq_ignore_ascii_case`, matching the rest of the OCIO view selection).
 - The navigation minimap (`M`) reuses the scene shader via a scissored second `draw_quad` into the
   bottom-right corner (`Renderer::render_minimap`) — so the thumbnail is tone-mapped and tiled like
   the main view; egui only strokes the border + view box on top. Its fade rides `u_global_alpha`.

@@ -59,7 +59,8 @@ fn default_corner_radius() -> u32 {
 }
 
 fn default_background_color() -> [u8; 3] {
-    [5, 5, 5]
+    // 25% grey — a neutral mid-dark backdrop (was near-black [5, 5, 5]).
+    [64, 64, 64]
 }
 
 fn default_guide_color() -> [u8; 3] {

@@ -16,6 +16,9 @@ use texture::{ImageTexture, ImageTextureKind, SamplerKind, SINGLE_TEXTURE_SAMPLE
 
 const VERTEX_SRC: &str = include_str!("../../resources/shaders/vertex.glsl");
 const FRAGMENT_TEMPLATE: &str = include_str!("../../resources/shaders/fragment_template.glsl");
+/// Fullscreen checkerboard backdrop fragment shader (the `Checker` background
+/// preset). Linked with [`VERTEX_SRC`], drawn before the image in `draw_scene`.
+const BACKGROUND_FRAG: &str = include_str!("../../resources/shaders/background.glsl");
 
 /// `__OCIO_APPLY__` when OCIO is absent (gamma-2.2 fallback).
 const GAMMA_FALLBACK_APPLY: &str = "color = pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));";
@@ -53,6 +56,9 @@ pub struct RenderParams {
     pub nearest: bool,
     /// Background colour (sRGB 0–1) cleared behind the alpha-blended image.
     pub background: [f32; 3],
+    /// Draw a grey checkerboard backdrop behind the image instead of the solid
+    /// `background` colour (the `Checker` background preset, B key).
+    pub bg_checker: bool,
     /// Channel to isolate as greyscale: -1 = all, 0=R 1=G 2=B 3=A.
     pub isolate_channel: i32,
     /// Per-axis image squash/stretch (1,1 = none).
@@ -101,6 +107,7 @@ impl Default for RenderParams {
             wrap_2d: false,
             nearest: false,
             background: [0.02, 0.02, 0.02],
+            bg_checker: false,
             isolate_channel: -1,
             stretch: [1.0, 1.0],
             sharpness: false,
@@ -221,6 +228,9 @@ impl OcioGlState {
 pub struct Renderer {
     gl: Arc<glow::Context>,
     program: glow::Program,
+    /// Fullscreen checkerboard backdrop program (drawn before the image when the
+    /// background preset is `Checker`). Reuses `vao` (the same fullscreen quad).
+    bg_program: glow::Program,
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     uniforms: Uniforms,
@@ -248,6 +258,7 @@ impl Renderer {
             let program = build_program(&gl, SINGLE_TEXTURE_SAMPLER, "", GAMMA_FALLBACK_APPLY)?;
             let uniforms = Uniforms::fetch(&gl, program);
             let (vao, vbo) = build_quad(&gl, program)?;
+            let bg_program = build_post_program(&gl, BACKGROUND_FRAG)?;
 
             gl.enable(glow::BLEND);
             gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
@@ -262,6 +273,7 @@ impl Renderer {
             Ok(Self {
                 gl,
                 program,
+                bg_program,
                 vao,
                 vbo,
                 uniforms,
@@ -468,9 +480,24 @@ impl Renderer {
         let bg = params.background;
         unsafe {
             gl.enable(glow::BLEND);
+            // The image shader outputs straight (non-premultiplied) alpha, so the
+            // image must composite over the backdrop with SRC_ALPHA. egui's painter
+            // leaves a *premultiplied* func set from the previous frame and never
+            // restores it; reset it here so transparent images (and the checkerboard
+            // showing through them) blend correctly, not just opaque ones.
+            gl.blend_equation(glow::FUNC_ADD);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
             gl.viewport(0, 0, w.max(1), h.max(1));
             gl.clear_color(bg[0], bg[1], bg[2], 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
+            // Checkerboard backdrop: an opaque fullscreen pass over the clear, drawn
+            // before the image so transparency / letterboxing reveals it.
+            if params.bg_checker {
+                gl.use_program(Some(self.bg_program));
+                gl.bind_vertex_array(Some(self.vao));
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                gl.bind_vertex_array(None);
+            }
         }
         self.draw_quad(params, 0, 0, w.max(1), h.max(1));
     }
@@ -654,6 +681,7 @@ impl Drop for Renderer {
             gl.delete_vertex_array(self.vao);
             gl.delete_buffer(self.vbo);
             gl.delete_program(self.program);
+            gl.delete_program(self.bg_program);
         }
     }
 }

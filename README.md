@@ -39,6 +39,7 @@ for Windows.
 | `W` | Toggle tiled wrap (2D) |
 | `I` | Toggle nearest ↔ bilinear filtering |
 | `M` | Toggle the navigation minimap (auto-shows on 2D pan/zoom; click/drag it to jump) |
+| `B` | Cycle the background backdrop (your setting → black → grey checkerboard → white) |
 
 ### Tone & files
 

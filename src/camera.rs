@@ -361,12 +361,16 @@ fn switched(cam: Camera, panorama: bool) -> Camera {
     }
 }
 
-/// Forward look direction for `(yaw, pitch)` (matches the shader's
-/// `rotation_yaw_pitch * (0,0,1)`).
+/// Forward look direction for `(yaw, pitch)`. MUST match the shader's
+/// `rotation_yaw_pitch(yaw, pitch) * vec3(0,0,1)` (and `app::pano_rotate`), or
+/// the equirect-uv ↔ look-angle conversions (minimap click, P-toggle) end up a
+/// mirror of what's rendered. GLSL `mat3` is column-major: that product works
+/// out to `(-sin(yaw)·cos(pitch), sin(pitch), cos(yaw)·cos(pitch))`. The
+/// `forward_dir_matches_shader` test guards this.
 fn forward_dir(yaw: f32, pitch: f32) -> Vec3 {
     Vec3::new(
-        yaw.sin() * pitch.cos(),
-        -pitch.sin(),
+        -yaw.sin() * pitch.cos(),
+        pitch.sin(),
         yaw.cos() * pitch.cos(),
     )
 }
@@ -385,10 +389,13 @@ fn pano_center_uv(yaw: f32, pitch: f32) -> Vec2 {
     direction_to_equirect_uv(forward_dir(yaw, pitch))
 }
 
-/// Inverse of `pano_center_uv`: the yaw/pitch that centres `uv`.
+/// Inverse of `pano_center_uv`: the yaw/pitch whose forward look centres `uv`.
+/// `pano_center_uv` maps `u = 0.25 - yaw/TAU`, `v = 0.5 - pitch/PI` (the shader's
+/// convention), so the inverse negates both — earlier this used the un-negated
+/// form, which left the minimap pano click mirrored on both axes.
 fn uv_to_yaw_pitch(uv: Vec2) -> (f32, f32) {
-    let yaw = TAU * uv.x - FRAC_PI_2;
-    let pitch = (PI * (uv.y - 0.5)).clamp(MIN_PITCH_RAD, MAX_PITCH_RAD);
+    let yaw = FRAC_PI_2 - TAU * uv.x;
+    let pitch = (PI * (0.5 - uv.y)).clamp(MIN_PITCH_RAD, MAX_PITCH_RAD);
     (yaw, pitch)
 }
 
@@ -522,6 +529,36 @@ mod tests {
             c.look_at_uv(uv);
             let got = c.camera.center_uv();
             assert!(uv_approx(uv, got, 1e-3), "look_at_uv {uv:?} -> {got:?}");
+        }
+    }
+
+    #[test]
+    fn forward_dir_matches_shader() {
+        // Replicate the fragment shader's `rotation_yaw_pitch(yaw,pitch)*vec3(0,0,1)`
+        // EXACTLY — GLSL mat3 is column-major — so the Rust panorama projection
+        // can't silently drift from what's rendered (that mirror was the minimap
+        // pano-click bug). This is the ground truth the round-trip tests can't see.
+        fn shader_forward(yaw: f32, pitch: f32) -> Vec3 {
+            let (cy, sy) = (yaw.cos(), yaw.sin());
+            let (cp, sp) = (pitch.cos(), pitch.sin());
+            // mp (pitch about X), columns (0,cp,-sp)/(0,sp,cp): mp*(0,0,1) = col2.
+            let r = Vec3::new(0.0, sp, cp);
+            // my (yaw about Y), columns (cy,0,sy)/(0,1,0)/(-sy,0,cy): my*r.
+            Vec3::new(
+                r.x * cy + r.z * (-sy),
+                r.y,
+                r.x * sy + r.z * cy,
+            )
+        }
+        for (yaw, pitch) in [(0.0_f32, 0.0_f32), (1.0, 0.5), (-2.0, -0.8), (3.0, 0.3)] {
+            let got = forward_dir(yaw, pitch);
+            let exp = shader_forward(yaw, pitch);
+            assert!(
+                (got.x - exp.x).abs() < 1e-5
+                    && (got.y - exp.y).abs() < 1e-5
+                    && (got.z - exp.z).abs() < 1e-5,
+                "forward_dir({yaw},{pitch}) = {got:?} != shader {exp:?}"
+            );
         }
     }
 

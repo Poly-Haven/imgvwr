@@ -52,8 +52,12 @@ cargo build --release
   that level's texels via `texelFetch`. Upscaling (`lod <= 0`) and the nearest toggle fall back to
   `texture()`/bilinear, so only minification pays the cost. Bit depth ≠ sRGB: a 16-bit PNG is
   `F32`+sRGB, so the gate is `is_u8` (`ImageData::is_u8`, threaded onto `ImageTexture`), *not*
-  `is_encoded_srgb`. Tiled (huge) images keep bilinear. `IMGVWR_DEBUG_NO_LANCZOS` forces it off for
-  A/B capture; verify via `IMGVWR_DEBUG_ZOOM` < 1 (downscale, differs) vs > 1 (upscale, identical).
+  `is_encoded_srgb`. Tiled (huge) images keep bilinear. Its `texelFetch` indices must mirror the
+  *live* wrap modes `draw_quad` sets for the bilinear path — S always `REPEAT`, T `REPEAT` only when
+  `u_wrap_2d` (else `CLAMP_TO_EDGE`); a static clamp on T stretched the top edge instead of tiling
+  vertically when wrap (W) was on. `IMGVWR_DEBUG_NO_LANCZOS` forces it off for A/B capture; verify
+  via `IMGVWR_DEBUG_ZOOM` < 1 (downscale, differs) vs > 1 (upscale, identical), and with
+  `IMGVWR_DEBUG_WRAP` for the tiling path.
 - **2D display rotation (Up/Down) is a per-image session property** (`App::rotation` 0–3 CW
   quarter-turns; remembered in `image_rotations` by path; not reset by R/Ctrl+R). It's applied
   purely in the shader: `u_image_aspect` is fed the *rotated* aspect and the sampler permutes the

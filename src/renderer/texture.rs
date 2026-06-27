@@ -63,9 +63,14 @@ vec4 sample_image_lanczos(vec2 uv) {
         float wy = lanczos3_w((float(j) - f.y) / R);
         for (int i = -4; i <= 5; i++) {
             float w = lanczos3_w((float(i) - f.x) / R) * wy;
-            // Match the texture wrap modes (REPEAT horizontally, CLAMP vertically).
+            // Match the live texture wrap modes draw_quad sets for the bilinear
+            // path: S is always REPEAT; T is REPEAT when 2D wrap (u_wrap_2d) is on,
+            // else CLAMP_TO_EDGE. (Clamping T unconditionally stretched the top edge
+            // instead of tiling vertically when wrap was enabled.)
             int cx = int(mod(base.x + float(i), float(sz.x)));
-            int cy = clamp(int(base.y) + j, 0, sz.y - 1);
+            int cy = u_wrap_2d
+                ? int(mod(base.y + float(j), float(sz.y)))
+                : clamp(int(base.y) + j, 0, sz.y - 1);
             sum += w * texelFetch(u_image, ivec2(cx, cy), int(level));
             wsum += w;
         }

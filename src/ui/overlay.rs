@@ -1286,18 +1286,36 @@ fn metadata_hud(
                             );
                             ui.end_row();
                         }
-                        // View transform: a dropdown of views, with a Display
-                        // sub-sub-menu, when OCIO is available.
-                        if inputs.has_image {
+                        // Colour management: a Display picker (only when the config
+                        // exposes more than one display) and a View picker whose
+                        // contents follow the active display — two single-level
+                        // dropdowns, no rightward sub-menus. Falls back to a plain
+                        // label when OCIO isn't available.
+                        let meta_label = |ui: &mut egui::Ui, text: &str| {
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new("View")
-                                        .color(egui::Color32::from_gray(150)),
+                                    egui::RichText::new(text).color(egui::Color32::from_gray(150)),
                                 )
                                 .selectable(false),
                             );
-                            view_menu_open = view_dropdown(ui, inputs, actions);
-                            ui.end_row();
+                        };
+                        if inputs.has_image {
+                            if !inputs.ocio_available {
+                                meta_label(ui, "View");
+                                ui.label(
+                                    egui::RichText::new("gamma 2.2").color(egui::Color32::WHITE),
+                                );
+                                ui.end_row();
+                            } else {
+                                if inputs.displays().len() > 1 {
+                                    meta_label(ui, "Display");
+                                    view_menu_open |= display_dropdown(ui, inputs, actions);
+                                    ui.end_row();
+                                }
+                                meta_label(ui, "View");
+                                view_menu_open |= view_dropdown(ui, inputs, actions);
+                                ui.end_row();
+                            }
                         }
                         // Channels: a clickable colour box per channel that
                         // isolates it as greyscale (click again to show all).
@@ -1418,71 +1436,86 @@ fn channel_box(
 /// inline, plus a `Display ›` sub-menu whose entries open each display's views.
 /// Returns whether the menu (or one of its sub-menus) is currently open, so the
 /// caller can keep the metadata box revealed while the user navigates it.
-fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>) -> bool {
-    let current = inputs
-        .active
-        .as_ref()
-        .map(|(d, v)| format!("{d}/{v}"))
-        .unwrap_or_else(|| "gamma 2.2".to_string());
-    if !inputs.ocio_available {
-        ui.label(egui::RichText::new(current).color(egui::Color32::WHITE));
-        return false;
-    }
-    let active_display = inputs
-        .active
-        .as_ref()
-        .map(|(d, _)| d.clone())
-        .or_else(|| inputs.displays().first().cloned())
-        .unwrap_or_default();
-    // The trigger uses an SVG chevron icon (not a font glyph) before the current
-    // view name. The nested "Display" sub-menus get egui's own ▸ arrow, so they
-    // carry no manual one (that produced a double arrow).
+/// The shared dropdown trigger: an SVG chevron-down icon before the current
+/// value. Used by both the Display and View pickers (no nested sub-menus — they
+/// opened rightward off the screen edge; the two are single-level instead).
+fn chevron_button(current: &str) -> egui::Button<'static> {
     let chevron = egui::Image::new(egui::include_image!(
         "../../resources/icons/ui/chevron-down.svg"
     ))
     .tint(egui::Color32::WHITE)
     .fit_to_exact_size(egui::vec2(10.0, 10.0));
-    let button = egui::Button::image_and_text(
+    egui::Button::image_and_text(
         chevron,
-        egui::RichText::new(current).color(egui::Color32::WHITE),
-    );
-    // The menu state lives in egui's `BarState`, keyed by this ui's id.
+        egui::RichText::new(current.to_owned()).color(egui::Color32::WHITE),
+    )
+}
+
+/// The OCIO display the View picker lists views for: the active display, else
+/// the first one in the config.
+fn active_display(inputs: &UiInputs) -> String {
+    inputs
+        .active
+        .as_ref()
+        .map(|(d, _)| d.clone())
+        .or_else(|| inputs.displays().first().cloned())
+        .unwrap_or_default()
+}
+
+/// Single-level Display picker. Selecting a display keeps the current view if it
+/// is valid for that display, else falls back to "Standard", else the first
+/// view. Returns whether its menu is open (to keep the metadata box revealed).
+fn display_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>) -> bool {
+    let current = active_display(inputs);
+    let current_view = inputs.active.as_ref().map(|(_, v)| v.clone());
     let bar_id = ui.id();
-    egui::menu::menu_custom_button(ui, button, |ui| {
-        for view in inputs.views_for(&active_display) {
-            let is_active = inputs
-                .active
-                .as_ref()
-                .is_some_and(|(d, v)| d == &active_display && v == &view);
-            if ui.selectable_label(is_active, &view).clicked() {
+    egui::menu::menu_custom_button(ui, chevron_button(&current), |ui| {
+        for display in inputs.displays() {
+            if ui
+                .selectable_label(display == current, &display)
+                .clicked()
+            {
+                let views = inputs.views_for(&display);
+                // Keep the current view if it's valid for the new display, else
+                // revert to Standard (then Raw, then the first view) — matching the
+                // case-insensitive Standard→Raw convention used elsewhere (the T
+                // toggle, select_standard_view, the SetView handler).
+                let view = current_view
+                    .clone()
+                    .filter(|v| views.contains(v))
+                    .or_else(|| views.iter().find(|v| v.eq_ignore_ascii_case("standard")).cloned())
+                    .or_else(|| views.iter().find(|v| v.eq_ignore_ascii_case("raw")).cloned())
+                    .or_else(|| views.first().cloned())
+                    .unwrap_or_default();
+                actions.push(UiAction::SetView { display, view });
+                ui.close_menu();
+            }
+        }
+    });
+    egui::menu::BarState::load(ui.ctx(), bar_id).is_some()
+}
+
+/// Single-level View picker, listing the views available for the active display
+/// (so its contents follow the Display picker). Returns whether its menu is open.
+fn view_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>) -> bool {
+    let display = active_display(inputs);
+    let current_view = inputs
+        .active
+        .as_ref()
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    let bar_id = ui.id();
+    egui::menu::menu_custom_button(ui, chevron_button(&current_view), |ui| {
+        for view in inputs.views_for(&display) {
+            if ui.selectable_label(view == current_view, &view).clicked() {
                 actions.push(UiAction::SetView {
-                    display: active_display.clone(),
-                    view: view.clone(),
+                    display: display.clone(),
+                    view,
                 });
                 ui.close_menu();
             }
         }
-        ui.separator();
-        ui.menu_button("Display", |ui| {
-            for display in inputs.displays() {
-                ui.menu_button(display.clone(), |ui| {
-                    for view in inputs.views_for(&display) {
-                        if ui.selectable_label(false, &view).clicked() {
-                            actions.push(UiAction::SetView {
-                                display: display.clone(),
-                                view: view.clone(),
-                            });
-                            ui.close_menu();
-                        }
-                    }
-                });
-            }
-        });
     });
-    // Whether the View menu (or a sub-menu) is open. The menu_custom_button
-    // return's `.inner` is NOT a reliable signal — egui only surfaces it on the
-    // frame the menu *closes*, so it reads false the whole time the menu is open.
-    // The authoritative state is egui's stored BarState for this ui's id.
     egui::menu::BarState::load(ui.ctx(), bar_id).is_some()
 }
 

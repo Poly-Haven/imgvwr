@@ -1627,7 +1627,7 @@ checksum = "029d73f573d8e8d63e6d5020011d3255b28c3ba85d6cf870a07184ed23de9284"
 
 [[package]]
 name = "imgvwr"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "bindgen",

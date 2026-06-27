@@ -89,7 +89,7 @@ for Windows.
 | `1`–`9` (top row) | Recall a saved slot; press again to toggle back |
 | `Alt` + `1`–`9` | Show the difference vs that slot's image (processing applies to the diff) |
 | `L` | Lock zoom/pan across images |
-| `H` | Show keyboard / mouse help |
+| `H` | Show keyboard / mouse help (with version + GitHub link) |
 
 Arrow-key navigation pre-decodes the next image in the background so stepping
 through a folder is instant. **L** locks the current zoom/pan (and exposure) so

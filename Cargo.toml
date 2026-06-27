@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 description = "A minimal, GPU-accelerated viewer for HDR panoramas and standard images."
 license = "MIT"
-repository = "https://github.com/gregzaal/imgvwr"
+repository = "https://github.com/Poly-Haven/imgvwr"
 readme = "README.md"
 default-run = "imgvwr"
 

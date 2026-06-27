@@ -1611,8 +1611,17 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
     const ROW_GAP: f32 = 14.0;
     const SCREEN_MARGIN: f32 = 24.0; // keep the dialog off the very window edges
     const FRAME_PAD: f32 = 16.0; // overlay_frame inner margin
-    const TITLE_H: f32 = 34.0; // title label + spacing
+    const TITLE_H: f32 = 56.0; // title label + version/link subtitle + spacing
     const FOOTER_H: f32 = 44.0; // spacing + button row
+
+    // App version + repository link, shown as a subtitle under the title. The repo
+    // URL comes straight from Cargo.toml so the link can never drift from the
+    // manifest; the visible label just drops the scheme.
+    const VERSION_LINE: &str = concat!("imgvwr v", env!("CARGO_PKG_VERSION"));
+    const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
+    let repo_label = REPO_URL
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
 
     // Measure with the real body font so the column count and the omission
     // decision match what egui will actually lay out.
@@ -1701,7 +1710,20 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
         let n = end - start;
         sec_widths[start..end].iter().sum::<f32>() + n.saturating_sub(1) as f32 * COL_GAP
     };
-    let mut content_w = title_w;
+    // The version/link subtitle must fit on one line too, so it widens the dialog
+    // when the sections alone would be narrower than it. Measure at the SAME 13px
+    // the labels render at (not the 14px Body that `text_w` uses), so the width
+    // mirrors the render exactly: [version] 6px [·] 6px [link] (the item_spacing
+    // set below). A measure≠render mismatch would shove the subtitle off-centre.
+    let sub_w = |s: &str| {
+        ctx.fonts(|f| {
+            f.layout_no_wrap(s.to_string(), egui::FontId::proportional(13.0), egui::Color32::WHITE)
+                .size()
+                .x
+        })
+    };
+    let subtitle_w = sub_w(VERSION_LINE) + 6.0 + sub_w("·") + 6.0 + sub_w(repo_label);
+    let mut content_w = title_w.max(subtitle_w);
     for row_start in (0..keep).step_by(cols) {
         content_w = content_w.max(row_w(row_start, (row_start + cols).min(keep)));
     }
@@ -1733,6 +1755,29 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                             .color(egui::Color32::WHITE)
                             .size(18.0),
                     );
+                });
+                ui.add_space(2.0);
+                // App version + clickable repository link (opens in the browser via
+                // egui's hyperlink handling). The label drops the URL scheme.
+                // Centred with manual padding — a nested horizontal group isn't
+                // reliably centred by vertical_centered (the footer does the same).
+                ui.horizontal(|ui| {
+                    ui.add_space((content_w - subtitle_w).max(0.0) * 0.5);
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(
+                        egui::RichText::new(VERSION_LINE)
+                            .color(egui::Color32::from_gray(150))
+                            .size(13.0),
+                    );
+                    ui.label(
+                        egui::RichText::new("·")
+                            .color(egui::Color32::from_gray(110))
+                            .size(13.0),
+                    );
+                    clickable(
+                        ui.hyperlink_to(egui::RichText::new(repo_label).size(13.0), REPO_URL),
+                    )
+                    .on_hover_text(REPO_URL);
                 });
                 ui.add_space(10.0);
                 // Cap the body height so a too-short window scrolls the sections

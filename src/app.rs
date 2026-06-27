@@ -418,6 +418,12 @@ pub struct App {
     // Borderless window interaction.
     /// True while the cursor is inside the window, driving the titlebar reveal.
     cursor_in_window: bool,
+    /// True once the user has physically moved the mouse (`DeviceEvent::MouseMotion`)
+    /// since the last window geometry change. Cleared on `Resized`/`Moved`: a
+    /// window-follow resize slides an edge under a stationary cursor (winit still
+    /// reports `CursorMoved`), and that must NOT pop the edge panels / minimap —
+    /// only a real mouse move reveals them. An already-open panel stays open.
+    cursor_moved_by_user: bool,
     /// Slide-in progress 0..1 for the auto-hiding panels (0 = tucked off the
     /// window edge, 1 = fully in). Ramped over `SLIDE_SECS` toward each panel's
     /// visibility so they slide rather than pop.
@@ -624,6 +630,7 @@ impl App {
             last_window_ease: None,
             animating: false,
             cursor_in_window: false,
+            cursor_moved_by_user: false,
             titlebar_slide: 0.0,
             metadata_slide: 0.0,
             bottom_slide: 0.0,
@@ -1395,6 +1402,10 @@ impl App {
             let (dw, dh) = self.frame_dims();
             self.resize_window_to_image(dw, dh);
         }
+        // Don't let the new image's camera reset (e.g. a fresh panorama's yaw/
+        // pitch/fov) read as a "view moved" and auto-pop the minimap — the minimap
+        // should only auto-show on a real pan/zoom/look gesture, not on navigation.
+        self.minimap_prev_view = None;
         self.apply_debug_overrides();
 
         // Look-ahead: once arrow-navigating, decode the next neighbour in the
@@ -3003,7 +3014,10 @@ impl App {
             .as_ref()
             .map(|g| g.window.scale_factor())
             .unwrap_or(1.0);
-        self.cursor_pos.y <= 56.0 * scale
+        let near_top = self.cursor_pos.y <= 56.0 * scale;
+        // Reveal only on a real mouse move; keep it shown once up (slide > ~0) so a
+        // window resize under a stationary cursor doesn't flash it.
+        near_top && (self.cursor_moved_by_user || self.titlebar_slide > 0.01)
     }
 
     /// The image↔screen mapping the rulers need. In 2D it mirrors the shader's UV
@@ -3711,7 +3725,12 @@ impl App {
             })
             .unwrap_or((1.0, 0.0));
         let near_bottom = self.cursor_in_window && self.cursor_pos.y >= vh - (44.0 * scale) as f64;
-        if (near_bottom || self.ui_state.pointer_over_panel) && !self.window_is_small() {
+        // The near-edge reveal only fires on a real mouse move (or to keep an
+        // already-shown panel up); a window-follow resize sliding the bottom edge
+        // under a stationary cursor must not pop it. Hovering the panel itself
+        // (egui) always keeps it up.
+        let reveal_edge = near_bottom && (self.bottom_visible || self.cursor_moved_by_user);
+        if (reveal_edge || self.ui_state.pointer_over_panel) && !self.window_is_small() {
             self.bottom_visible = true;
             self.bottom_hide_deadline = None;
         } else if self.bottom_visible {
@@ -3738,9 +3757,12 @@ impl App {
             .map(|g| g.window.scale_factor() as f32)
             .unwrap_or(1.0);
         let near_left = self.cursor_in_window && self.cursor_pos.x <= (44.0 * scale) as f64;
+        // Reveal on a real mouse move only (or keep it up once shown); a window
+        // resize sliding the left edge under a stationary cursor must not pop it.
+        let reveal_edge = near_left && (self.left_ruler_visible || self.cursor_moved_by_user);
         // Rulers show in both 2D (pixels) and panorama (degrees).
         let eligible = !self.window_is_small() && self.file_info.width != 0;
-        let show = eligible && (near_left || self.ui_state.pointer_over_left_ruler);
+        let show = eligible && (reveal_edge || self.ui_state.pointer_over_left_ruler);
         if show {
             self.left_ruler_visible = true;
             self.left_ruler_hide_deadline = None;
@@ -3781,7 +3803,12 @@ impl App {
         let near_corner = self.cursor_in_window
             && (vw as f64 - self.cursor_pos.x) + self.cursor_pos.y <= edge
             && !self.window_is_small();
-        if near_corner || self.ui_state.pointer_over_metadata || menu_sticky {
+        // The corner reveal only fires on a real mouse move (or to keep the box
+        // up once shown); a window-follow resize sliding the top-right corner
+        // under a stationary cursor must not pop it. Hovering the box / an open
+        // menu always keep it up.
+        let reveal_edge = near_corner && (self.metadata_hover || self.cursor_moved_by_user);
+        if reveal_edge || self.ui_state.pointer_over_metadata || menu_sticky {
             self.metadata_hover = true;
             self.metadata_hide_deadline = None;
         } else if self.metadata_hover {
@@ -4266,6 +4293,12 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                // The window geometry changed: a stationary cursor is now over a
+                // different part of the window, so disarm hover reveals until the
+                // user actually moves the mouse again (a real move re-arms via
+                // DeviceEvent::MouseMotion). Window-follow during arrow-nav is the
+                // motivating case.
+                self.cursor_moved_by_user = false;
                 if let Some(gfx) = &self.gfx {
                     if let (Some(w), Some(h)) =
                         (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
@@ -4308,6 +4341,12 @@ impl ApplicationHandler<UserEvent> for App {
                 // Advancing from `about_to_wait` lets input be processed between
                 // every step while this synchronous render still presents each
                 // size exactly once (vsync-paced, no double-present).
+            }
+            WindowEvent::Moved(_) => {
+                // Same as Resized: a programmatic reposition (window-follow recentre
+                // on arrow-nav) slides the window under a stationary cursor; disarm
+                // hover reveals until the next real mouse move.
+                self.cursor_moved_by_user = false;
             }
             WindowEvent::RedrawRequested => {
                 if matches!(self.render(), RenderOutcome::Captured) {
@@ -4456,6 +4495,13 @@ impl ApplicationHandler<UserEvent> for App {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta } = event {
+            // A real, physical mouse move — arm the edge-panel / minimap reveals
+            // (a window-follow resize that slides the window under a stationary
+            // cursor produces CursorMoved but NOT this raw motion, so it stays
+            // disarmed). Any nonzero delta counts.
+            if delta.0 != 0.0 || delta.1 != 0.0 {
+                self.cursor_moved_by_user = true;
+            }
             // (Alt-resize is driven by CursorMoved, which tracks the visible
             // cursor 1:1 — not raw device motion.)
             if self.stretching {

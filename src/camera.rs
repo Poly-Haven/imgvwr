@@ -168,10 +168,20 @@ impl CameraController {
     /// the (re-framed) window with no black canvas, rather than carrying a look
     /// direction across from panorama mode.
     pub fn center_flat_now(&mut self) {
+        self.fit_flat_now(1.0);
+    }
+
+    /// Snap the 2D view to centred at an explicit zoom — instant. No-op on `Pano`.
+    /// Used for the fullscreen fit (which may be < 1.0 so a sub-screen image shows
+    /// at native 1:1). Only a tiny numerical floor is applied — NOT the scroll
+    /// zoom-out limit (`flat_zoom_min`), so a much-smaller-than-screen image still
+    /// lands at strict 1:1 rather than being magnified up to that limit.
+    pub fn fit_flat_now(&mut self, zoom: f32) {
+        let z = zoom.max(1e-4);
         for cam in [&mut self.camera, &mut self.target] {
             if let Camera::Flat { pan, zoom } = cam {
                 *pan = Vec2::ZERO;
-                *zoom = 1.0;
+                *zoom = z;
             }
         }
     }
@@ -529,6 +539,23 @@ mod tests {
             c.look_at_uv(uv);
             let got = c.camera.center_uv();
             assert!(uv_approx(uv, got, 1e-3), "look_at_uv {uv:?} -> {got:?}");
+        }
+    }
+
+    #[test]
+    fn fit_flat_now_allows_below_scroll_zoom_out_limit() {
+        // The fullscreen fit for a much-smaller-than-screen image needs a zoom below
+        // the scroll zoom-out limit so it shows at strict 1:1, not magnified up.
+        let mut c = CameraController::for_image(false); // 2D
+        let tiny = 1e-3_f32;
+        assert!(tiny < flat_zoom_min(), "test premise: tiny < scroll min");
+        c.fit_flat_now(tiny);
+        match c.camera {
+            Camera::Flat { zoom, pan } => {
+                assert!((zoom - tiny).abs() < 1e-9, "fit zoom clamped up to {zoom}");
+                assert_eq!(pan, Vec2::ZERO);
+            }
+            _ => panic!("expected Flat"),
         }
     }
 

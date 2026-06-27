@@ -101,6 +101,9 @@ const PANO_VIEW_SAMPLES: usize = 40;
 const MINIMAP_HOLD: Duration = Duration::from_millis(1800);
 const MINIMAP_FADE: f32 = 0.6;
 
+/// Fullscreen only: hide the mouse cursor after this long with no real movement.
+const CURSOR_IDLE_HIDE: Duration = Duration::from_millis(2500);
+
 /// Max decoded images kept in memory for instant navigation (current + a
 /// previous + a next, plus one spare so back-and-forth stays cached). Each entry
 /// can be several GB for 24k+ images, so this is deliberately small.
@@ -424,6 +427,17 @@ pub struct App {
     /// reports `CursorMoved`), and that must NOT pop the edge panels / minimap —
     /// only a real mouse move reveals them. An already-open panel stays open.
     cursor_moved_by_user: bool,
+    /// Wall-clock of the last real mouse move (`DeviceEvent::MouseMotion`), or the
+    /// last cursor-enter / fullscreen entry. Drives the fullscreen idle cursor
+    /// auto-hide: navigation emits no motion, so the cursor stays hidden until the
+    /// user actually moves it.
+    last_cursor_motion: Option<Instant>,
+    /// Whether the fullscreen idle auto-hide currently has the OS cursor hidden.
+    cursor_idle_hidden: bool,
+    /// Set on leaving fullscreen; the next (window-restore) Resized re-frames the
+    /// window to the *current* image and resets the 2D fit zoom (after navigating
+    /// in fullscreen the restored window size is stale).
+    refit_windowed_pending: bool,
     /// Slide-in progress 0..1 for the auto-hiding panels (0 = tucked off the
     /// window edge, 1 = fully in). Ramped over `SLIDE_SECS` toward each panel's
     /// visibility so they slide rather than pop.
@@ -631,6 +645,9 @@ impl App {
             animating: false,
             cursor_in_window: false,
             cursor_moved_by_user: false,
+            last_cursor_motion: None,
+            cursor_idle_hidden: false,
+            refit_windowed_pending: false,
             titlebar_slide: 0.0,
             metadata_slide: 0.0,
             bottom_slide: 0.0,
@@ -1401,6 +1418,10 @@ impl App {
         if !want_pano && !self.locked && !for_compare {
             let (dw, dh) = self.frame_dims();
             self.resize_window_to_image(dw, dh);
+            // In fullscreen there's no window to re-hug (resize is a no-op there),
+            // so fit to the screen — but show a sub-screen image at native 1:1
+            // rather than magnifying it. No-op when windowed.
+            self.apply_fullscreen_fit();
         }
         // Don't let the new image's camera reset (e.g. a fresh panorama's yaw/
         // pitch/fov) read as a "view moved" and auto-pop the minimap — the minimap
@@ -1672,6 +1693,10 @@ impl App {
             // back), ease the FOV to the default.
             self.camera.snap_look(0.0, 0.0);
             self.camera.set_fov(crate::camera::DEFAULT_PANO_FOV_DEG);
+        } else if self.fullscreen {
+            // No window to re-hug in fullscreen: fit to the screen, but show a
+            // sub-screen image at native 1:1 instead of magnifying it.
+            self.apply_fullscreen_fit();
         } else {
             // Fit the image: the window hugs it, so the fit zoom is 1.0.
             self.camera.set_zoom(1.0);
@@ -2120,6 +2145,9 @@ impl App {
             }
             gfx.window.set_cursor_visible(false);
         }
+        // The drag now owns cursor visibility; clear the idle-hide flag so its
+        // per-frame check doesn't fight (end_drag re-shows the cursor).
+        self.cursor_idle_hidden = false;
     }
 
     fn end_drag(&mut self) {
@@ -2480,10 +2508,98 @@ impl App {
         // SetWindowPos-ing the window and fight the fullscreen transition.
         self.window_anim_target = None;
         self.fullscreen = on;
+        if on {
+            // Fit the 2D image to the screen, showing a sub-screen image at native
+            // 1:1 rather than magnifying it. Compute against the target monitor's
+            // size — for Borderless(None) that's exactly the fullscreen viewport,
+            // which the async resize hasn't applied yet. Restart the idle timer.
+            if !self.camera.is_panorama() {
+                let mon = self
+                    .gfx
+                    .as_ref()
+                    .and_then(|g| g.window.current_monitor())
+                    .map(|m| m.size());
+                if let Some(s) = mon {
+                    let z = self.fit_no_upscale_zoom(s.width.max(1) as f32, s.height.max(1) as f32);
+                    self.camera.fit_flat_now(z);
+                }
+            }
+            self.last_cursor_motion = Some(Instant::now());
+        } else {
+            // Leaving fullscreen: re-frame the window to the *current* image and
+            // reset the fit on the restore Resized (its size is stale after
+            // navigating in fullscreen, and a fullscreen sub-screen fit zoom would
+            // shrink the image in the smaller window). Reveal the cursor.
+            self.refit_windowed_pending = true;
+            self.show_cursor_now();
+        }
         if let Some(gfx) = &self.gfx {
             gfx.window
                 .set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
         }
+    }
+
+    /// 2D zoom that fits the image to the `(vw, vh)` viewport but never magnifies
+    /// past native 1:1 (device px). On-screen scale = `zoom * vh / img_h`, so a
+    /// fit-scale clamped to ≤ 1 converts to this zoom: a sub-viewport image lands
+    /// at native scale, a larger one shrinks to fit.
+    fn fit_no_upscale_zoom(&self, vw: f32, vh: f32) -> f32 {
+        let (iw, ih) = self.display_dims();
+        fit_zoom_no_upscale(vw, vh, iw.max(1) as f32, ih.max(1) as f32)
+    }
+
+    /// Centre the 2D image at the fullscreen "fit but don't upscale" zoom (small
+    /// images show at 1:1). No-op outside fullscreen or in panorama.
+    fn apply_fullscreen_fit(&mut self) {
+        if !self.fullscreen || self.camera.is_panorama() {
+            return;
+        }
+        let (vw, vh) = self.viewport();
+        let z = self.fit_no_upscale_zoom(vw, vh);
+        self.camera.fit_flat_now(z);
+    }
+
+    /// Reveal the OS cursor and reset the fullscreen idle-hide state.
+    fn show_cursor_now(&mut self) {
+        if self.cursor_idle_hidden {
+            if let Some(gfx) = &self.gfx {
+                gfx.window.set_cursor_visible(true);
+            }
+            self.cursor_idle_hidden = false;
+        }
+    }
+
+    /// Fullscreen only: hide the cursor after `CURSOR_IDLE_HIDE` of no real motion,
+    /// show it otherwise. Idempotent (only touches the OS state on a change). Driven
+    /// from `about_to_wait` (per loop iteration, scheduled to wake at the deadline)
+    /// and from the motion handler (instant show). Navigation emits no motion, so a
+    /// hidden cursor stays hidden across image changes until the user moves it.
+    /// Any in-progress pointer gesture (pan/look, squash-stretch, alt-resize,
+    /// guide or minimap drag). The cursor must stay visible through these even if
+    /// the user pauses mid-gesture, so they suppress the fullscreen idle-hide.
+    fn in_gesture(&self) -> bool {
+        self.dragging
+            || self.stretching
+            || self.alt_resize.is_some()
+            || self.guide_drag.is_some()
+            || self.minimap_drag
+            || self.ui_state.guide_spawn.is_some()
+    }
+
+    fn update_cursor_idle_hide(&mut self) {
+        let idle = self.fullscreen
+            && self.cursor_in_window
+            && !self.in_gesture()
+            && self
+                .last_cursor_motion
+                .is_some_and(|t| t.elapsed() >= CURSOR_IDLE_HIDE);
+        if idle == self.cursor_idle_hidden {
+            return;
+        }
+        if let Some(gfx) = &self.gfx {
+            gfx.window.set_cursor_visible(!idle);
+        }
+        self.cursor_idle_hidden = idle;
     }
 
     /// Cut any in-flight zoom/pan/window animation short at its current value so
@@ -4313,6 +4429,19 @@ impl ApplicationHandler<UserEvent> for App {
                     let radius = if rounded { self.prefs.corner_radius } else { 0 };
                     apply_window_corners(&gfx.window, radius);
                 }
+                // The window has restored to a (now stale) windowed size after
+                // leaving fullscreen: re-frame it to the *current* image and reset
+                // the 2D fit zoom, so navigating in fullscreen then exiting lands on
+                // a correctly-framed window. (Entry fits from the monitor size in
+                // set_fullscreen, so it needs nothing here.)
+                if self.refit_windowed_pending && !self.fullscreen {
+                    self.refit_windowed_pending = false;
+                    if !self.camera.is_panorama() {
+                        let (dw, dh) = self.frame_dims();
+                        self.resize_window_to_image(dw, dh);
+                        self.camera.fit_flat_now(1.0);
+                    }
+                }
                 // Redraw synchronously so the new surface size is presented this
                 // frame (otherwise the previous frame shows stretched). During an
                 // Alt-resize, skip the synchronous (vsync-blocked) redraw — its
@@ -4393,6 +4522,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorEntered { .. } => {
                 self.cursor_in_window = true;
+                // Give the cursor a fresh idle period after it (re-)enters.
+                self.last_cursor_motion = Some(Instant::now());
                 self.request_redraw();
             }
             WindowEvent::CursorLeft { .. } => {
@@ -4501,6 +4632,10 @@ impl ApplicationHandler<UserEvent> for App {
             // disarmed). Any nonzero delta counts.
             if delta.0 != 0.0 || delta.1 != 0.0 {
                 self.cursor_moved_by_user = true;
+                // Restart the fullscreen idle-hide timer and reveal the cursor if it
+                // was hidden (instant, not waiting for the next frame).
+                self.last_cursor_motion = Some(Instant::now());
+                self.show_cursor_now();
             }
             // (Alt-resize is driven by CursorMoved, which tracks the visible
             // cursor 1:1 — not raw device motion.)
@@ -4548,6 +4683,16 @@ impl ApplicationHandler<UserEvent> for App {
         if easing {
             self.ease_window();
         }
+        // Fullscreen idle cursor auto-hide: hide once the no-motion timer expires.
+        // Runs every loop iteration; the deadline is added to the wait scheduling
+        // below so the loop wakes to perform the hide even when otherwise idle.
+        self.update_cursor_idle_hide();
+        let cursor_idle_deadline = (self.fullscreen
+            && self.cursor_in_window
+            && !self.in_gesture()
+            && !self.cursor_idle_hidden)
+            .then(|| self.last_cursor_motion.map(|t| t + CURSOR_IDLE_HIDE))
+            .flatten();
         if self.capture_active() {
             // Drive continuous frames while a capture is pending.
             event_loop.set_control_flow(ControlFlow::Poll);
@@ -4570,12 +4715,18 @@ impl ApplicationHandler<UserEvent> for App {
             let next = Instant::now() + Duration::from_millis(16);
             event_loop.set_control_flow(ControlFlow::WaitUntil(next));
             self.request_redraw();
-        } else if let Some(deadline) = [self.bottom_hide_deadline, self.metadata_hide_deadline]
-            .into_iter()
-            .flatten()
-            .min()
+        } else if let Some(deadline) = [
+            self.bottom_hide_deadline,
+            self.metadata_hide_deadline,
+            cursor_idle_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
         {
-            // Wake at the earliest hide deadline (toolbar / metadata box).
+            // Wake at the earliest pending deadline (panel hide, or the fullscreen
+            // cursor idle-hide). The cursor hide runs in `update_cursor_idle_hide`
+            // at the top of the next iteration; no redraw needed for it.
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
             if Instant::now() >= deadline {
                 self.request_redraw();
@@ -4616,6 +4767,15 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::PreloadFinished(_gen) => self.poll_preloads(),
         }
     }
+}
+
+/// 2D zoom that fits an `iw`×`ih` image into a `vw`×`vh` viewport but never
+/// magnifies past native 1:1 (device px). On-screen scale = `zoom * vh / img_h`
+/// (matching `set_exact_zoom`), so a fit-scale clamped to ≤ 1 maps to this zoom:
+/// a sub-viewport image lands at native scale, a larger one shrinks to fit.
+fn fit_zoom_no_upscale(vw: f32, vh: f32, iw: f32, ih: f32) -> f32 {
+    let s_fit = (vw / iw.max(1.0)).min(vh / ih.max(1.0));
+    s_fit.min(1.0) * (ih.max(1.0) / vh.max(1.0))
 }
 
 /// Uniformly scale `iw`×`ih` down to fit within [`FILL_FRACTION`] of `monitor`
@@ -5347,6 +5507,31 @@ mod tests {
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         (0..3).all(|i| (a[i] - b[i]).abs() < 2.0 / 255.0)
+    }
+
+    #[test]
+    fn fullscreen_fit_never_upscales() {
+        // On-screen scale (device px per image px) for a zoom is zoom * vh / ih.
+        let scale = |z: f32, ih: f32, vh: f32| z * vh / ih;
+        let eps = 1e-4;
+        // Sub-screen image -> native 1:1 (scale == 1).
+        let z = fit_zoom_no_upscale(2560.0, 1440.0, 800.0, 600.0);
+        assert!((scale(z, 600.0, 1440.0) - 1.0).abs() < eps, "small -> 1:1");
+        // Larger-than-screen image -> shrinks to fit (scale == fit < 1).
+        let z = fit_zoom_no_upscale(2560.0, 1440.0, 4000.0, 3000.0);
+        let s = scale(z, 3000.0, 1440.0);
+        assert!(s < 1.0 && (s - 0.48).abs() < eps, "large -> fit 0.48, got {s}");
+        // Wide image (wider than the screen, but shorter) -> fits to width.
+        let z = fit_zoom_no_upscale(2560.0, 1440.0, 5000.0, 1000.0);
+        let s = scale(z, 1000.0, 1440.0);
+        assert!((s - 2560.0 / 5000.0).abs() < eps, "wide -> fit width, got {s}");
+        // Exactly screen-sized -> 1:1.
+        let z = fit_zoom_no_upscale(2560.0, 1440.0, 2560.0, 1440.0);
+        assert!((scale(z, 1440.0, 1440.0) - 1.0).abs() < eps, "exact -> 1:1");
+        // Much-smaller-than-screen -> still strict 1:1 (the camera clamp must not
+        // magnify it up to the scroll zoom-out limit).
+        let z = fit_zoom_no_upscale(2560.0, 1440.0, 50.0, 50.0);
+        assert!((scale(z, 50.0, 1440.0) - 1.0).abs() < eps, "tiny -> 1:1");
     }
 
     #[test]

@@ -8,6 +8,12 @@ use super::{clickable, PanoProj, RulerInfo, UiAction, UiInputs, UiState};
 /// Height of the borderless custom titlebar; the top strip is reserved for it so
 /// the slot flags / metadata box never sit under the window controls.
 const TITLEBAR_H: f32 = 30.0;
+/// Allocation width of a titlebar control button and of the app icon. Shared by
+/// the render and the overflow-fit math ([`titlebar_fit`]) so they can't desync —
+/// if the two disagreed, the filename's reserved space would be wrong and it would
+/// truncate even when a button was hidden to make room.
+const TB_BTN_W: f32 = 34.0;
+const TB_ICON_W: f32 = 26.0;
 
 fn overlay_frame() -> egui::Frame {
     egui::Frame {
@@ -862,10 +868,62 @@ fn settings_dialog(
         });
 }
 
+/// Which optional titlebar elements are shown at the current width (close and the
+/// filename are always present, so they're not listed here).
+struct TitlebarFit {
+    minimize: bool,
+    settings: bool,
+    maximize: bool,
+    app_icon: bool,
+    open: bool,
+}
+
+/// Decide which optional titlebar elements fit, given the window width and the
+/// (accurately measured) filename width. Elements are dropped lowest-priority
+/// first; the full priority, highest kept the longest → lowest dropped first, is:
+/// close, filename, minimize, settings, maximize, app-icon, open. Close is always
+/// shown and the filename is elastic (it truncates with an ellipsis), and the
+/// filename outranks every button — so a long name pushes the buttons out before
+/// it begins to shrink. Strict priority: a lower-priority element is never shown
+/// while a higher-priority one is hidden.
+fn titlebar_fit(width: f32, name_text_w: f32) -> TitlebarFit {
+    const NAME_PAD: f32 = 12.0; // 6px left inset + a little gap before the next item
+    // Space left after reserving close + the filename's full width. Each button is
+    // then granted in priority order only if it still fits, and once one doesn't,
+    // every lower-priority one is dropped too (the `&&` chain).
+    let mut rem = width - TB_BTN_W - (name_text_w + NAME_PAD);
+    let minimize = rem >= TB_BTN_W;
+    if minimize {
+        rem -= TB_BTN_W;
+    }
+    let settings = minimize && rem >= TB_BTN_W;
+    if settings {
+        rem -= TB_BTN_W;
+    }
+    let maximize = settings && rem >= TB_BTN_W;
+    if maximize {
+        rem -= TB_BTN_W;
+    }
+    let app_icon = maximize && rem >= TB_ICON_W;
+    if app_icon {
+        rem -= TB_ICON_W;
+    }
+    let open = app_icon && rem >= TB_BTN_W;
+    TitlebarFit {
+        minimize,
+        settings,
+        maximize,
+        app_icon,
+        open,
+    }
+}
+
 /// The auto-hiding borderless titlebar: a drag strip showing the filename, plus
 /// minimize / maximize / close controls. Opacity is `inputs.titlebar_slide`
 /// (eased by the cursor entering/leaving the window). Dragging the strip moves
 /// the window (OS loop → Aero Snap); double-clicking it toggles fullscreen.
+/// Elements are selectively hidden by priority when the window is too narrow for
+/// all of them (see [`titlebar_fit`]).
 fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
     let slide = inputs.titlebar_slide.clamp(0.0, 1.0);
     if slide <= 0.001 {
@@ -879,6 +937,27 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
 
     let screen = ctx.screen_rect();
     let y = screen.top() - (1.0 - slide) * TITLEBAR_H;
+
+    // Filename (the drag-strip label), measured with the exact font it is drawn in
+    // so the overflow logic below is pixel-accurate.
+    let name = if inputs.title.is_empty() {
+        "imgvwr"
+    } else {
+        inputs.title.as_str()
+    };
+    let name_font = egui::FontId::proportional(13.0);
+    let name_text_w =
+        ctx.fonts(|f| f.layout_no_wrap(name.to_owned(), name_font.clone(), fg).size().x);
+
+    // Selectively hide elements when the window is too narrow for all of them.
+    let TitlebarFit {
+        minimize: show_minimize,
+        settings: show_settings,
+        maximize: show_maximize,
+        app_icon: show_app_icon,
+        open: show_open,
+    } = titlebar_fit(screen.width(), name_text_w);
+
     egui::Area::new(egui::Id::new("imgvwr_titlebar"))
         .fixed_pos(egui::pos2(screen.left(), y))
         .constrain(false)
@@ -889,8 +968,15 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
                     egui::vec2(screen.width(), TITLEBAR_H),
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
+                        // Pack elements edge-to-edge: the overflow reservation above
+                        // assumes exact button widths, so any inter-widget spacing
+                        // would eat into the filename's reserved space and truncate
+                        // it even when a button was hidden to make room. (Inherited
+                        // by the nested left-to-right group below.)
+                        ui.spacing_mut().item_spacing.x = 0.0;
                         // Window controls (laid out right-to-left): close, maximize,
-                        // min, then settings — Bootstrap SVG icons.
+                        // min, then settings — Bootstrap SVG icons. All but close are
+                        // dropped first when space is tight (see the priority above).
                         if titlebar_button(
                             ui,
                             egui::include_image!("../../resources/icons/ui/x-lg.svg"),
@@ -902,35 +988,39 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
                         {
                             actions.push(UiAction::Close);
                         }
-                        let max_icon = if inputs.is_maximized {
-                            egui::include_image!("../../resources/icons/ui/window-stack.svg")
-                        } else {
-                            egui::include_image!("../../resources/icons/ui/square.svg")
-                        };
-                        if titlebar_button(ui, max_icon, 13.0, a, false).clicked() {
-                            actions.push(UiAction::ToggleMaximize);
+                        if show_maximize {
+                            let max_icon = if inputs.is_maximized {
+                                egui::include_image!("../../resources/icons/ui/window-stack.svg")
+                            } else {
+                                egui::include_image!("../../resources/icons/ui/square.svg")
+                            };
+                            if titlebar_button(ui, max_icon, 13.0, a, false).clicked() {
+                                actions.push(UiAction::ToggleMaximize);
+                            }
                         }
-                        if titlebar_button(
-                            ui,
-                            egui::include_image!("../../resources/icons/ui/dash-lg.svg"),
-                            16.0,
-                            a,
-                            false,
-                        )
-                        .clicked()
+                        if show_minimize
+                            && titlebar_button(
+                                ui,
+                                egui::include_image!("../../resources/icons/ui/dash-lg.svg"),
+                                16.0,
+                                a,
+                                false,
+                            )
+                            .clicked()
                         {
                             actions.push(UiAction::Minimize);
                         }
-                        if titlebar_button(
-                            ui,
-                            // Filled gear: renders bolder/crisper at this size than
-                            // the thin-stroked outline gear (same as the Open icon).
-                            egui::include_image!("../../resources/icons/ui/gear-fill.svg"),
-                            15.0,
-                            a,
-                            false,
-                        )
-                        .clicked()
+                        if show_settings
+                            && titlebar_button(
+                                ui,
+                                // Filled gear: renders bolder/crisper at this size
+                                // than the thin-stroked outline gear (like Open).
+                                egui::include_image!("../../resources/icons/ui/gear-fill.svg"),
+                                15.0,
+                                a,
+                                false,
+                            )
+                            .clicked()
                         {
                             actions.push(UiAction::OpenSettings);
                         }
@@ -938,41 +1028,48 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
                         // icon-only Open button, then the filename over a drag region
                         // (move / double-click fullscreen).
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            if let Some(icon) = &inputs.icon {
-                                let (icon_rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(26.0, TITLEBAR_H),
-                                    egui::Sense::hover(),
-                                );
-                                let sz = 18.0;
-                                let img_rect = egui::Rect::from_center_size(
-                                    icon_rect.center() + egui::vec2(2.0, 0.0),
-                                    egui::vec2(sz, sz),
-                                );
-                                ui.painter().image(
-                                    icon.id(),
-                                    img_rect,
-                                    egui::Rect::from_min_max(
-                                        egui::pos2(0.0, 0.0),
-                                        egui::pos2(1.0, 1.0),
-                                    ),
-                                    egui::Color32::from_white_alpha(alpha(255)),
-                                );
+                            if show_app_icon {
+                                if let Some(icon) = &inputs.icon {
+                                    let (icon_rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(TB_ICON_W, TITLEBAR_H),
+                                        egui::Sense::hover(),
+                                    );
+                                    let sz = 18.0;
+                                    let img_rect = egui::Rect::from_center_size(
+                                        icon_rect.center() + egui::vec2(2.0, 0.0),
+                                        egui::vec2(sz, sz),
+                                    );
+                                    ui.painter().image(
+                                        icon.id(),
+                                        img_rect,
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(0.0, 0.0),
+                                            egui::pos2(1.0, 1.0),
+                                        ),
+                                        egui::Color32::from_white_alpha(alpha(255)),
+                                    );
+                                }
                             }
-                            if titlebar_button(
-                                ui,
-                                // Filled folder: renders bold/crisp at this size,
-                                // unlike the thin-stroked outline open-folder icon.
-                                egui::include_image!("../../resources/icons/ui/folder-fill.svg"),
-                                15.0,
-                                a,
-                                false,
-                            )
-                            .on_hover_text("Open file…")
-                            .clicked()
+                            if show_open
+                                && titlebar_button(
+                                    ui,
+                                    // Filled folder: renders bold/crisp at this size,
+                                    // unlike the thin-stroked outline open-folder icon.
+                                    egui::include_image!(
+                                        "../../resources/icons/ui/folder-fill.svg"
+                                    ),
+                                    15.0,
+                                    a,
+                                    false,
+                                )
+                                .on_hover_text("Open file…")
+                                .clicked()
                             {
                                 actions.push(UiAction::OpenFile);
                             }
-                            // Filename over the remaining drag strip.
+                            // Filename over the remaining drag strip, truncated with
+                            // an ellipsis to the space that's actually left (so it
+                            // never overruns the window controls).
                             let rect = ui.available_rect_before_wrap();
                             let drag = ui.interact(
                                 rect,
@@ -985,18 +1082,26 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
                             if drag.double_clicked() {
                                 actions.push(UiAction::ToggleFullscreen);
                             }
-                            let name = if inputs.title.is_empty() {
-                                "imgvwr"
-                            } else {
-                                inputs.title.as_str()
-                            };
-                            ui.painter().text(
-                                rect.left_center() + egui::vec2(6.0, 0.0),
-                                egui::Align2::LEFT_CENTER,
-                                name,
-                                egui::FontId::proportional(13.0),
-                                fg,
+                            let mut job = egui::text::LayoutJob::single_section(
+                                name.to_owned(),
+                                egui::TextFormat {
+                                    font_id: name_font.clone(),
+                                    color: fg,
+                                    ..Default::default()
+                                },
                             );
+                            job.wrap = egui::text::TextWrapping {
+                                max_width: (rect.width() - 6.0).max(0.0),
+                                max_rows: 1,
+                                break_anywhere: true,
+                                overflow_character: Some('…'),
+                            };
+                            let galley = ui.fonts(|f| f.layout_job(job));
+                            let pos = egui::pos2(
+                                rect.left() + 6.0,
+                                rect.center().y - galley.size().y * 0.5,
+                            );
+                            ui.painter().galley(pos, galley, fg);
                         });
                     },
                 );
@@ -1013,7 +1118,7 @@ fn titlebar_button(
     a: f32,
     danger: bool,
 ) -> egui::Response {
-    let btn = egui::vec2(34.0, ui.available_height());
+    let btn = egui::vec2(TB_BTN_W, ui.available_height());
     let (rect, resp) = ui.allocate_exact_size(btn, egui::Sense::click());
     if resp.hovered() {
         let hover = if danger {
@@ -1902,6 +2007,69 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
 
 #[cfg(test)]
 mod tests {
+    use super::{titlebar_fit, TitlebarFit};
+
+    impl TitlebarFit {
+        /// Count of optional elements shown (0..=5), for monotonicity checks.
+        fn count(&self) -> u32 {
+            [
+                self.minimize,
+                self.settings,
+                self.maximize,
+                self.app_icon,
+                self.open,
+            ]
+            .iter()
+            .filter(|&&b| b)
+            .count() as u32
+        }
+    }
+
+    #[test]
+    fn titlebar_fit_respects_strict_priority() {
+        // Across a sweep of widths and filename widths, a lower-priority element is
+        // never shown while a higher-priority one is hidden (minimize ≥ settings ≥
+        // maximize ≥ app-icon ≥ open).
+        for name_w in [0.0_f32, 40.0, 120.0, 300.0, 600.0] {
+            for w in (140..1400).step_by(7) {
+                let f = titlebar_fit(w as f32, name_w);
+                assert!(f.minimize || !f.settings, "settings without minimize");
+                assert!(f.settings || !f.maximize, "maximize without settings");
+                assert!(f.maximize || !f.app_icon, "app_icon without maximize");
+                assert!(f.app_icon || !f.open, "open without app_icon");
+            }
+        }
+    }
+
+    #[test]
+    fn titlebar_fit_is_monotonic_in_width() {
+        // For a fixed filename, growing the window only ever reveals elements — it
+        // never hides one that was shown at a narrower width (no flicker / churn).
+        for name_w in [40.0_f32, 200.0, 450.0] {
+            let mut prev = 0;
+            for w in (140..1400).step_by(3) {
+                let c = titlebar_fit(w as f32, name_w).count();
+                assert!(c >= prev, "element hidden as width grew at {w}px");
+                prev = c;
+            }
+        }
+    }
+
+    #[test]
+    fn titlebar_fit_endpoints() {
+        // A very long name leaves room for nothing but close + the (truncated) name.
+        let none = titlebar_fit(400.0, 600.0);
+        assert_eq!(none.count(), 0);
+        // A short name at a roomy width shows every element.
+        let all = titlebar_fit(400.0, 50.0);
+        assert!(all.minimize && all.settings && all.maximize && all.app_icon && all.open);
+        // A short name at the 170px minimum still fits the top few (close, name,
+        // minimize, settings) without overlap, but not all of them.
+        let tiny = titlebar_fit(170.0, 45.0);
+        assert!(tiny.minimize && tiny.settings);
+        assert!(!tiny.app_icon && !tiny.open);
+    }
+
     /// Build a stack of mock flags (like `slot_flags`) inside a RIGHT_CENTER
     /// Area and return the resulting Area rect (laid out against a 1000x800
     /// screen). Runs two frames so the area geometry settles.

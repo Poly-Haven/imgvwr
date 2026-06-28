@@ -1,6 +1,6 @@
 [package]
 name = "imgvwr"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "A minimal, GPU-accelerated viewer for HDR panoramas and standard images."
 license = "MIT"

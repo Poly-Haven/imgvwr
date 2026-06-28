@@ -258,6 +258,7 @@ struct UndoState {
     sharpness: bool,
     wrap_2d: bool,
     nearest_filter: bool,
+    nearest_auto: bool,
     image_stretch: Vec2,
 }
 
@@ -274,6 +275,7 @@ impl UndoState {
             sharpness: false,
             wrap_2d: false,
             nearest_filter: false,
+            nearest_auto: true,
             image_stretch: Vec2::ONE,
         }
     }
@@ -313,8 +315,13 @@ pub struct App {
     exposure_target: f32,
     gamma_target: f32,
     wrap_2d: bool,
-    /// Nearest-neighbour filtering instead of bilinear (I key).
+    /// Manual nearest-neighbour filtering choice (the value the I key last set),
+    /// used only while `nearest_auto` is false.
     nearest_filter: bool,
+    /// When true (the default), the sampling filter is chosen automatically: a 2D
+    /// image magnified past 200% samples nearest (crisp pixels), everything else
+    /// bilinear. The I key turns this off and pins `nearest_filter`.
+    nearest_auto: bool,
     /// Isolated channel shown as greyscale (0=R 1=G 2=B 3=A); `None` = all.
     isolate_channel: Option<u8>,
     /// Clarity (local-contrast) strength (0 = off) and blur radius (viewport px).
@@ -566,6 +573,7 @@ impl App {
             gamma_target: 1.0,
             wrap_2d: false,
             nearest_filter: false,
+            nearest_auto: true,
             isolate_channel: None,
             clarity_amount: 0.0,
             clarity_radius: 64.0,
@@ -1832,6 +1840,7 @@ impl App {
             sharpness: self.sharpness,
             wrap_2d: self.wrap_2d,
             nearest_filter: self.nearest_filter,
+            nearest_auto: self.nearest_auto,
             image_stretch: self.image_stretch,
         }
     }
@@ -1880,6 +1889,7 @@ impl App {
         self.sharpness = s.sharpness;
         self.wrap_2d = s.wrap_2d;
         self.nearest_filter = s.nearest_filter;
+        self.nearest_auto = s.nearest_auto;
         self.image_stretch = s.image_stretch;
         // Cancel any in-flight guide gesture (grab or ruler-spawn) so its release
         // can't move/keep/delete a guide against the just-replaced vector, and clear
@@ -2057,6 +2067,31 @@ impl App {
             },
         };
         self.show_toast(text);
+    }
+
+    /// Current (live, not eased target) 2D on-screen scale — device pixels per
+    /// image pixel, where 1.0 == 100% (1:1). `None` in panorama mode (no 2D zoom).
+    fn flat_scale_now(&self) -> Option<f32> {
+        let img_h = self.display_dims().1;
+        if img_h == 0 {
+            return None;
+        }
+        if let Camera::Flat { zoom, .. } = self.camera.camera {
+            let (_, vh) = self.viewport();
+            Some(zoom * vh / img_h as f32)
+        } else {
+            None
+        }
+    }
+
+    /// Whether to sample nearest-neighbour this frame. With `nearest_auto` (the
+    /// default) it's chosen automatically — a 2D image magnified past 200% reads
+    /// nearest (crisp pixels), everything else (and panoramas) bilinear. Once the I
+    /// key pins a manual choice (`nearest_auto` off) that value is used verbatim.
+    /// Feeds both the sampler and the Lanczos gate (`is_u8 && !nearest`), so a
+    /// manual nearest also turns Lanczos off, exactly as the auto path does.
+    fn effective_nearest(&self) -> bool {
+        pick_nearest(self.nearest_auto, self.nearest_filter, self.flat_scale_now())
     }
 
     /// Target 2D zoom as a percentage where 100% == 1 image px : 1 monitor px.
@@ -2428,7 +2463,10 @@ impl App {
             }
             (_, Some("f")) | (_, Some("F")) => self.toggle_fullscreen(),
             (_, Some("i")) | (_, Some("I")) => {
-                self.nearest_filter = !self.nearest_filter;
+                // Flip from whatever's on screen now (auto or manual) and pin it:
+                // the manual choice persists, disabling the >200% auto-switch.
+                self.nearest_filter = !self.effective_nearest();
+                self.nearest_auto = false;
                 self.show_toast(
                     if self.nearest_filter {
                         "Nearest"
@@ -4205,7 +4243,7 @@ impl App {
             half_fov_radians: cam.half_fov_radians(),
             tan_half_fov: cam.tan_half_fov(),
             wrap_2d: self.wrap_2d,
-            nearest: self.nearest_filter,
+            nearest: self.effective_nearest(),
             background: bg_color,
             bg_checker,
             isolate_channel: self.isolate_channel.map(|c| c as i32).unwrap_or(-1),
@@ -4781,6 +4819,18 @@ impl ApplicationHandler<UserEvent> for App {
 fn fit_zoom_no_upscale(vw: f32, vh: f32, iw: f32, ih: f32) -> f32 {
     let s_fit = (vw / iw.max(1.0)).min(vh / ih.max(1.0));
     s_fit.min(1.0) * (ih.max(1.0) / vh.max(1.0))
+}
+
+/// Choose nearest-neighbour vs bilinear. In `auto` mode a 2D image magnified past
+/// 200% (`scale > 2.0`, device px per image px) reads nearest for crisp pixels;
+/// panoramas (`scale == None`) and anything ≤ 200% stay bilinear. With `auto` off
+/// the pinned `manual` value (last set by the I key) is used verbatim.
+fn pick_nearest(auto: bool, manual: bool, scale: Option<f32>) -> bool {
+    if auto {
+        scale.is_some_and(|s| s > 2.0)
+    } else {
+        manual
+    }
 }
 
 /// Uniformly scale `iw`×`ih` down to fit within [`FILL_FRACTION`] of `monitor`
@@ -5512,6 +5562,49 @@ mod tests {
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         (0..3).all(|i| (a[i] - b[i]).abs() < 2.0 / 255.0)
+    }
+
+    #[test]
+    fn pick_nearest_auto_switches_above_200_percent() {
+        // Auto: nearest strictly above 200%, bilinear at/below, bilinear in pano.
+        assert!(!pick_nearest(true, false, Some(1.0)), "100% -> bilinear");
+        assert!(!pick_nearest(true, false, Some(2.0)), "exactly 200% -> bilinear");
+        assert!(pick_nearest(true, false, Some(2.0001)), "just over 200% -> nearest");
+        assert!(pick_nearest(true, false, Some(8.0)), "800% -> nearest");
+        assert!(!pick_nearest(true, true, None), "panorama -> bilinear (manual ignored in auto)");
+    }
+
+    #[test]
+    fn pick_nearest_manual_uses_pinned_value() {
+        // Manual (auto off): the pinned value wins regardless of zoom / mode.
+        assert!(pick_nearest(false, true, Some(1.0)));
+        assert!(pick_nearest(false, true, None));
+        assert!(!pick_nearest(false, false, Some(8.0)));
+    }
+
+    #[test]
+    fn i_key_toggle_flips_effective_then_persists() {
+        // Model the I-key handler: `manual = !effective; auto = false`, where
+        // `effective = pick_nearest(auto, manual, scale)`. It must flip whatever is
+        // currently on screen, lock it (auto off), and keep toggling thereafter.
+        let press = |auto: bool, manual: bool, scale: Option<f32>| {
+            let eff = pick_nearest(auto, manual, scale);
+            (false, !eff) // (new auto, new manual)
+        };
+
+        // From auto-nearest (250%): I -> manual bilinear, and it stays bilinear even
+        // if we later zoom back under 200%.
+        let (auto, manual) = press(true, false, Some(2.5));
+        assert!(!auto && !pick_nearest(auto, manual, Some(2.5)), "250%: nearest -> bilinear");
+        assert!(!pick_nearest(auto, manual, Some(1.0)), "persists under 200%");
+
+        // From auto-bilinear (150%): I -> manual nearest.
+        let (auto, manual) = press(true, false, Some(1.5));
+        assert!(!auto && pick_nearest(auto, manual, Some(1.5)), "150%: bilinear -> nearest");
+
+        // Pressing I again flips back (still manual).
+        let (auto, manual) = press(auto, manual, Some(1.5));
+        assert!(!auto && !pick_nearest(auto, manual, Some(1.5)), "second press flips back");
     }
 
     #[test]

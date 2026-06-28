@@ -1710,7 +1710,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("↑ / ↓", "Rotate 90° (remembered)"),
                 ("P", "Toggle 2D / panorama"),
                 ("W", "Toggle 2D tiled wrap"),
-                ("I", "Nearest / bilinear filtering"),
+                ("I", "Pin nearest / bilinear (auto: nearest > 200%)"),
                 ("M", "Navigation minimap"),
                 ("B", "Cycle background backdrop"),
             ],

@@ -73,6 +73,14 @@ cargo build --release
   vertically when wrap (W) was on. `IMGVWR_DEBUG_NO_LANCZOS` forces it off for A/B capture; verify
   via `IMGVWR_DEBUG_ZOOM` < 1 (downscale, differs) vs > 1 (upscale, identical), and with
   `IMGVWR_DEBUG_WRAP` for the tiling path.
+- **The `nearest` sampling flag is computed, not just the I-key toggle** (`App::effective_nearest`
+  → `pick_nearest`). By default (`nearest_auto`) a 2D image magnified past 200% (on-screen scale
+  `zoom * vh / img_h > 2.0`, via `flat_scale_now`) samples nearest for crisp pixels; panoramas and
+  everything ≤ 200% stay bilinear. The I key pins the *current* effective mode and clears
+  `nearest_auto`, so the manual choice persists. Both `nearest_auto`/`nearest_filter` are in
+  `UndoState`. This effective value feeds `RenderParams::nearest`, so the Lanczos gate above
+  (`is_u8 && !nearest`) tracks it automatically. Verify the auto switch with a checkerboard at
+  `IMGVWR_DEBUG_ZOOM=1.9` (bilinear, soft) vs `2.1` (nearest, crisp).
 - **2D display rotation (Up/Down) is a per-image session property** (`App::rotation` 0–3 CW
   quarter-turns; remembered in `image_rotations` by path; not reset by R/Ctrl+R). It's applied
   purely in the shader: `u_image_aspect` is fed the *rotated* aspect and the sampler permutes the

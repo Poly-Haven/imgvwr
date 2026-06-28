@@ -37,7 +37,7 @@ for Windows.
 | `↑` / `↓` | Rotate the image 90° (counter-clockwise / clockwise); remembered per image for the session |
 | `P` | Toggle 2D ↔ panorama mode |
 | `W` | Toggle tiled wrap (2D) |
-| `I` | Toggle nearest ↔ bilinear filtering |
+| `I` | Pin nearest ↔ bilinear filtering (by default it's automatic: a 2D image magnified past 200% samples nearest for crisp pixels, everything else bilinear; `I` overrides that and persists) |
 | `M` | Toggle the navigation minimap (auto-shows on 2D pan/zoom; click/drag it to jump) |
 | `B` | Cycle the background backdrop (your setting → black → grey checkerboard → white) |
 

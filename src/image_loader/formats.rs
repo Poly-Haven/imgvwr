@@ -8,11 +8,23 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use image::{DynamicImage, ImageDecoder};
 
-use super::{ImageData, PixelBuffer, ReadProgress};
+use super::{AnimFrame, Animation, ImageData, PixelBuffer, ReadProgress};
+
+/// GIF frame delays are clamped to this minimum (≈ 50 fps). Many GIFs encode a 0
+/// or 10 ms delay meaning "as fast as possible"; without a floor that would busy-
+/// spin the loop, and browsers cap GIF speed similarly.
+const MIN_GIF_DELAY: Duration = Duration::from_millis(20);
+
+/// Cap on the total decoded-frame bytes kept for one animated GIF. Frames are
+/// decoded lazily and decoding stops once this is exceeded (the animation is
+/// truncated — it still plays/loops), so a pathologically large or long GIF can't
+/// allocate gigabytes. 1 GiB comfortably fits any realistic GIF.
+const MAX_GIF_FRAME_BYTES: usize = 1024 * 1024 * 1024;
 
 /// A `Read`/`Seek` wrapper that tallies bytes read into a shared [`ReadProgress`]
 /// so the loading bar can track a slow (e.g. network-drive) file read. Streams —
@@ -82,6 +94,70 @@ pub fn load_via_image(path: &Path, progress: &Arc<ReadProgress>) -> Result<Image
     let mut data = dynamic_to_imagedata(path, img, channels, None);
     apply_icc(icc, &mut data);
     Ok(data)
+}
+
+/// Decode a GIF, keeping every frame so animated GIFs can play. The `image`
+/// crate's `GifDecoder` composites each frame onto the canvas (honouring the
+/// disposal method and transparency), so every frame is a full-canvas RGBA8
+/// image. A single-frame GIF returns `animation = None` (a plain static image).
+pub fn load_gif(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> {
+    use image::AnimationDecoder;
+
+    let counting = counting_open(path, progress)?;
+    let decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(counting))
+        .with_context(|| format!("failed to open GIF {}", path.display()))?;
+
+    // Decode frame-by-frame (lazily) so the total can be capped at
+    // MAX_GIF_FRAME_BYTES — a `collect_frames()` would allocate every frame up
+    // front, risking OOM on a pathologically huge GIF.
+    let mut dims: Option<(u32, u32)> = None;
+    let mut anim: Vec<AnimFrame> = Vec::new();
+    let mut total = 0usize;
+    let mut truncated = false;
+    for frame in decoder.into_frames() {
+        let frame = frame
+            .with_context(|| format!("failed to decode GIF frames of {}", path.display()))?;
+        if dims.is_none() {
+            let b = frame.buffer();
+            dims = Some((b.width(), b.height()));
+        }
+        // numer_denom_ms() gives the delay as a fraction of one millisecond.
+        let (num, den) = frame.delay().numer_denom_ms();
+        let ms = num as f64 / (den.max(1)) as f64;
+        let delay = Duration::from_secs_f64(ms / 1000.0).max(MIN_GIF_DELAY);
+        let pixels = frame.into_buffer().into_raw();
+        total += pixels.len();
+        anim.push(AnimFrame { pixels, delay });
+        if total > MAX_GIF_FRAME_BYTES {
+            truncated = true;
+            break;
+        }
+    }
+    let (width, height) = dims.ok_or_else(|| anyhow!("GIF has no frames"))?;
+    if truncated {
+        log::warn!(
+            "GIF {} exceeds {} MB of frames; playing the first {}",
+            path.display(),
+            MAX_GIF_FRAME_BYTES / (1024 * 1024),
+            anim.len()
+        );
+    }
+
+    // Frame 0 doubles as the static representation (initial upload / diff / etc.).
+    let pixels = anim[0].pixels.clone();
+    let animation = (anim.len() > 1).then_some(Animation { frames: anim });
+
+    Ok(ImageData {
+        path: path.to_path_buf(),
+        width,
+        height,
+        channels: 4,
+        dtype_name: "gif->uint8".to_string(),
+        compression: "LZW".to_string(),
+        pixels: PixelBuffer::U8(pixels),
+        is_encoded_srgb: true,
+        animation,
+    })
 }
 
 /// Read pixel dimensions from an `image`-crate format header (PNG/JPEG/TIFF/…)
@@ -250,6 +326,7 @@ pub fn load_raw(path: &Path) -> Result<ImageData> {
         compression: "-".to_string(),
         pixels: PixelBuffer::F32(rgba),
         is_encoded_srgb: true,
+        animation: None,
     })
 }
 
@@ -481,6 +558,7 @@ fn load_exr_rust(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData>
         compression,
         pixels: PixelBuffer::F32(rgba),
         is_encoded_srgb: false,
+        animation: None,
     })
 }
 
@@ -544,6 +622,7 @@ pub fn dynamic_to_imagedata(
         compression: "-".to_string(),
         pixels,
         is_encoded_srgb: is_srgb,
+        animation: None,
     }
 }
 
@@ -562,6 +641,7 @@ mod icc_tests {
             compression: "-".to_string(),
             pixels: PixelBuffer::U8(vec![value, value, value, 255]),
             is_encoded_srgb: true,
+            animation: None,
         }
     }
 

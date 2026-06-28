@@ -54,6 +54,7 @@ for Windows.
 | `T` | Toggle Standard ↔ last-used view transform |
 | `O` | Open file… |
 | `←` / `→` | Previous / next image in the folder (alphabetical) |
+| `Space` | Pause / play an animated GIF |
 | `F2` | Toggle metadata overlay (also appears on top-right hover) |
 
 ### Inspect / review
@@ -105,7 +106,7 @@ numbered flags at the top-right; the active one is highlighted.
 
 ## Supported formats
 
-JPEG, PNG, BMP, TIFF, WebP, GIF, ICO, TGA, PNM, Radiance HDR, OpenEXR, and
+JPEG, PNG, BMP, TIFF, WebP, GIF (animated — `Space` pauses), ICO, TGA, PNM, Radiance HDR, OpenEXR, and
 (best-effort) camera RAW: NEF, CR2, CR3, ARW, DNG, RAF, ORF, RW2, and similar.
 
 ## Usage

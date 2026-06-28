@@ -322,6 +322,38 @@ impl Renderer {
         self.image.as_ref().map(|i| i.aspect)
     }
 
+    /// Replace the displayed image's pixels with one animated-GIF frame (full
+    /// canvas, same `width`×`height`, interleaved RGBA8) by re-uploading texture
+    /// level 0 and regenerating mipmaps (so the minified / Lanczos paths stay
+    /// correct). No-op when there's no image or it's tiled — GIFs always fit a
+    /// single texture, so only that path is handled. # GL context must be current.
+    pub fn update_animation_frame(&self, width: i32, height: i32, rgba8: &[u8]) {
+        let Some(image) = self.image.as_ref() else {
+            return;
+        };
+        let ImageTextureKind::Single(tex) = &image.kind else {
+            return;
+        };
+        let gl = &self.gl;
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(*tex));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                width,
+                height,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(rgba8)),
+            );
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+    }
+
     pub fn ocio_signature(&self) -> &str {
         &self.ocio.signature
     }

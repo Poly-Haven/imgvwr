@@ -110,3 +110,14 @@ cargo build --release
   or by leaning on `DWMWA_NCRENDERING_POLICY` (that's the DWM frame, not the GDI one).
 - rawler's `raw_metadata` is brittle (rejects some decodable files); raw EXIF orientation is read
   directly from the TIFF tag instead (`read_tiff_orientation` in `image_loader/formats.rs`).
+- **Animated GIFs play by re-uploading the current frame to the *same* single texture** each tick
+  (`Renderer::update_animation_frame` → `tex_sub_image_2d` + `generate_mipmap`), never re-running the
+  whole upload pipeline. `load_gif` decodes every frame up front (the `image` crate composites disposal
+  / transparency, so each `AnimFrame` is a full-canvas RGBA8) into `ImageData::animation`; frame 0 also
+  fills `pixels` so the static paths (initial upload, diff, auto-exposure) are unchanged. `App::anim`
+  (`AnimState`) tracks the current frame + `next_at` + `paused`; `advance_animation` (called from
+  `render`) flips frames when their delay elapses, and `about_to_wait` schedules a `WaitUntil(next_at)`
+  so the loop sleeps between frames (no 60 fps spin). Space toggles `paused`. Per-frame delays are
+  floored at 20 ms (`MIN_GIF_DELAY`) so a 0-delay GIF can't busy-spin. Verify headlessly with
+  `IMGVWR_DEBUG_GIF_FRAME=k` (debug builds: pin + pause frame k) for exact frame pixels, or time-spaced
+  `IMGVWR_CAPTURE_DELAY_MS` captures of an N-colour-cycle GIF to confirm advancement + looping.

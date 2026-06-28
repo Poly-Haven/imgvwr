@@ -41,6 +41,24 @@ pub struct ImageData {
     pub pixels: PixelBuffer,
     /// True → source pixels are sRGB-encoded and need the GPU sRGB decode.
     pub is_encoded_srgb: bool,
+    /// Frames of an animated GIF (`None` for static images and single-frame
+    /// GIFs). `pixels`/`width`/`height` mirror frame 0 so the static code paths
+    /// (initial upload, diff, auto-exposure) work unchanged.
+    pub animation: Option<Animation>,
+}
+
+/// An animated image (currently only GIF): a list of pre-composited RGBA8 frames
+/// with their on-screen durations. Held in [`ImageData`] so it travels with the
+/// image through the load / cache / comparator pipeline.
+pub struct Animation {
+    pub frames: Vec<AnimFrame>,
+}
+
+/// One animation frame: the full canvas as interleaved RGBA8, plus how long it
+/// stays on screen.
+pub struct AnimFrame {
+    pub pixels: Vec<u8>,
+    pub delay: std::time::Duration,
 }
 
 impl ImageData {
@@ -171,6 +189,10 @@ pub fn load_image(path: &Path, progress: &std::sync::Arc<ReadProgress>) -> Resul
 
     if ext == "exr" {
         formats::load_exr(path, progress)
+    } else if ext == "gif" {
+        // Decode every frame so animated GIFs can play; a single-frame GIF comes
+        // back as a plain static image.
+        formats::load_gif(path, progress)
     } else if RAW_EXTS.contains(&ext.as_str()) {
         // rawler reads the file internally; leave the read indeterminate.
         formats::load_raw(path)

@@ -209,6 +209,17 @@ struct PendingAdopt {
     old_scale: Option<(f32, f32)>,
 }
 
+/// Playback state for an animated GIF. The frames themselves live in the
+/// `current_image`'s [`ImageData::animation`]; this just tracks which frame is
+/// showing, when to advance, and whether the user paused (Space).
+struct AnimState {
+    /// Index of the frame currently uploaded to the texture.
+    frame: usize,
+    /// When the current frame should give way to the next.
+    next_at: Instant,
+    paused: bool,
+}
+
 /// Coarse load status (the error string is surfaced in the UI from Commit 9).
 enum LoadState {
     Idle,
@@ -497,6 +508,9 @@ pub struct App {
     // Image comparator.
     /// The currently-displayed decoded image (shared so a slot can pin it).
     current_image: Option<Arc<ImageData>>,
+    /// GIF playback state, `Some` only while the current image is an animated GIF
+    /// (the frames live in `current_image`'s `ImageData::animation`).
+    anim: Option<AnimState>,
     /// Comparator slots (Ctrl+1..=9 → index 0..=8); each pins a decoded image.
     slots: [Option<Arc<ImageData>>; 9],
     /// The image shown before the last slot recall, for the A/B toggle-back.
@@ -638,6 +652,7 @@ impl App {
             image_cache: Vec::new(),
             toast: None,
             current_image: None,
+            anim: None,
             slots: std::array::from_fn(|_| None),
             compare_prev: None,
             active_slot: None,
@@ -1446,6 +1461,38 @@ impl App {
         }
 
         self.current_image = Some(data.clone());
+        // Animated GIF: begin playback from frame 0 (already uploaded as the
+        // static image). Frame 0 shows for its own delay before frame 1. A static
+        // image / single-frame GIF clears any prior playback.
+        self.anim = data.animation.as_ref().and_then(|a| {
+            a.frames.first().map(|f0| AnimState {
+                frame: 0,
+                next_at: Instant::now() + f0.delay,
+                paused: false,
+            })
+        });
+        // Dev-only: pin a specific GIF frame (paused) so each frame's pixels can be
+        // verified deterministically in a headless capture (animation timing is
+        // process-relative and jittery otherwise).
+        #[cfg(debug_assertions)]
+        if let Ok(spec) = std::env::var("IMGVWR_DEBUG_GIF_FRAME") {
+            if let (Ok(k), Some(img)) = (spec.parse::<usize>(), self.current_image.clone()) {
+                if let Some(frames) = img.animation.as_ref().map(|a| &a.frames) {
+                    let k = k % frames.len().max(1);
+                    if let Some(anim) = self.anim.as_mut() {
+                        anim.frame = k;
+                        anim.paused = true;
+                    }
+                    if let Some(gfx) = self.gfx.as_mut() {
+                        gfx.renderer.update_animation_frame(
+                            img.width as i32,
+                            img.height as i32,
+                            &frames[k].pixels,
+                        );
+                    }
+                }
+            }
+        }
         // Dev-only: IMGVWR_DEBUG_SLOT pins the loaded image into slot 1 so the
         // comparator flag can be verified headlessly.
         #[cfg(debug_assertions)]
@@ -2517,6 +2564,8 @@ impl App {
             // Up / Down rotate the image 90° (CCW / CW), remembered per image.
             (Key::Named(NamedKey::ArrowUp), _) => self.rotate_image(-1),
             (Key::Named(NamedKey::ArrowDown), _) => self.rotate_image(1),
+            // Space pauses / resumes GIF playback (no-op for static images).
+            (Key::Named(NamedKey::Space), _) => self.toggle_animation_pause(),
             (Key::Named(NamedKey::Escape), _) => {
                 if self.ui_state.show_help {
                     self.ui_state.show_help = false;
@@ -4156,6 +4205,67 @@ impl App {
         })
     }
 
+    /// Toggle GIF play/pause (Space). No-op for a static image. On resume, the
+    /// paused frame is held for its full delay rather than flipping immediately.
+    fn toggle_animation_pause(&mut self) {
+        if self.anim.is_none() {
+            return;
+        }
+        // The resume delay is the paused frame's own duration; read it before the
+        // mutable borrow of `self.anim`.
+        let resume_delay = self.current_image.as_ref().and_then(|img| {
+            let frame = self.anim.as_ref()?.frame;
+            img.animation.as_ref()?.frames.get(frame).map(|f| f.delay)
+        });
+        let anim = self.anim.as_mut().unwrap();
+        anim.paused = !anim.paused;
+        let paused = anim.paused;
+        if !paused {
+            if let Some(d) = resume_delay {
+                anim.next_at = Instant::now() + d;
+            }
+        }
+        self.show_toast(if paused { "Paused" } else { "Playing" }.to_string());
+    }
+
+    /// Advance animated-GIF playback: when the current frame's delay has elapsed,
+    /// step to the next frame (wrapping) and upload it to the texture. No-op when
+    /// the current image isn't an animated GIF or playback is paused.
+    fn advance_animation(&mut self, now: Instant) {
+        match self.anim.as_ref() {
+            Some(a) if !a.paused && now >= a.next_at => {}
+            _ => return,
+        }
+        // The frames live in the current image; clone the Arc so the borrow of
+        // `self.current_image` ends before we touch `self.gfx`. If the backing
+        // frames are somehow gone (shouldn't happen — `anim` and `current_image`
+        // are set together), clear `anim` so the scheduler stops waking for it
+        // rather than spinning on a permanently-past `next_at`.
+        let Some(img) = self.current_image.clone() else {
+            self.anim = None;
+            return;
+        };
+        let frames = match img.animation.as_ref() {
+            Some(a) if a.frames.len() > 1 => &a.frames,
+            _ => {
+                self.anim = None;
+                return;
+            }
+        };
+        let n = frames.len();
+        let anim = self.anim.as_mut().expect("anim present (checked above)");
+        anim.frame = (anim.frame + 1) % n;
+        let idx = anim.frame;
+        anim.next_at = now + frames[idx].delay;
+        if let Some(gfx) = self.gfx.as_mut() {
+            gfx.renderer.update_animation_frame(
+                img.width as i32,
+                img.height as i32,
+                &frames[idx].pixels,
+            );
+        }
+    }
+
     fn render(&mut self) -> RenderOutcome {
         // Advance any in-progress incremental upload before drawing this frame.
         if self.pending.is_some() {
@@ -4167,6 +4277,9 @@ impl App {
         // ease is NOT advanced here — it rides its own Resized-event chain so the
         // window resize and the content present stay one-to-one (see ease_window).
         let now = Instant::now();
+        // Advance animated-GIF playback (uploads the next frame when its delay has
+        // elapsed). No-op for static images and while paused.
+        self.advance_animation(now);
         let dt = self
             .last_frame
             .replace(now)
@@ -4736,6 +4849,13 @@ impl ApplicationHandler<UserEvent> for App {
             && !self.cursor_idle_hidden)
             .then(|| self.last_cursor_motion.map(|t| t + CURSOR_IDLE_HIDE))
             .flatten();
+        // Wake to flip to the next GIF frame (the advance + upload happens in
+        // `render`). `None` while paused or for a static image.
+        let anim_deadline = self
+            .anim
+            .as_ref()
+            .filter(|a| !a.paused)
+            .map(|a| a.next_at);
         if self.capture_active() {
             // Drive continuous frames while a capture is pending.
             event_loop.set_control_flow(ControlFlow::Poll);
@@ -4762,6 +4882,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.bottom_hide_deadline,
             self.metadata_hide_deadline,
             cursor_idle_deadline,
+            anim_deadline,
         ]
         .into_iter()
         .flatten()
@@ -5128,6 +5249,7 @@ fn abs_diff_image(a: &ImageData, b: &ImageData) -> Option<ImageData> {
         compression: "-".to_string(),
         pixels,
         is_encoded_srgb: a.is_encoded_srgb,
+        animation: None,
     })
 }
 
@@ -5644,6 +5766,7 @@ mod tests {
             compression: "-".into(),
             pixels: PixelBuffer::U8(px),
             is_encoded_srgb: true,
+            animation: None,
         };
         let a = mk(vec![10, 20, 30, 255, 100, 100, 100, 255]);
         let b = mk(vec![10, 20, 30, 255, 40, 90, 160, 255]);

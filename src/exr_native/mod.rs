@@ -43,5 +43,6 @@ pub fn load_exr_native(path: &Path) -> Result<ImageData> {
         compression: "-".to_string(),
         pixels: PixelBuffer::F32(data),
         is_encoded_srgb: false,
+        animation: None,
     })
 }

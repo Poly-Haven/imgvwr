@@ -135,8 +135,8 @@ const RAW_EXTS: &[&str] = &[
 /// Non-RAW formats handled by the `image` crate plus `exr` (the EXR special
 /// case). Kept separate from [`RAW_EXTS`] so both can compose [`SUPPORTED_EXTS`].
 const IMAGE_EXTS: &[&str] = &[
-    "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "ico", "tga", "pnm", "hdr", "pic",
-    "exr",
+    "png", "apng", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "ico", "tga", "pnm", "hdr",
+    "pic", "exr",
 ];
 
 /// True if `path`'s (lower-cased) extension is one imgvwr can decode. The single
@@ -193,6 +193,13 @@ pub fn load_image(path: &Path, progress: &std::sync::Arc<ReadProgress>) -> Resul
         // Decode every frame so animated GIFs can play; a single-frame GIF comes
         // back as a plain static image.
         formats::load_gif(path, progress)
+    } else if ext == "webp" && formats::webp_is_animated(path) {
+        // Animated WebP plays its frames; a *still* WebP falls through to the
+        // standard image path below (which keeps full ICC / orientation handling).
+        formats::load_animated_webp(path, progress)
+    } else if (ext == "png" || ext == "apng") && formats::png_is_apng(path) {
+        // Animated PNG (APNG) plays its frames; a plain PNG falls through below.
+        formats::load_apng(path, progress)
     } else if RAW_EXTS.contains(&ext.as_str()) {
         // rawler reads the file internally; leave the read indeterminate.
         formats::load_raw(path)

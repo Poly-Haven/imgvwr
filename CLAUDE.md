@@ -114,14 +114,20 @@ cargo build --release
   or by leaning on `DWMWA_NCRENDERING_POLICY` (that's the DWM frame, not the GDI one).
 - rawler's `raw_metadata` is brittle (rejects some decodable files); raw EXIF orientation is read
   directly from the TIFF tag instead (`read_tiff_orientation` in `image_loader/formats.rs`).
-- **Animated GIFs play by re-uploading the current frame to the *same* single texture** each tick
-  (`Renderer::update_animation_frame` → `tex_sub_image_2d` + `generate_mipmap`), never re-running the
-  whole upload pipeline. `load_gif` decodes every frame up front (the `image` crate composites disposal
-  / transparency, so each `AnimFrame` is a full-canvas RGBA8) into `ImageData::animation`; frame 0 also
-  fills `pixels` so the static paths (initial upload, diff, auto-exposure) are unchanged. `App::anim`
-  (`AnimState`) tracks the current frame + `next_at` + `paused`; `advance_animation` (called from
-  `render`) flips frames when their delay elapses, and `about_to_wait` schedules a `WaitUntil(next_at)`
-  so the loop sleeps between frames (no 60 fps spin). Space toggles `paused`. Per-frame delays are
-  floored at 20 ms (`MIN_GIF_DELAY`) so a 0-delay GIF can't busy-spin. Verify headlessly with
-  `IMGVWR_DEBUG_GIF_FRAME=k` (debug builds: pin + pause frame k) for exact frame pixels, or time-spaced
-  `IMGVWR_CAPTURE_DELAY_MS` captures of an N-colour-cycle GIF to confirm advancement + looping.
+- **Animated images (GIF, animated WebP, APNG) play by re-uploading the current frame to the *same*
+  single texture** each tick (`Renderer::update_animation_frame` → `tex_sub_image_2d` +
+  `generate_mipmap`), never re-running the whole upload pipeline. All three share `collect_animation`
+  (in `image_loader/formats.rs`) — a lazy `AnimationDecoder::into_frames` loop that applies EXIF
+  orientation per frame and caps total bytes (`MAX_ANIM_FRAME_BYTES`, 1 GiB) — and `finish_animation`,
+  which fills `ImageData::animation` (each `AnimFrame` a full-canvas RGBA8) plus frame 0 into `pixels`
+  so the static paths (initial upload, diff, auto-exposure) are unchanged, and runs `apply_icc` over
+  the static buffer **and every frame**. Dispatch: `gif` → `load_gif`; `webp` → `load_animated_webp`
+  only when `webp_is_animated` (a still WebP keeps going through `load_via_image`); `png`/`apng` →
+  `load_apng` only when `png_is_apng` (ICC/orientation read from `PngDecoder` *before* `.apng()`
+  consumes it; the `ApngDecoder` exposes neither). `App::anim` (`AnimState`) tracks the current frame
+  + `next_at` + `paused`; `advance_animation` (called from `render`) flips frames when their delay
+  elapses, and `about_to_wait` schedules a `WaitUntil(next_at)` so the loop sleeps between frames (no
+  60 fps spin). Space toggles `paused`. Per-frame delays are floored at 20 ms (`MIN_FRAME_DELAY`).
+  Verify headlessly with `IMGVWR_DEBUG_GIF_FRAME=k` (debug builds: pin + pause frame k of *any*
+  animation) for exact frame pixels, or time-spaced `IMGVWR_CAPTURE_DELAY_MS` captures of an
+  N-colour-cycle file to confirm advancement + looping.

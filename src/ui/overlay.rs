@@ -1727,7 +1727,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("T", "Standard / last view transform"),
                 ("O", "Open file…"),
                 ("← / →", "Previous / next image"),
-                ("Space", "Pause / play animated GIF"),
+                ("Space", "Pause / play animation (GIF/WebP/APNG)"),
                 ("F2", "Metadata overlay"),
             ],
         ),

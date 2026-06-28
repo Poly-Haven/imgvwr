@@ -15,16 +15,16 @@ use image::{DynamicImage, ImageDecoder};
 
 use super::{AnimFrame, Animation, ImageData, PixelBuffer, ReadProgress};
 
-/// GIF frame delays are clamped to this minimum (≈ 50 fps). Many GIFs encode a 0
-/// or 10 ms delay meaning "as fast as possible"; without a floor that would busy-
-/// spin the loop, and browsers cap GIF speed similarly.
-const MIN_GIF_DELAY: Duration = Duration::from_millis(20);
+/// Animation frame delays are clamped to this minimum (≈ 50 fps). Many GIFs (and
+/// some WebP/APNG) encode a 0 or 10 ms delay meaning "as fast as possible";
+/// without a floor that would busy-spin the loop, and browsers cap likewise.
+const MIN_FRAME_DELAY: Duration = Duration::from_millis(20);
 
-/// Cap on the total decoded-frame bytes kept for one animated GIF. Frames are
+/// Cap on the total decoded-frame bytes kept for one animated image. Frames are
 /// decoded lazily and decoding stops once this is exceeded (the animation is
-/// truncated — it still plays/loops), so a pathologically large or long GIF can't
-/// allocate gigabytes. 1 GiB comfortably fits any realistic GIF.
-const MAX_GIF_FRAME_BYTES: usize = 1024 * 1024 * 1024;
+/// truncated — it still plays/loops), so a pathologically large or long GIF /
+/// WebP / APNG can't allocate gigabytes. 1 GiB comfortably fits any realistic one.
+const MAX_ANIM_FRAME_BYTES: usize = 1024 * 1024 * 1024;
 
 /// A `Read`/`Seek` wrapper that tallies bytes read into a shared [`ReadProgress`]
 /// so the loading bar can track a slow (e.g. network-drive) file read. Streams —
@@ -96,68 +96,153 @@ pub fn load_via_image(path: &Path, progress: &Arc<ReadProgress>) -> Result<Image
     Ok(data)
 }
 
-/// Decode a GIF, keeping every frame so animated GIFs can play. The `image`
-/// crate's `GifDecoder` composites each frame onto the canvas (honouring the
-/// disposal method and transparency), so every frame is a full-canvas RGBA8
-/// image. A single-frame GIF returns `animation = None` (a plain static image).
-pub fn load_gif(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> {
-    use image::AnimationDecoder;
-
-    let counting = counting_open(path, progress)?;
-    let decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(counting))
-        .with_context(|| format!("failed to open GIF {}", path.display()))?;
-
-    // Decode frame-by-frame (lazily) so the total can be capped at
-    // MAX_GIF_FRAME_BYTES — a `collect_frames()` would allocate every frame up
-    // front, risking OOM on a pathologically huge GIF.
+/// Decode every frame of an `AnimationDecoder` (GIF / animated WebP / APNG) into
+/// full-canvas RGBA8 frames with their delays, applying `orientation` to each
+/// (the `image` decoders composite disposal/transparency, but do not apply EXIF
+/// orientation). Decoding stops once [`MAX_ANIM_FRAME_BYTES`] is reached so a
+/// pathological file can't OOM — a lazy iterator, not `collect_frames()`, so the
+/// cap actually bounds the allocation. Returns the (post-orientation) dimensions
+/// and the frames.
+fn collect_animation<'a, D: image::AnimationDecoder<'a>>(
+    decoder: D,
+    orientation: image::metadata::Orientation,
+    path: &Path,
+) -> Result<(u32, u32, Vec<AnimFrame>)> {
     let mut dims: Option<(u32, u32)> = None;
-    let mut anim: Vec<AnimFrame> = Vec::new();
+    let mut frames: Vec<AnimFrame> = Vec::new();
     let mut total = 0usize;
     let mut truncated = false;
     for frame in decoder.into_frames() {
         let frame = frame
-            .with_context(|| format!("failed to decode GIF frames of {}", path.display()))?;
-        if dims.is_none() {
-            let b = frame.buffer();
-            dims = Some((b.width(), b.height()));
-        }
+            .with_context(|| format!("failed to decode animation frames of {}", path.display()))?;
         // numer_denom_ms() gives the delay as a fraction of one millisecond.
         let (num, den) = frame.delay().numer_denom_ms();
         let ms = num as f64 / (den.max(1)) as f64;
-        let delay = Duration::from_secs_f64(ms / 1000.0).max(MIN_GIF_DELAY);
-        let pixels = frame.into_buffer().into_raw();
+        let delay = Duration::from_secs_f64(ms / 1000.0).max(MIN_FRAME_DELAY);
+        // Apply EXIF orientation uniformly (a no-op for GIF / most APNG).
+        let mut img = DynamicImage::ImageRgba8(frame.into_buffer());
+        img.apply_orientation(orientation);
+        if dims.is_none() {
+            dims = Some((img.width(), img.height()));
+        }
+        let pixels = img.into_rgba8().into_raw();
         total += pixels.len();
-        anim.push(AnimFrame { pixels, delay });
-        if total > MAX_GIF_FRAME_BYTES {
+        frames.push(AnimFrame { pixels, delay });
+        if total > MAX_ANIM_FRAME_BYTES {
             truncated = true;
             break;
         }
     }
-    let (width, height) = dims.ok_or_else(|| anyhow!("GIF has no frames"))?;
+    let (width, height) = dims.ok_or_else(|| anyhow!("animation has no frames"))?;
     if truncated {
         log::warn!(
-            "GIF {} exceeds {} MB of frames; playing the first {}",
+            "{} exceeds {} MB of frames; playing the first {}",
             path.display(),
-            MAX_GIF_FRAME_BYTES / (1024 * 1024),
-            anim.len()
+            MAX_ANIM_FRAME_BYTES / (1024 * 1024),
+            frames.len()
         );
     }
+    Ok((width, height, frames))
+}
 
-    // Frame 0 doubles as the static representation (initial upload / diff / etc.).
-    let pixels = anim[0].pixels.clone();
-    let animation = (anim.len() > 1).then_some(Animation { frames: anim });
-
-    Ok(ImageData {
+/// Build an [`ImageData`] from decoded animation frames. Frame 0 doubles as the
+/// static representation (initial upload / diff / auto-exposure). A single frame
+/// yields `animation = None` (a plain static image). Any embedded ICC profile is
+/// converted to sRGB across the static buffer *and* every frame.
+fn finish_animation(
+    path: &Path,
+    width: u32,
+    height: u32,
+    frames: Vec<AnimFrame>,
+    icc: Option<Vec<u8>>,
+    dtype: &str,
+    compression: &str,
+) -> Result<ImageData> {
+    if frames.is_empty() {
+        return Err(anyhow!("animation has no frames"));
+    }
+    let pixels = frames[0].pixels.clone();
+    let animation = (frames.len() > 1).then_some(Animation { frames });
+    let mut data = ImageData {
         path: path.to_path_buf(),
         width,
         height,
         channels: 4,
-        dtype_name: "gif->uint8".to_string(),
-        compression: "LZW".to_string(),
+        dtype_name: dtype.to_string(),
+        compression: compression.to_string(),
         pixels: PixelBuffer::U8(pixels),
         is_encoded_srgb: true,
         animation,
-    })
+    };
+    apply_icc(icc, &mut data);
+    Ok(data)
+}
+
+/// Decode a GIF, keeping every frame so animated GIFs can play. A single-frame
+/// GIF returns `animation = None` (a plain static image).
+pub fn load_gif(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> {
+    let counting = counting_open(path, progress)?;
+    let decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(counting))
+        .with_context(|| format!("failed to open GIF {}", path.display()))?;
+    // GIF carries no EXIF orientation or ICC profile.
+    let (width, height, frames) =
+        collect_animation(decoder, image::metadata::Orientation::NoTransforms, path)?;
+    finish_animation(path, width, height, frames, None, "gif->uint8", "LZW")
+}
+
+/// Whether `path` is an animated WebP (cheap header probe; `false` on any error).
+pub fn webp_is_animated(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    image::codecs::webp::WebPDecoder::new(std::io::BufReader::new(file))
+        .map(|d| d.has_animation())
+        .unwrap_or(false)
+}
+
+/// Whether `path` is an animated PNG (APNG) (cheap header probe; `false` on any
+/// error or a plain still PNG).
+pub fn png_is_apng(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    image::codecs::png::PngDecoder::new(std::io::BufReader::new(file))
+        .and_then(|d| d.is_apng())
+        .unwrap_or(false)
+}
+
+/// Decode an animated WebP into playable frames (EXIF orientation + any embedded
+/// ICC profile applied to every frame). Only called for files [`webp_is_animated`]
+/// confirmed; a *still* WebP keeps going through [`load_via_image`].
+pub fn load_animated_webp(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> {
+    let counting = counting_open(path, progress)?;
+    let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::BufReader::new(counting))
+        .with_context(|| format!("failed to open WebP {}", path.display()))?;
+    let icc = extract_icc(&mut decoder);
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let (width, height, frames) = collect_animation(decoder, orientation, path)?;
+    finish_animation(path, width, height, frames, icc, "webp->uint8", "WebP")
+}
+
+/// Decode an animated PNG (APNG) into playable frames. ICC / orientation are read
+/// from the base `PngDecoder` before `apng()` consumes it (the `ApngDecoder`
+/// itself exposes neither). Only called for files [`png_is_apng`] confirmed; a
+/// still PNG keeps going through [`load_via_image`].
+pub fn load_apng(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> {
+    let counting = counting_open(path, progress)?;
+    let mut decoder = image::codecs::png::PngDecoder::new(std::io::BufReader::new(counting))
+        .with_context(|| format!("failed to open PNG {}", path.display()))?;
+    let icc = extract_icc(&mut decoder);
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let apng = decoder
+        .apng()
+        .with_context(|| format!("failed to read APNG frames of {}", path.display()))?;
+    let (width, height, frames) = collect_animation(apng, orientation, path)?;
+    finish_animation(path, width, height, frames, icc, "apng->uint8", "PNG")
 }
 
 /// Read pixel dimensions from an `image`-crate format header (PNG/JPEG/TIFF/…)
@@ -206,16 +291,17 @@ fn extract_icc(_decoder: &mut impl image::ImageDecoder) -> Option<Vec<u8>> {
 }
 
 /// Convert pixels from a non-sRGB embedded ICC profile to sRGB in place (§8.2).
-/// Applies only to the 8-bit (display-encoded) path; profiles whose description
-/// already names sRGB are skipped to avoid a no-op transform.
+/// Applies only to the 8-bit (display-encoded) path — the static buffer and, for
+/// animated WebP / APNG, every frame (each is a separate buffer). Profiles whose
+/// description already names sRGB are skipped to avoid a no-op transform.
 #[cfg(feature = "icc")]
 fn apply_icc(icc: Option<Vec<u8>>, data: &mut ImageData) {
     use lcms2::{InfoType, Intent, Locale, PixelFormat, Profile, Transform};
 
     let Some(icc) = icc else { return };
-    let PixelBuffer::U8(rgba) = &mut data.pixels else {
+    if !matches!(data.pixels, PixelBuffer::U8(_)) {
         return;
-    };
+    }
     let src = match Profile::new_icc(&icc) {
         Ok(p) => p,
         Err(_) => {
@@ -246,8 +332,16 @@ fn apply_icc(icc: Option<Vec<u8>>, data: &mut ImageData) {
             return;
         }
     };
-    let pixels: &mut [[u8; 4]] = bytemuck::cast_slice_mut(rgba.as_mut_slice());
-    transform.transform_in_place(pixels);
+    if let PixelBuffer::U8(rgba) = &mut data.pixels {
+        let px: &mut [[u8; 4]] = bytemuck::cast_slice_mut(rgba.as_mut_slice());
+        transform.transform_in_place(px);
+    }
+    if let Some(anim) = data.animation.as_mut() {
+        for f in &mut anim.frames {
+            let px: &mut [[u8; 4]] = bytemuck::cast_slice_mut(f.pixels.as_mut_slice());
+            transform.transform_in_place(px);
+        }
+    }
 }
 
 #[cfg(not(feature = "icc"))]

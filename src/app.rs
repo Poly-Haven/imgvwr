@@ -4076,9 +4076,14 @@ impl App {
     }
 
     fn open_file_dialog(&mut self) {
-        let file = rfd::FileDialog::new()
-            .add_filter("Images", &supported_extensions())
-            .pick_file();
+        let mut dialog = rfd::FileDialog::new().add_filter("Images", &supported_extensions());
+        // Open in the folder of the image currently on screen, so browsing starts
+        // where the user is looking (falls back to rfd's default when nothing is
+        // loaded or the path has no parent).
+        if let Some(dir) = self.loaded_path.as_deref().and_then(|p| p.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let file = dialog.pick_file();
         if let Some(path) = file {
             // A manual open ends any arrow-nav preload chain (saved comparator
             // slots persist; only the A/B scratch is dropped).

@@ -73,6 +73,8 @@ struct FileInfo {
     dtype: String,
     compression: String,
     panorama: bool,
+    /// Camera EXIF (RAW files only); `None` for everything else.
+    camera: Option<crate::image_loader::CameraMeta>,
 }
 
 /// Hard cap on how long a capture run waits for a load before grabbing anyway.
@@ -103,6 +105,16 @@ const MINIMAP_FADE: f32 = 0.6;
 
 /// Fullscreen only: hide the mouse cursor after this long with no real movement.
 const CURSOR_IDLE_HIDE: Duration = Duration::from_millis(2500);
+
+/// A held adjustment key's repeats coalesce into one undo entry while presses
+/// keep arriving within this window (longer than the OS key-repeat interval, so
+/// the ramp stays one gesture; the entry commits this long after release).
+const ADJUST_COALESCE: Duration = Duration::from_millis(350);
+
+/// Minimum logical (point) size the window is grown to so the Settings dialog's
+/// fixed-width controls fit without wrapping (the dialog content is ~440 pt wide
+/// plus frame, scrollbar and breathing room).
+const SETTINGS_MIN_LOGICAL: (f32, f32) = (540.0, 720.0);
 
 /// Max decoded images kept in memory for instant navigation (current + a
 /// previous + a next, plus one spare so back-and-forth stays cached). Each entry
@@ -267,6 +279,7 @@ struct UndoState {
     clarity_radius: f32,
     isolate_channel: Option<u8>,
     sharpness: bool,
+    clip_overlay: bool,
     wrap_2d: bool,
     nearest_filter: bool,
     nearest_auto: bool,
@@ -284,6 +297,7 @@ impl UndoState {
             clarity_radius: 64.0,
             isolate_channel: None,
             sharpness: false,
+            clip_overlay: false,
             wrap_2d: false,
             nearest_filter: false,
             nearest_auto: true,
@@ -344,6 +358,26 @@ pub struct App {
     stretching: bool,
     /// Sharpness checker (S): show the original-resolution high-pass.
     sharpness: bool,
+    /// Clipping overlay (C): animated diagonal stripes over regions whose
+    /// *original* (pre-adjustment) per-channel value is within the configured
+    /// margin of the format max. In [`UndoState`] like the other review toggles.
+    clip_overlay: bool,
+    /// Monotonic clock start, feeds the clipping overlay's stripe animation (a
+    /// continuous wall-clock time uniform; independent of per-image load timing).
+    app_epoch: Instant,
+    /// The clipping overlay's max-mip mask needs (re)building — set when the image
+    /// or the clip margin changes, consumed in `render` while the overlay is on.
+    clip_mask_dirty: bool,
+    /// While a held adjustment key (exposure / gamma / clarity) is auto-repeating,
+    /// this is pushed a little past each repeat. `undo_gesture_active` treats the
+    /// window as a gesture so the whole ramp coalesces into ONE undo entry instead
+    /// of flooding the stack with a step per repeat.
+    adjust_repeat_until: Option<Instant>,
+    /// Settings-dialog open state last frame, to detect open/close transitions.
+    settings_was_open: bool,
+    /// Window inner size to restore when the Settings dialog closes (the dialog
+    /// grows a too-small window so its controls fit; see `sync_settings_window`).
+    settings_restore_size: Option<PhysicalSize<u32>>,
     /// Guide lines: `[image_coord (0..1), 0=vertical / 1=horizontal]`
     /// (max [`crate::renderer::MAX_GUIDES`]).
     guides: Vec<[f32; 2]>,
@@ -388,8 +422,6 @@ pub struct App {
 
     // Colour management.
     ocio: OcioManager,
-    /// Last non-Standard view, for the T toggle.
-    last_view: Option<String>,
     prefs: AppPreferences,
 
     // UI.
@@ -594,6 +626,12 @@ impl App {
             image_stretch: Vec2::ONE,
             stretching: false,
             sharpness: false,
+            clip_overlay: false,
+            app_epoch: Instant::now(),
+            clip_mask_dirty: true,
+            adjust_repeat_until: None,
+            settings_was_open: false,
+            settings_restore_size: None,
             guides: Vec::new(),
             show_metadata: false,
             rotation: 0,
@@ -610,7 +648,6 @@ impl App {
             #[cfg(debug_assertions)]
             debug_minimap_alpha: None,
             ocio,
-            last_view: None,
             prefs,
             ui_state: UiState::default(),
             bottom_visible: false,
@@ -712,17 +749,16 @@ impl App {
         };
 
         let target = if active.view.eq_ignore_ascii_case(&standard) {
-            self.last_view
-                .clone()
-                .filter(|v| !v.eq_ignore_ascii_case(&standard))
-                .or_else(|| {
-                    views
-                        .iter()
-                        .find(|v| !v.eq_ignore_ascii_case(&standard))
-                        .cloned()
-                })
+            // Standard → the configured Default View Transform (Settings), if it
+            // exists on this display and isn't Standard itself; else the first
+            // non-Standard view.
+            let default = self.prefs.default_view_transform.clone();
+            views
+                .iter()
+                .find(|v| v.eq_ignore_ascii_case(&default) && !v.eq_ignore_ascii_case(&standard))
+                .or_else(|| views.iter().find(|v| !v.eq_ignore_ascii_case(&standard)))
+                .cloned()
         } else {
-            self.last_view = Some(active.view.clone());
             Some(standard)
         };
 
@@ -756,7 +792,8 @@ impl App {
         };
         if !applied {
             let is_hdri = panorama && matches!(ext.as_str(), "exr" | "hdr" | "pic");
-            if !(is_hdri && self.select_view_named("filmic")) {
+            let default_view = self.prefs.default_view_transform.clone();
+            if !(is_hdri && self.select_view_named(&default_view)) {
                 self.select_standard_view();
             }
         }
@@ -1097,6 +1134,44 @@ impl App {
     /// centre and clamped on-screen. Redundant resizes (within 2 px) are skipped
     /// so per-notch zooming doesn't thrash once the window is capped. Records the
     /// resize so the resulting `Resized` event isn't mistaken for a manual drag.
+    /// Grow the window to comfortably fit the Settings dialog when it opens (so the
+    /// fixed-width controls never wrap inside a small image window), then restore
+    /// the previous size when it closes. No-op in fullscreen / when maximized / when
+    /// the window is already large enough.
+    fn sync_settings_window(&mut self) {
+        let open = self.ui_state.show_settings;
+        if open == self.settings_was_open {
+            return;
+        }
+        self.settings_was_open = open;
+        if self.fullscreen {
+            return;
+        }
+        let Some((scale, cur, maximized)) = self.gfx.as_ref().map(|g| {
+            (
+                g.window.scale_factor() as f32,
+                g.window.inner_size(),
+                g.window.is_maximized(),
+            )
+        }) else {
+            return;
+        };
+        if maximized {
+            return;
+        }
+        if open {
+            let want_w = (SETTINGS_MIN_LOGICAL.0 * scale).ceil() as u32;
+            let want_h = (SETTINGS_MIN_LOGICAL.1 * scale).ceil() as u32;
+            let target = PhysicalSize::new(cur.width.max(want_w), cur.height.max(want_h));
+            if target.width != cur.width || target.height != cur.height {
+                self.settings_restore_size = Some(cur);
+                self.resize_window_centered(target);
+            }
+        } else if let Some(prev) = self.settings_restore_size.take() {
+            self.resize_window_centered(prev);
+        }
+    }
+
     fn resize_window_centered(&mut self, target: PhysicalSize<u32>) {
         // Compute the target OUTER rect (centred on the current centre, clamped
         // on-screen) and hand it to the geometry easing (`ease_window`) rather
@@ -1397,6 +1472,7 @@ impl App {
             dtype: data.dtype_name.clone(),
             compression: data.compression.clone(),
             panorama: equirect,
+            camera: data.camera.clone(),
         };
         self.loaded_path = Some(data.path.clone());
         // Restore this image's remembered display rotation (default upright). A
@@ -1407,10 +1483,19 @@ impl App {
             self.exposure = 0.0;
             self.gamma = 1.0;
             self.wrap_2d = false;
-            // Auto-expose HDR panoramas: pick the starting exposure so the
-            // average linear value lands on AUTO_EXPOSURE_TARGET. (No-op for
-            // 8-bit images, where average_linear_luminance returns None.)
-            if equirect && self.prefs.auto_exposure {
+            // Auto-expose: pick the starting exposure so the average linear value
+            // lands on AUTO_EXPOSURE_TARGET. (No-op for 8-bit images, where
+            // average_linear_luminance returns None.) RAW photos default to NO
+            // auto-exposure — their scene-linear develop already respects the
+            // actual photo exposure (white = 1.0), so exposure 0 is faithful;
+            // an opt-in pref enables it. Non-RAW HDR panoramas auto-expose as
+            // before.
+            let auto_expose = if crate::image_loader::is_raw(&data.path) {
+                self.prefs.raw_auto_exposure
+            } else {
+                equirect && self.prefs.auto_exposure
+            };
+            if auto_expose {
                 if let Some(luma) = data.average_linear_luminance() {
                     if luma > 1e-6 {
                         self.exposure = (AUTO_EXPOSURE_TARGET / luma).log2().clamp(-16.0, 16.0);
@@ -1461,6 +1546,9 @@ impl App {
         }
 
         self.current_image = Some(data.clone());
+        // The clip-overlay mask is tied to this image; rebuild it lazily if/when
+        // the overlay is on.
+        self.clip_mask_dirty = true;
         // Animated GIF: begin playback from frame 0 (already uploaded as the
         // static image). Frame 0 shows for its own delay before frame 1. A static
         // image / single-frame GIF clears any prior playback.
@@ -1874,6 +1962,7 @@ impl App {
         self.clarity_radius = 64.0;
         self.isolate_channel = None;
         self.sharpness = false;
+        self.clip_overlay = false;
         self.guides.clear();
         // Drop any in-flight guide gesture so its release can't touch a
         // since-cleared guide (the gesture's release, if any, becomes a no-op).
@@ -1899,6 +1988,7 @@ impl App {
             clarity_radius: self.clarity_radius,
             isolate_channel: self.isolate_channel,
             sharpness: self.sharpness,
+            clip_overlay: self.clip_overlay,
             wrap_2d: self.wrap_2d,
             nearest_filter: self.nearest_filter,
             nearest_auto: self.nearest_auto,
@@ -1909,7 +1999,12 @@ impl App {
     /// True while a continuous edit gesture is in progress — its many per-frame
     /// changes coalesce into one undo entry, committed when the gesture ends.
     fn undo_gesture_active(&self) -> bool {
-        self.guide_drag.is_some() || self.ui_state.guide_spawn.is_some() || self.stretching
+        self.guide_drag.is_some()
+            || self.ui_state.guide_spawn.is_some()
+            || self.stretching
+            || self
+                .adjust_repeat_until
+                .is_some_and(|t| Instant::now() < t)
     }
 
     /// Called once per frame after input: if the editing state changed away from
@@ -1921,6 +2016,9 @@ impl App {
         if egui_busy || self.undo_gesture_active() {
             return;
         }
+        // The held-adjustment coalesce window has closed (else undo_gesture_active
+        // would be true); drop the timer so `about_to_wait` stops waking for it.
+        self.adjust_repeat_until = None;
         let cur = self.undo_snapshot();
         if cur != self.undo_baseline {
             let old = std::mem::replace(&mut self.undo_baseline, cur);
@@ -1948,6 +2046,7 @@ impl App {
         self.clarity_radius = s.clarity_radius;
         self.isolate_channel = s.isolate_channel;
         self.sharpness = s.sharpness;
+        self.clip_overlay = s.clip_overlay;
         self.wrap_2d = s.wrap_2d;
         self.nearest_filter = s.nearest_filter;
         self.nearest_auto = s.nearest_auto;
@@ -2569,6 +2668,18 @@ impl App {
                         "Sharpness check"
                     } else {
                         "Sharpness off"
+                    }
+                    .to_string(),
+                );
+                self.request_redraw();
+            }
+            (_, Some("c")) | (_, Some("C")) => {
+                self.clip_overlay = !self.clip_overlay;
+                self.show_toast(
+                    if self.clip_overlay {
+                        "Clipping overlay on"
+                    } else {
+                        "Clipping overlay off"
                     }
                     .to_string(),
                 );
@@ -3671,6 +3782,13 @@ impl App {
         if std::env::var_os("IMGVWR_DEBUG_SHARPNESS").is_some() {
             self.sharpness = true;
         }
+        if std::env::var_os("IMGVWR_DEBUG_CLIP").is_some() {
+            self.clip_overlay = true;
+        }
+        if let Some(v) = f("IMGVWR_DEBUG_CLIP_MARGIN") {
+            self.prefs.clip_margin = v.clamp(0.0, 1.0);
+            self.clip_mask_dirty = true;
+        }
         // A/B the Lanczos minification against bilinear for the same 8-bit image.
         if std::env::var_os("IMGVWR_DEBUG_NO_LANCZOS").is_some() {
             self.debug_no_lanczos = true;
@@ -3861,6 +3979,9 @@ impl App {
             startup_display: self.prefs.startup_monitor.clone(),
             corner_radius: self.prefs.corner_radius,
             auto_exposure: self.prefs.auto_exposure,
+            raw_auto_exposure: self.prefs.raw_auto_exposure,
+            clip_margin: self.prefs.clip_margin,
+            default_view_transform: self.prefs.default_view_transform.clone(),
             guide_color: self.prefs.guide_color,
             background_color: self.prefs.background_color,
             is_maximized: self.gfx.as_ref().is_some_and(|g| g.window.is_maximized()),
@@ -3929,7 +4050,7 @@ impl App {
         if fi.width == 0 {
             return Vec::new();
         }
-        vec![
+        let mut lines = vec![
             ("File".into(), fi.name.clone()),
             ("Size".into(), format!("{}×{}", fi.width, fi.height)),
             ("Type".into(), fi.dtype.clone()),
@@ -3944,7 +4065,47 @@ impl App {
                     "2D".into()
                 },
             ),
-        ]
+        ];
+
+        // Camera EXIF (RAW files): append only the fields the file actually
+        // carries, so a sparse camera doesn't show blank rows.
+        if let Some(cam) = &fi.camera {
+            let body = match (&cam.make, &cam.model) {
+                (Some(make), Some(model)) => {
+                    // Some models already include the maker; avoid "Nikon NIKON Z6".
+                    if model.to_lowercase().contains(&make.to_lowercase()) {
+                        Some(model.clone())
+                    } else {
+                        Some(format!("{make} {model}"))
+                    }
+                }
+                (Some(s), None) | (None, Some(s)) => Some(s.clone()),
+                (None, None) => None,
+            };
+            if let Some(body) = body {
+                lines.push(("Camera".into(), body));
+            }
+            if let Some(lens) = &cam.lens {
+                lines.push(("Lens".into(), lens.clone()));
+            }
+            if let Some(iso) = cam.iso {
+                lines.push(("ISO".into(), format!("{iso:.0}")));
+            }
+            if let Some(shutter) = cam.shutter {
+                lines.push((
+                    "Shutter".into(),
+                    crate::image_loader::CameraMeta::shutter_display(shutter),
+                ));
+            }
+            if let Some(aperture) = cam.aperture {
+                lines.push(("Aperture".into(), format!("f/{aperture:.1}")));
+            }
+            if let Some(focal) = cam.focal_len {
+                lines.push(("Focal length".into(), format!("{focal:.0} mm")));
+            }
+        }
+
+        lines
         // ("View" is a dropdown and "Channels" are boxes — both rendered
         // directly in the metadata HUD, not as plain key/value text.)
     }
@@ -4075,14 +4236,15 @@ impl App {
             UiAction::SetView { display, view } => {
                 if self.ocio.set_active(&display, &view) {
                     log::info!("view transform -> {display}/{view}");
-                    // Update the T-toggle baseline so it returns here.
-                    if !view.eq_ignore_ascii_case("standard") {
-                        self.last_view = Some(view.clone());
-                    }
                     self.rebuild_ocio();
                     self.persist_view_if_panorama();
                     self.show_toast(view.clone());
                 }
+            }
+            UiAction::SetDefaultView(view) => {
+                self.prefs.default_view_transform = view.clone();
+                self.prefs.save();
+                self.show_toast(format!("Default view: {view}"));
             }
             UiAction::DismissError => {
                 self.load_state = LoadState::Idle;
@@ -4170,9 +4332,27 @@ impl App {
                     .to_string(),
                 );
             }
+            UiAction::SetRawAutoExposure(on) => {
+                self.prefs.raw_auto_exposure = on;
+                self.prefs.save();
+                self.show_toast(
+                    if on {
+                        "RAW auto-exposure on"
+                    } else {
+                        "RAW auto-exposure off"
+                    }
+                    .to_string(),
+                );
+            }
             UiAction::SetGuideColor(c) => {
                 self.prefs.guide_color = c;
                 self.prefs.save();
+                self.request_redraw();
+            }
+            UiAction::SetClipMargin(m) => {
+                self.prefs.clip_margin = m.clamp(0.0, 0.05);
+                self.prefs.save();
+                self.clip_mask_dirty = true; // margin is baked into the mask
                 self.request_redraw();
             }
             UiAction::OpenSettings => {
@@ -4379,6 +4559,15 @@ impl App {
         // included here — that's what keeps it from double-presenting).
         self.animating = cam_moving || tone_moving || slides_moving;
 
+        // (Re)build the clipping-overlay max-mip mask if it's stale and the
+        // overlay is on (lazy — nothing is built while the overlay is off).
+        if self.clip_overlay && self.clip_mask_dirty {
+            if let (Some(img), Some(gfx)) = (self.current_image.clone(), self.gfx.as_mut()) {
+                gfx.renderer.set_clip_mask(Some(&img), self.prefs.clip_margin);
+            }
+            self.clip_mask_dirty = false;
+        }
+
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();
         let cam = self.camera.camera;
@@ -4432,6 +4621,11 @@ impl App {
             rotation: self.rotation as i32,
             // Debug A/B only: force Lanczos off to compare against bilinear.
             lanczos_off: self.debug_no_lanczos,
+            // Clipping overlay (C): animated stripes over near-/at-max regions,
+            // judged on the original (pre-adjustment) per-channel values.
+            clip_overlay: self.clip_overlay,
+            clip_margin: self.prefs.clip_margin,
+            clip_time: self.app_epoch.elapsed().as_secs_f32() % 3600.0,
         };
         // Minimap thumbnail pass parameters (panel rect + fade), gathered before
         // the mutable gfx borrow. Drawn after the scene, below the egui overlay.
@@ -4492,6 +4686,8 @@ impl App {
                     guide_hover: -1,
                     clarity_amount: 0.0,
                     global_alpha: alpha,
+                    // No clipping stripes on the navigation thumbnail.
+                    clip_overlay: false,
                     ..base
                 };
                 gfx.renderer
@@ -4530,6 +4726,10 @@ impl App {
         for action in actions {
             self.handle_ui_action(action);
         }
+
+        // Grow / restore the window around the Settings dialog (after actions and
+        // the egui pass have settled this frame's open/close state).
+        self.sync_settings_window();
 
         // Record an undo entry if this frame's input changed the editing state
         // (after the UI actions and key handling above; coalesced during gestures).
@@ -4780,16 +4980,27 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { event, .. }
                 if !egui_consumed && event.state == ElementState::Pressed =>
             {
-                // OS auto-repeat only drives folder navigation (hold ← / → to flip
-                // through images). Every other key acts once per physical press, so
-                // a held adjustment/toggle/guide key can't ramp and flood the undo
-                // stack (and held zoom/rotate can't run away).
+                // OS auto-repeat drives folder navigation (hold ← / → to flip
+                // through images) and the continuous adjustment keys (exposure ,/. ;
+                // gamma Ctrl+,/. ; clarity [ ] and ; ') so they ramp while held.
+                // Toggles, guides, slots and one-shot actions still fire once per
+                // physical press, so a held toggle can't flicker or run away.
                 let nav_repeat = matches!(
                     &event.logical_key,
                     Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowRight)
                 );
-                if event.repeat && !nav_repeat {
+                let adjust_repeat = matches!(
+                    &event.logical_key,
+                    Key::Character(s) if matches!(s.as_str(), "," | "." | "[" | "]" | ";" | "'")
+                );
+                if event.repeat && !(nav_repeat || adjust_repeat) {
                     return;
+                }
+                // Keep held adjustments as one coalesced undo gesture (see
+                // ADJUST_COALESCE / undo_gesture_active): refresh the window on every
+                // press and repeat so the per-frame undo commit defers until release.
+                if adjust_repeat {
+                    self.adjust_repeat_until = Some(Instant::now() + ADJUST_COALESCE);
                 }
                 // Numpad digits = exact zoom; top-row digits = comparator slots
                 // (Ctrl+N saves, N recalls).
@@ -4913,10 +5124,15 @@ impl ApplicationHandler<UserEvent> for App {
             // promptly. No request_redraw: the Resized render above is the frame;
             // adding one would double-present (the old slow-mo regression).
             event_loop.set_control_flow(ControlFlow::Poll);
-        } else if self.toast_active() || self.animating || self.minimap_fading() {
-            // Drive ~60 fps while the toast fades, the zoom/pan eases, or the
-            // auto-shown minimap holds/fades. All settle quickly, after which we
-            // fall through to `Wait` (idle 0% CPU).
+        } else if self.toast_active()
+            || self.animating
+            || self.minimap_fading()
+            || self.clip_overlay
+        {
+            // Drive ~60 fps while the toast fades, the zoom/pan eases, the
+            // auto-shown minimap holds/fades, or the clipping overlay's stripes
+            // scroll. The transient ones settle quickly; the clip overlay holds
+            // ~60 fps until toggled off (its stripe animation needs fresh frames).
             let next = Instant::now() + Duration::from_millis(16);
             event_loop.set_control_flow(ControlFlow::WaitUntil(next));
             self.request_redraw();
@@ -4925,6 +5141,9 @@ impl ApplicationHandler<UserEvent> for App {
             self.metadata_hide_deadline,
             cursor_idle_deadline,
             anim_deadline,
+            // Wake once the held-adjustment coalesce window closes so the deferred
+            // undo entry commits even after the tone ease has settled.
+            self.adjust_repeat_until,
         ]
         .into_iter()
         .flatten()
@@ -5301,6 +5520,8 @@ fn abs_diff_image(a: &ImageData, b: &ImageData) -> Option<ImageData> {
         pixels,
         is_encoded_srgb: a.is_encoded_srgb,
         animation: None,
+        camera: None,
+        clip_max: a.clip_max,
     })
 }
 
@@ -5833,6 +6054,8 @@ mod tests {
             pixels: PixelBuffer::U8(px),
             is_encoded_srgb: true,
             animation: None,
+            camera: None,
+            clip_max: crate::image_loader::CLIP_MAX_NORM,
         };
         let a = mk(vec![10, 20, 30, 255, 100, 100, 100, 255]);
         let b = mk(vec![10, 20, 30, 255, 40, 90, 160, 255]);

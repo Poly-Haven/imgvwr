@@ -96,6 +96,14 @@ pub struct UiInputs {
     pub background_color: [u8; 3],
     /// Whether HDR panoramas get an auto-exposure pick on load.
     pub auto_exposure: bool,
+    /// Whether RAW photos get an auto-exposure pick on load (off by default).
+    pub raw_auto_exposure: bool,
+    /// Clipping-overlay margin (normalised fraction of the format max), for the
+    /// settings slider.
+    pub clip_margin: f32,
+    /// The configured Default View Transform (T-key target), for the settings
+    /// dropdown.
+    pub default_view_transform: String,
     /// Guide-line colour (sRGB 0–255), for the settings picker.
     pub guide_color: [u8; 3],
     /// Whether the window is maximized (drives the maximize/restore glyph).
@@ -213,6 +221,8 @@ pub enum UiAction {
         display: String,
         view: String,
     },
+    /// Set the Default View Transform preference (the T-key / HDRI-load target).
+    SetDefaultView(String),
     DismissError,
     CloseHelp,
     /// Recall the comparator slot at this index (0..=8).
@@ -227,6 +237,10 @@ pub enum UiAction {
     SetBackgroundColor([u8; 3]),
     /// Toggle the HDR-panorama auto-exposure-on-load setting.
     SetAutoExposure(bool),
+    /// Toggle the RAW-photo auto-exposure-on-load setting.
+    SetRawAutoExposure(bool),
+    /// Set the clipping-overlay margin (normalised fraction of the format max).
+    SetClipMargin(f32),
     /// Set the guide-line colour (sRGB 0–255).
     SetGuideColor([u8; 3]),
     /// Isolate a single channel as greyscale (`None` = show all channels).

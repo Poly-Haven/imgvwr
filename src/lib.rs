@@ -7,6 +7,8 @@ pub mod camera;
 #[cfg(feature = "ocio")]
 pub mod exr_native;
 pub mod image_loader;
+#[cfg(feature = "ocio")]
+pub mod raw_native;
 pub mod logging;
 pub mod ocio;
 pub mod prefs;

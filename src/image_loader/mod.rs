@@ -41,10 +41,48 @@ pub struct ImageData {
     pub pixels: PixelBuffer,
     /// True → source pixels are sRGB-encoded and need the GPU sRGB decode.
     pub is_encoded_srgb: bool,
+    /// Per-channel (RGBA) maximum representable value in the *texel* value space,
+    /// for the clipping overlay: a channel clips at `clip_max[c] * (1 - margin)`.
+    /// Integer formats normalise their max to 1.0; unbounded float formats use
+    /// `f32::MAX` (never clips); a 16-bit-half EXR uses the half max (65504); RAW
+    /// uses the per-channel sensor-saturation level (differs by channel after WB).
+    pub clip_max: [f32; 4],
     /// Frames of an animated GIF (`None` for static images and single-frame
     /// GIFs). `pixels`/`width`/`height` mirror frame 0 so the static code paths
     /// (initial upload, diff, auto-exposure) work unchanged.
     pub animation: Option<Animation>,
+    /// Camera EXIF metadata, populated for RAW files (and `None` otherwise).
+    /// Surfaced in the F2 info box.
+    pub camera: Option<CameraMeta>,
+}
+
+/// Camera EXIF metadata read from a RAW file. Every field is optional — cameras
+/// and formats vary in what they record. Shown in the F2 metadata box.
+#[derive(Clone, Debug, Default)]
+pub struct CameraMeta {
+    pub make: Option<String>,
+    pub model: Option<String>,
+    pub lens: Option<String>,
+    pub iso: Option<f32>,
+    /// Exposure time in seconds (formatted as a shutter fraction for display).
+    pub shutter: Option<f32>,
+    /// Aperture f-number.
+    pub aperture: Option<f32>,
+    /// Focal length in millimetres.
+    pub focal_len: Option<f32>,
+}
+
+impl CameraMeta {
+    /// Human-readable "1/800 s", "0.5 s" etc. for an exposure time in seconds.
+    pub fn shutter_display(secs: f32) -> String {
+        if secs <= 0.0 {
+            String::new()
+        } else if secs >= 1.0 {
+            format!("{secs:.0} s")
+        } else {
+            format!("1/{:.0} s", (1.0 / secs).round())
+        }
+    }
 }
 
 /// An animated image (currently only GIF): a list of pre-composited RGBA8 frames
@@ -120,6 +158,17 @@ pub enum PixelBuffer {
     F32(Vec<f32>),
 }
 
+/// `clip_max` for a format whose maximum is normalised to 1.0 in the texel value
+/// space (all 8-bit and 16-bit integer formats — the loader maps their max to 1.0).
+pub const CLIP_MAX_NORM: [f32; 4] = [1.0; 4];
+
+/// `clip_max` for an unbounded float format (32-bit EXR / Radiance HDR): values
+/// far exceed 1.0 legitimately, so nothing should ever read as clipped.
+pub const CLIP_MAX_NONE: [f32; 4] = [f32::MAX; 4];
+
+/// The largest finite IEEE-754 half-float — the clip point for a 16-bit-half EXR.
+pub const HALF_MAX: f32 = 65504.0;
+
 /// Panorama detection: an image is treated as equirectangular when its width is
 /// exactly twice its height.
 pub fn is_equirectangular(width: u32, height: u32) -> bool {
@@ -154,6 +203,15 @@ pub fn is_supported(path: &Path) -> bool {
 /// Every extension imgvwr accepts (for the open-file dialog filter).
 pub fn supported_extensions() -> Vec<&'static str> {
     IMAGE_EXTS.iter().chain(RAW_EXTS.iter()).copied().collect()
+}
+
+/// True if `path`'s (lower-cased) extension is a camera RAW format. Used to apply
+/// the RAW-specific load policy (e.g. no auto-exposure by default).
+pub fn is_raw(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => RAW_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
+        None => false,
+    }
 }
 
 /// Cheaply read an image's *displayed* pixel dimensions from its header, without
@@ -201,8 +259,19 @@ pub fn load_image(path: &Path, progress: &std::sync::Arc<ReadProgress>) -> Resul
         // Animated PNG (APNG) plays its frames; a plain PNG falls through below.
         formats::load_apng(path, progress)
     } else if RAW_EXTS.contains(&ext.as_str()) {
-        // rawler reads the file internally; leave the read indeterminate.
-        formats::load_raw(path)
+        // LibRaw (the `ocio`/vcpkg path) develops RAW to scene-linear float with a
+        // linear camera response — accurate viewing with recoverable highlights.
+        // Without the feature, fall back to the pure-Rust best-effort `rawler`
+        // path (sRGB-developed). Both read the file internally; read stays
+        // indeterminate.
+        #[cfg(feature = "ocio")]
+        {
+            crate::raw_native::load_raw_native(path)
+        }
+        #[cfg(not(feature = "ocio"))]
+        {
+            formats::load_raw(path)
+        }
     } else {
         // PNG/JPEG/BMP/TIFF/WebP/GIF/ICO/TGA/PNM, Radiance HDR, and anything
         // else the `image` crate recognises.

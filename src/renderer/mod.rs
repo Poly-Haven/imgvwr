@@ -32,6 +32,8 @@ const OCIO_FIRST_UNIT: u32 = 1;
 
 /// Texture unit for the slot-difference image (above any plausible LUT count).
 const DIFF_UNIT: u32 = 12;
+/// Texture unit for the clipping-overlay max-mip mask.
+const CLIP_MASK_UNIT: u32 = 13;
 
 /// Maximum simultaneous guide lines. Sized to hold a full 1/32 grid on both
 /// axes (31 + 31 = 62 lines). Must match the `u_guides[..]` array in the
@@ -90,6 +92,16 @@ pub struct RenderParams {
     pub rotation: i32,
     /// Force-disable Lanczos minification (debug A/B only); normally false.
     pub lanczos_off: bool,
+    /// Clipping overlay (C): animated diagonal stripes over regions whose
+    /// *original* (pre-adjustment) per-channel value is within [`clip_margin`]
+    /// of the format max (normalised to 1.0). Per-channel: each clipped channel
+    /// tints the lit stripe (R→red, R+G→yellow, all→white), alternating black.
+    pub clip_overlay: bool,
+    /// Clip-detection margin below the format max, as a normalised fraction
+    /// (e.g. 0.005 ≈ within ~1 code of 255 at 8-bit). Configured in Settings.
+    pub clip_margin: f32,
+    /// Wall-clock seconds, drives the clipping overlay's scrolling stripes.
+    pub clip_time: f32,
 }
 
 impl Default for RenderParams {
@@ -122,6 +134,9 @@ impl Default for RenderParams {
             global_alpha: 1.0,
             rotation: 0,
             lanczos_off: false,
+            clip_overlay: false,
+            clip_margin: 0.005,
+            clip_time: 0.0,
         }
     }
 }
@@ -151,6 +166,12 @@ struct Uniforms {
     global_alpha: Option<glow::UniformLocation>,
     rotation: Option<glow::UniformLocation>,
     lanczos: Option<glow::UniformLocation>,
+    clip_overlay: Option<glow::UniformLocation>,
+    clip_margin: Option<glow::UniformLocation>,
+    clip_max: Option<glow::UniformLocation>,
+    clip_mask: Option<glow::UniformLocation>,
+    clip_mask_valid: Option<glow::UniformLocation>,
+    time: Option<glow::UniformLocation>,
     // Single-texture sampler.
     image: Option<glow::UniformLocation>,
     // Tiled-texture sampler + grid.
@@ -191,6 +212,12 @@ impl Uniforms {
             global_alpha: u("u_global_alpha"),
             rotation: u("u_rotation"),
             lanczos: u("u_lanczos"),
+            clip_overlay: u("u_clip_overlay"),
+            clip_margin: u("u_clip_margin"),
+            clip_max: u("u_clip_max"),
+            clip_mask: u("u_clip_mask"),
+            clip_mask_valid: u("u_clip_mask_valid"),
+            time: u("u_time"),
             image: u("u_image"),
             tiles: u("u_tiles"),
             tile_cols: u("u_tile_cols"),
@@ -248,6 +275,9 @@ pub struct Renderer {
     max_texture_size: i32,
     /// Uploaded comparator-slot image for the difference checker (unit DIFF_UNIT).
     diff_texture: Option<glow::Texture>,
+    /// Max-mipped per-channel clip mask for the clipping overlay (unit
+    /// CLIP_MASK_UNIT); `None` for tiled images (overlay falls back to per-texel).
+    clip_mask_texture: Option<glow::Texture>,
     /// Reusable offscreen post-process chain (Clarity, and future review tools).
     post: post::PostChain,
 }
@@ -286,6 +316,7 @@ impl Renderer {
                 threshold,
                 max_texture_size,
                 diff_texture: None,
+                clip_mask_texture: None,
                 post,
             })
         }
@@ -310,6 +341,25 @@ impl Renderer {
                     self.diff_texture.is_some()
                 }
                 None => true,
+            }
+        }
+    }
+
+    /// Rebuild (or clear with `None`) the max-mipped clip mask for the clipping
+    /// overlay at the given margin. Returns true if a mask is available; false for
+    /// a tiled image (the shader then falls back to per-texel detection).
+    pub fn set_clip_mask(&mut self, data: Option<&ImageData>, margin: f32) -> bool {
+        unsafe {
+            if let Some(t) = self.clip_mask_texture.take() {
+                self.gl.delete_texture(t);
+            }
+            match data {
+                Some(d) => {
+                    self.clip_mask_texture =
+                        texture::build_clip_mask(&self.gl, d, margin, self.max_texture_size);
+                    self.clip_mask_texture.is_some()
+                }
+                None => false,
             }
         }
     }
@@ -582,6 +632,25 @@ impl Renderer {
             gl.uniform_1_i32(u.isolate_channel.as_ref(), params.isolate_channel);
             gl.uniform_2_f32(u.stretch.as_ref(), params.stretch[0], params.stretch[1]);
             gl.uniform_1_i32(u.sharpness.as_ref(), params.sharpness as i32);
+            // Clipping overlay: animated per-channel stripes over near-/at-max
+            // regions (judged on the original sampled values, pre-adjustment).
+            gl.uniform_1_i32(u.clip_overlay.as_ref(), params.clip_overlay as i32);
+            gl.uniform_1_f32(u.clip_margin.as_ref(), params.clip_margin);
+            // Per-channel clip point in texel space — depends on the source format
+            // (1.0 for integer, 65504 for 16-bit-half EXR, f32::MAX for unbounded
+            // float). Carried on the texture, not RenderParams.
+            let cm = image.clip_max;
+            gl.uniform_4_f32(u.clip_max.as_ref(), cm[0], cm[1], cm[2], cm[3]);
+            // Max-mip clip mask (robust to minification); absent for tiled images,
+            // where the shader falls back to per-texel detection at the display LOD.
+            let have_mask = params.clip_overlay && self.clip_mask_texture.is_some();
+            gl.uniform_1_i32(u.clip_mask_valid.as_ref(), have_mask as i32);
+            gl.uniform_1_i32(u.clip_mask.as_ref(), CLIP_MASK_UNIT as i32);
+            if have_mask {
+                gl.active_texture(glow::TEXTURE0 + CLIP_MASK_UNIT);
+                gl.bind_texture(glow::TEXTURE_2D, self.clip_mask_texture);
+            }
+            gl.uniform_1_f32(u.time.as_ref(), params.clip_time);
             // Slot-difference image on its own unit (only meaningful when u_diff).
             let diffing = params.diff && self.diff_texture.is_some();
             gl.uniform_1_i32(u.diff.as_ref(), diffing as i32);

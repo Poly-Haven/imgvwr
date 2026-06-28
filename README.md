@@ -14,9 +14,17 @@ for Windows.
   alias-free at any zoom-out); higher bit depths and all upscaling use bilinear.
 - **OCIO v2 colour management:** bundled Blender/AgX config, with AgX/Filmic and
   other view transforms selectable from the metadata box's View dropdown.
-- **Review tools:** per-channel isolation, an auto-exposure pick for HDR
-  panoramas, and a GPU **Clarity** (local-contrast) filter that can be cranked
-  well past photographic levels to make issues pop.
+- **Accurate camera RAW:** RAW photos are developed (demosaiced) to scene-linear
+  with a **linear camera response** — camera white balance and the camera→sRGB
+  matrix, but *no* tone curve — so you see the sensor data as it is, not a
+  "make it pretty" rendering. White maps to 1.0 and highlights keep their
+  headroom, so lowering the exposure (or a Filmic/ACES view transform) recovers
+  detail in regions that first looked clipped.
+- **Review tools:** per-channel isolation, a **clipping overlay** (`C`) that marks
+  at-/near-max pixels with animated per-channel stripes (judged on the original
+  data, not the adjusted view), an auto-exposure pick for HDR panoramas, and a GPU
+  **Clarity** (local-contrast) filter that can be cranked well past photographic
+  levels to make issues pop.
 - **Minimal UI:** the image *is* the window; a borderless titlebar (Open,
   Settings, window controls) reveals at the top edge, an adjustment-slider panel
   at the bottom edge, and the metadata box at the top-right — all auto-hiding.
@@ -45,13 +53,13 @@ for Windows.
 
 | Input | Action |
 |---|---|
-| `,` / `.` | Exposure −/+ 0.5 stops |
-| `Ctrl + ,` / `Ctrl + .` | Gamma −/+ 0.1 |
-| `[` / `]` | Clarity (local contrast) radius −/+ |
-| `;` / `'` | Clarity strength −/+ (0 = off; crank high to make issues pop) |
+| `,` / `.` | Exposure −/+ 0.5 stops (hold to ramp) |
+| `Ctrl + ,` / `Ctrl + .` | Gamma −/+ 0.1 (hold to ramp) |
+| `[` / `]` | Clarity (local contrast) radius −/+ (hold to ramp) |
+| `;` / `'` | Clarity strength −/+ (0 = off; crank high to make issues pop; hold to ramp) |
 | `Ctrl + R` | Reset all adjustments (exposure, gamma, clarity, channel, sharpness, diff) |
 | `Ctrl + Z` / `Ctrl + Shift + Z` (or `Ctrl + Y`) | Undo / redo edits — guides, adjustments and toggle modes (not navigation); up to 256 steps, per image |
-| `T` | Toggle Standard ↔ last-used view transform |
+| `T` | Toggle Standard ↔ the Default View Transform (set in Settings; defaults to Filmic) |
 | `O` | Open file… |
 | `←` / `→` | Previous / next image in the folder (alphabetical) |
 | `Space` | Pause / play an animation (GIF / animated WebP / APNG) |
@@ -62,6 +70,7 @@ for Windows.
 | Input | Action |
 |---|---|
 | `S` | Sharpness checker — `\|original − blurred\|`, amplifiable by exposure |
+| `C` | Clipping overlay — animated diagonal stripes over regions at/near the format max, judged on the **original** data (pre-adjustment); per channel (red stripes = red clipped, white = all three), margin configurable in Settings |
 | `G` | Add the next guide *level* — density doubles each press (½, then ¼, ⅛ … down to 1/32 on each axis) |
 | Pull from a ruler | Drag a guide out of a ruler — left ruler → vertical, bottom ruler → horizontal (2D pixels or panorama degrees) |
 | Drag / right-click a guide | Grab a guide to move it, or delete it (drag off the image, or right-click) — 2D and panorama |
@@ -107,7 +116,16 @@ numbered flags at the top-right; the active one is highlighted.
 ## Supported formats
 
 JPEG, PNG / APNG, BMP, TIFF, WebP, GIF, ICO, TGA, PNM, Radiance HDR, OpenEXR, and
-(best-effort) camera RAW: NEF, CR2, CR3, ARW, DNG, RAF, ORF, RW2, and similar.
+camera RAW: NEF, CR2, CR3, ARW, DNG, RAF, ORF, RW2, PEF, and similar.
+
+Camera RAW is developed with **LibRaw** to scene-linear float (demosaic + camera
+white balance + camera→sRGB matrix, linear response — no tone curve), matching
+the HDR/EXR pipeline so exposure and view transforms behave the same. RAW photos
+do **not** auto-expose by default (the develop already respects the real
+exposure); enable *Auto-expose RAW photos on open* in Settings to brighten dark
+shots automatically. The F2 box shows camera, lens, ISO, shutter, aperture and
+focal length when the file records them. (Without the `ocio` feature, RAW falls
+back to a best-effort pure-Rust decode.)
 
 **Animation:** GIF, animated WebP, and APNG (animated PNG) play automatically and
 loop; press `Space` to pause/resume.
@@ -129,16 +147,17 @@ Target platform is **Windows only** (x64).
 
 - **Rust** (stable, MSVC toolchain).
 - **MSVC C++ build tools** (Visual Studio 2019/2022 or the standalone Build
-  Tools) — used by the `cc` crate to compile the OCIO shim.
+  Tools) — used by the `cc` crate to compile the OCIO / OpenEXR / LibRaw shims.
 - **LLVM/Clang on `PATH`** (provides `libclang`) — required by `bindgen`.
-- **vcpkg** providing OpenColorIO, lcms, and OpenEXR. Either workflow works:
+- **vcpkg** providing OpenColorIO, lcms, OpenEXR, and LibRaw. Either workflow
+  works:
 
   *Classic mode* (set `VCPKG_ROOT`):
   ```bat
   git clone https://github.com/microsoft/vcpkg %USERPROFILE%\vcpkg
   %USERPROFILE%\vcpkg\bootstrap-vcpkg.bat
   setx VCPKG_ROOT %USERPROFILE%\vcpkg
-  %VCPKG_ROOT%\vcpkg install opencolorio lcms openexr --triplet x64-windows
+  %VCPKG_ROOT%\vcpkg install opencolorio lcms openexr libraw --triplet x64-windows
   ```
 
   *Manifest mode* (uses `vcpkg.json`; no `VCPKG_ROOT` needed):
@@ -149,7 +168,8 @@ Target platform is **Windows only** (x64).
   `build.rs` looks for the libraries in `./vcpkg_installed` (manifest) first, then
   `%VCPKG_ROOT%\installed` (classic). `openexr` provides the fallback decoder for
   DWAA/DWAB-compressed EXRs; `lcms` powers ICC-profile conversion (JPEGs/PNGs with
-  a non-sRGB embedded profile are converted to sRGB on load).
+  a non-sRGB embedded profile are converted to sRGB on load); `libraw` develops
+  camera RAW files to scene-linear float.
 
 ### Packaging & releasing
 

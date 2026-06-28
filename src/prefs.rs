@@ -46,12 +46,27 @@ pub struct AppPreferences {
     /// Background colour (sRGB 0–255) shown behind transparent images.
     #[serde(default = "default_background_color")]
     pub background_color: [u8; 3],
+    /// The view transform the T key toggles to (from Standard), and the default
+    /// applied to HDRIs on load. A view name matched case-insensitively against
+    /// the active OCIO display's views (e.g. "Filmic", "AgX", "ACES 2.0").
+    #[serde(default = "default_view_transform")]
+    pub default_view_transform: String,
     /// Auto-pick a starting exposure for HDR panoramas on load.
     #[serde(default = "default_true")]
     pub auto_exposure: bool,
+    /// Auto-pick a starting exposure for RAW photos on load. Off by default: a
+    /// RAW's scene-linear develop already respects the actual photo exposure
+    /// (white = 1.0), so exposure 0 is faithful. Opt in to brighten dark shots.
+    #[serde(default)]
+    pub raw_auto_exposure: bool,
     /// Colour (sRGB 0–255) of guide lines.
     #[serde(default = "default_guide_color")]
     pub guide_color: [u8; 3],
+    /// Clipping-overlay margin: a channel counts as clipped when its original
+    /// value is within this fraction of the format max (1.0). E.g. 0.005 ≈ within
+    /// ~1 code of 255 at 8-bit. Configured in Settings; see the C-key overlay.
+    #[serde(default = "default_clip_margin")]
+    pub clip_margin: f32,
 }
 
 fn default_corner_radius() -> u32 {
@@ -67,6 +82,14 @@ fn default_guide_color() -> [u8; 3] {
     [255, 80, 80]
 }
 
+fn default_clip_margin() -> f32 {
+    0.005 // ≈ within ~1 code of 255 at 8-bit
+}
+
+fn default_view_transform() -> String {
+    "Filmic".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -80,8 +103,11 @@ impl Default for AppPreferences {
             startup_monitor: None,
             corner_radius: default_corner_radius(),
             background_color: default_background_color(),
+            default_view_transform: default_view_transform(),
             auto_exposure: true,
+            raw_auto_exposure: false,
             guide_color: default_guide_color(),
+            clip_margin: default_clip_margin(),
         }
     }
 }

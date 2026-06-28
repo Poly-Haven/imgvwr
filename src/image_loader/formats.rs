@@ -173,6 +173,8 @@ fn finish_animation(
         pixels: PixelBuffer::U8(pixels),
         is_encoded_srgb: true,
         animation,
+        camera: None,
+        clip_max: super::CLIP_MAX_NORM,
     };
     apply_icc(icc, &mut data);
     Ok(data)
@@ -354,6 +356,7 @@ fn apply_icc(_icc: Option<Vec<u8>>, _data: &mut ImageData) {}
 /// We read rawler's `Intermediate` rather than its `to_dynamic_image()` because
 /// rawler links `image` 0.24 while the rest of imgvwr uses 0.25 — the
 /// `DynamicImage` types are not interchangeable across that boundary.
+#[cfg(not(feature = "ocio"))]
 pub fn load_raw(path: &Path) -> Result<ImageData> {
     use rawler::imgop::develop::{Intermediate, RawDevelop};
 
@@ -421,6 +424,9 @@ pub fn load_raw(path: &Path) -> Result<ImageData> {
         pixels: PixelBuffer::F32(rgba),
         is_encoded_srgb: true,
         animation: None,
+        camera: None,
+        // rawler develops to display-referred sRGB in [0, 1] → max 1.0.
+        clip_max: super::CLIP_MAX_NORM,
     })
 }
 
@@ -432,6 +438,7 @@ pub fn load_raw(path: &Path) -> Result<ImageData> {
 /// TIFF-based raws (NEF/CR2/DNG/ARW/ORF/RW2/PEF/SR2/NRW/RWL); non-TIFF raws fall
 /// through to `None` (no rotation), matching the previous behaviour. Returns
 /// `None` for missing/identity orientation.
+#[cfg(not(feature = "ocio"))]
 fn raw_orientation_flips(path: &Path) -> Option<(bool, bool, bool)> {
     let orientation = read_tiff_orientation(path)?;
     let flips = rawler::Orientation::from_u16(orientation).to_flips();
@@ -440,6 +447,7 @@ fn raw_orientation_flips(path: &Path) -> Option<(bool, bool, bool)> {
 
 /// Read the IFD0 Orientation tag (0x0112) from a little/big-endian TIFF-based
 /// file. Returns the raw EXIF orientation value (1..=8), or `None`.
+#[cfg(not(feature = "ocio"))]
 fn read_tiff_orientation(path: &Path) -> Option<u16> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -485,6 +493,7 @@ fn read_tiff_orientation(path: &Path) -> Option<u16> {
 /// Apply EXIF flips/transpose to an interleaved RGBA-f32 buffer in place,
 /// updating `width`/`height` when transposed. Flips are applied before the
 /// transpose, matching rawler's `Orientation::to_flips` contract.
+#[cfg(not(feature = "ocio"))]
 fn apply_orientation_f32(
     rgba: &mut Vec<f32>,
     width: &mut usize,
@@ -589,6 +598,14 @@ fn load_exr_rust(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData>
         FlatSamples::F32(_) => "float32",
         FlatSamples::U32(_) => "uint32",
     };
+    // Clip point for the overlay: a 16-bit-half EXR genuinely clips at the half
+    // max (65504); 32-bit float is unbounded (never clips); 32-bit uint clips at
+    // 2^32-1. The samples are uploaded as f32 in their native value space.
+    let clip_max = match &list[0].sample_data {
+        FlatSamples::F16(_) => [super::HALF_MAX; 4],
+        FlatSamples::F32(_) => super::CLIP_MAX_NONE,
+        FlatSamples::U32(_) => [u32::MAX as f32; 4],
+    };
     let compression = format!("{:?}", layer.encoding.compression);
 
     let to_f32 = |samples: &FlatSamples| -> Vec<f32> {
@@ -653,6 +670,8 @@ fn load_exr_rust(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData>
         pixels: PixelBuffer::F32(rgba),
         is_encoded_srgb: false,
         animation: None,
+        camera: None,
+        clip_max,
     })
 }
 
@@ -707,6 +726,14 @@ pub fn dynamic_to_imagedata(
         None => dtype.to_string(),
     };
 
+    // 32-bit float (HDR / float TIFF) is unbounded → never clips; 8-/16-bit
+    // integer formats normalise their max to 1.0.
+    let clip_max = if is_float {
+        super::CLIP_MAX_NONE
+    } else {
+        super::CLIP_MAX_NORM
+    };
+
     ImageData {
         path: path.to_path_buf(),
         width,
@@ -717,6 +744,8 @@ pub fn dynamic_to_imagedata(
         pixels,
         is_encoded_srgb: is_srgb,
         animation: None,
+        camera: None,
+        clip_max,
     }
 }
 
@@ -736,6 +765,8 @@ mod icc_tests {
             pixels: PixelBuffer::U8(vec![value, value, value, 255]),
             is_encoded_srgb: true,
             animation: None,
+            camera: None,
+            clip_max: crate::image_loader::CLIP_MAX_NORM,
         }
     }
 

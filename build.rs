@@ -12,6 +12,8 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ocio/shim.h");
     println!("cargo:rerun-if-changed=src/exr_native/shim.cpp");
     println!("cargo:rerun-if-changed=src/exr_native/shim.h");
+    println!("cargo:rerun-if-changed=src/raw_native/shim.cpp");
+    println!("cargo:rerun-if-changed=src/raw_native/shim.h");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vcpkg.json");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
@@ -36,6 +38,11 @@ fn main() {
     assert!(
         include_dir.join("OpenColorIO").exists(),
         "OpenColorIO headers not found under {} - run `vcpkg install opencolorio` (see README)",
+        include_dir.display()
+    );
+    assert!(
+        include_dir.join("libraw").exists(),
+        "LibRaw headers not found under {} - run `vcpkg install libraw` (see README)",
         include_dir.display()
     );
 
@@ -85,10 +92,32 @@ fn main() {
         .write_to_file(out_dir.join("exr_shim_bindings.rs"))
         .expect("failed to write OpenEXR shim bindings");
 
+    // 3b. Compile the LibRaw shim (decodes camera RAW to scene-linear float RGBA
+    //     with a linear camera response) and bind its plain-C surface.
+    cc::Build::new()
+        .cpp(true)
+        .file("src/raw_native/shim.cpp")
+        .include(&include_dir)
+        .std("c++17")
+        .flag_if_supported("/EHsc")
+        .compile("raw_shim");
+    let raw_bindings = bindgen::Builder::default()
+        .header("src/raw_native/shim.h")
+        .allowlist_function("raw_native_.*")
+        .allowlist_type("RawNativeInfo")
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .generate()
+        .expect("failed to generate LibRaw shim bindings");
+    raw_bindings
+        .write_to_file(out_dir.join("raw_shim_bindings.rs"))
+        .expect("failed to write LibRaw shim bindings");
+
     // 4. Link OpenColorIO and OpenEXR (versioned import lib names are discovered
     //    from the vcpkg lib dir, e.g. OpenEXR-3_4.lib).
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=OpenColorIO");
+    // LibRaw (thread-safe variant raw_r.lib -> raw_r.dll, staged below).
+    println!("cargo:rustc-link-lib=raw_r");
     for stem in ["OpenEXR", "OpenEXRCore", "Imath", "Iex", "IlmThread"] {
         match find_versioned_lib(&lib_dir, stem) {
             Some(name) => println!("cargo:rustc-link-lib={name}"),

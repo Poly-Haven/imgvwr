@@ -198,6 +198,8 @@ pub struct ImageTexture {
     pub is_encoded_srgb: bool,
     /// 8-bit (LDR) source — eligible for Lanczos downscaling.
     pub is_u8: bool,
+    /// Per-channel (RGBA) clip point in texel value space (clipping overlay).
+    pub clip_max: [f32; 4],
 }
 
 impl ImageTexture {
@@ -260,6 +262,7 @@ pub struct UploadJob {
     aspect: f32,
     is_encoded_srgb: bool,
     is_u8: bool,
+    clip_max: [f32; 4],
 }
 
 enum JobKind {
@@ -376,6 +379,7 @@ pub unsafe fn begin_upload(
         aspect: data.aspect(),
         is_encoded_srgb: data.is_encoded_srgb,
         is_u8: data.is_u8(),
+        clip_max: data.clip_max,
     })
 }
 
@@ -389,7 +393,8 @@ pub unsafe fn pump_upload(
 ) -> Option<ImageTexture> {
     let (_, format, ty, bpp, src) = pixel_format(data);
     gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-    let (aspect, is_srgb, is_u8) = (job.aspect, job.is_encoded_srgb, job.is_u8);
+    let (aspect, is_srgb, is_u8, clip_max) =
+        (job.aspect, job.is_encoded_srgb, job.is_u8, job.clip_max);
 
     match &mut job.kind {
         JobKind::Single {
@@ -423,6 +428,7 @@ pub unsafe fn pump_upload(
                     aspect,
                     is_encoded_srgb: is_srgb,
                     is_u8,
+                    clip_max,
                 });
             }
             gl.bind_texture(glow::TEXTURE_2D, None);
@@ -484,6 +490,7 @@ pub unsafe fn pump_upload(
                     aspect,
                     is_encoded_srgb: is_srgb,
                     is_u8,
+                    clip_max,
                 });
             }
             gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
@@ -546,6 +553,127 @@ pub unsafe fn upload_diff_texture(
     let clamp = glow::CLAMP_TO_EDGE as i32;
     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, clamp);
     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, clamp);
+    gl.bind_texture(glow::TEXTURE_2D, None);
+    Some(tex)
+}
+
+/// Build a per-channel clipping MASK texture with a **max-reduced** mip pyramid:
+/// each texel is `255` in a channel whose original value is within `margin` of
+/// that channel's format max (`data.clip_max`). Downsampling takes the MAX (not
+/// the average) of each 2×2 block and the texture samples NEAREST, so even a
+/// single clipped source texel survives minification — averaged mips would dilute
+/// a few-pixel blown highlight (e.g. a sun disc) away when zoomed out. Returns
+/// `None` for images that would need tiling (the mask, like the diff, is a single
+/// texture); callers fall back to per-texel detection there. # Safety: GL current.
+pub unsafe fn build_clip_mask(
+    gl: &glow::Context,
+    data: &ImageData,
+    margin: f32,
+    max_size: i32,
+) -> Option<glow::Texture> {
+    let (w, h) = (data.width as i32, data.height as i32);
+    if w <= 0 || h <= 0 || w.max(h) > max_size {
+        return None;
+    }
+    let n = (w as usize) * (h as usize);
+    let cm = data.clip_max;
+    let thr = [
+        cm[0] * (1.0 - margin),
+        cm[1] * (1.0 - margin),
+        cm[2] * (1.0 - margin),
+        cm[3] * (1.0 - margin),
+    ];
+    // Level 0: per-channel clip flag from the original (unadjusted) values.
+    let mut cur: Vec<[u8; 4]> = vec![[0u8; 4]; n];
+    match &data.pixels {
+        PixelBuffer::U8(v) => {
+            for (i, px) in cur.iter_mut().enumerate() {
+                for c in 0..4 {
+                    let val = v[i * 4 + c] as f32 / 255.0;
+                    px[c] = if val >= thr[c] { 255 } else { 0 };
+                }
+            }
+        }
+        PixelBuffer::F32(v) => {
+            for (i, px) in cur.iter_mut().enumerate() {
+                for c in 0..4 {
+                    px[c] = if v[i * 4 + c] >= thr[c] { 255 } else { 0 };
+                }
+            }
+        }
+    }
+
+    let levels = (w.max(h) as f32).log2().floor() as i32 + 1;
+    let tex = gl.create_texture().ok()?;
+    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+    gl.tex_storage_2d(glow::TEXTURE_2D, levels.max(1), glow::RGBA8, w, h);
+    gl.tex_sub_image_2d(
+        glow::TEXTURE_2D,
+        0,
+        0,
+        0,
+        w,
+        h,
+        glow::RGBA,
+        glow::UNSIGNED_BYTE,
+        glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(&cur))),
+    );
+    // Each successive level = MAX over the 2×2 block (edges clamp).
+    let (mut lw, mut lh) = (w, h);
+    for lvl in 1..levels {
+        let nw = (lw / 2).max(1);
+        let nh = (lh / 2).max(1);
+        let mut next: Vec<[u8; 4]> = vec![[0u8; 4]; (nw * nh) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                let mut m = [0u8; 4];
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let sx = (x * 2 + dx).min(lw - 1) as usize;
+                        let sy = (y * 2 + dy).min(lh - 1) as usize;
+                        let p = cur[sy * lw as usize + sx];
+                        for c in 0..4 {
+                            m[c] = m[c].max(p[c]);
+                        }
+                    }
+                }
+                next[(y * nw + x) as usize] = m;
+            }
+        }
+        gl.tex_sub_image_2d(
+            glow::TEXTURE_2D,
+            lvl,
+            0,
+            0,
+            nw,
+            nh,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(&next))),
+        );
+        cur = next;
+        lw = nw;
+        lh = nh;
+    }
+    // Each mip level already holds the block MAX, so minification can't dilute a
+    // clipped texel away. Sample LINEAR (not NEAREST) so that max bleeds across
+    // ~1 texel — paired with a low shader threshold, a clipped region is caught
+    // even when it falls between screen-pixel sample points at high minification
+    // (NEAREST point-sampling would miss a ~1-texel-wide highlight).
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MIN_FILTER,
+        glow::LINEAR_MIPMAP_LINEAR as i32,
+    );
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+    // S repeats (panorama longitude wrap); T clamps — matches the image sampler's
+    // common case (exact edge wrap is immaterial for a clip indicator).
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_WRAP_T,
+        glow::CLAMP_TO_EDGE as i32,
+    );
     gl.bind_texture(glow::TEXTURE_2D, None);
     Some(tex)
 }

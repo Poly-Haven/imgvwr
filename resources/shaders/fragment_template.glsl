@@ -31,6 +31,12 @@ uniform int   u_rotation;            // 2D display rotation, 90° CW quarter-tur
                                      // (u_image_aspect is already the rotated aspect)
 uniform int   u_lanczos;             // 1 = Lanczos-3 minification (8-bit images);
                                      // 0 = bilinear/trilinear. Upscaling is always bilinear.
+uniform int   u_clip_overlay;        // 1 = draw the clipping overlay (C key)
+uniform float u_clip_margin;         // clip when a channel >= clip_max*(1 - margin)
+uniform vec4  u_clip_max;            // per-channel format max in texel value space
+uniform sampler2D u_clip_mask;       // max-mipped per-channel clip mask (1=clipped)
+uniform int   u_clip_mask_valid;     // 1 = use the mask; 0 = per-texel fallback
+uniform float u_time;                // wall-clock seconds, animates the clip stripes
 
 // Declares the image sampler(s) and `vec3 sample_image(vec2 uv)`.
 // Single texture  -> returns texture(u_image, uv).rgb
@@ -134,6 +140,13 @@ void main() {
         src_uv = uv; // no rotation in panorama
     }
 
+    // Original per-channel sample (before exposure / view transform and before the
+    // diff/sharpness overrides below) — the clipping overlay must judge the source
+    // data, not the displayed result. Compared against the format's per-channel max
+    // (u_clip_max): 1.0 for integer formats, the half max for a 16-bit-half EXR,
+    // f32::MAX (never) for unbounded 32-bit float / HDR.
+    vec4 clip_src = texel;
+
     // Slot difference: the absolute per-pixel difference vs the comparator slot,
     // PRECOMPUTED at base resolution on the CPU and uploaded as u_diff_image with
     // its own mip chain. Sampling it normally (implicit-derivative mip selection)
@@ -192,6 +205,62 @@ void main() {
     //    post-display tweak applied exactly ONCE in both the OCIO and fallback
     //    paths (do not also fold gamma into __OCIO_APPLY__).
     color = pow(max(color, vec3(0.0)), vec3(1.0 / max(u_gamma, 1e-6)));
+
+    // 4b. Clipping overlay (C): animated diagonal stripes over regions whose
+    //     ORIGINAL per-channel value (clip_src, captured before any adjustment) is
+    //     within u_clip_margin of that channel's format max (u_clip_max). Each
+    //     clipped channel contributes its colour to the "lit" stripe band
+    //     (R→red, R+G→yellow, all→white); the alternating band is black.
+    //     Composited at 75% opacity only where a channel clips. When a single
+    //     channel is isolated (F2 boxes), only that channel is evaluated and the
+    //     stripe takes its colour. Drawn before the guides so they stay readable.
+    if (u_clip_overlay != 0) {
+        // Per-channel clip flags (0/1). Prefer the max-mipped mask so even a
+        // few-pixel blown region survives minification (averaged image mips would
+        // dilute it away when zoomed out); fall back to a per-texel test on the
+        // displayed sample for tiled images that have no mask.
+        vec4 clip4;
+        if (u_clip_mask_valid != 0) {
+            vec2 mdx = dFdx(src_uv);
+            vec2 mdy = dFdy(src_uv);
+            if (u_projection_mode != 1) {          // unwrap longitude seam (pano)
+                if (abs(mdx.x) > 0.5) mdx.x -= sign(mdx.x);
+                if (abs(mdy.x) > 0.5) mdy.x -= sign(mdy.x);
+            }
+            // Low threshold: the LINEAR-filtered max-mip spreads a clipped texel
+            // over ~1 texel, so any partial coverage (a few clipped source pixels
+            // anywhere in the footprint) lights the channel even when minified.
+            clip4 = step(0.15, textureGrad(u_clip_mask, src_uv, mdx, mdy));
+        } else {
+            clip4 = step(u_clip_max * (1.0 - u_clip_margin), clip_src);
+        }
+        vec3 stripe_color;
+        float clipped;
+        if (u_isolate_channel >= 0) {
+            clipped = clip4[u_isolate_channel];
+            stripe_color = (u_isolate_channel == 0) ? vec3(1.0, 0.0, 0.0)
+                         : (u_isolate_channel == 1) ? vec3(0.0, 1.0, 0.0)
+                         : (u_isolate_channel == 2) ? vec3(0.0, 0.0, 1.0)
+                         : vec3(1.0);              // alpha → white
+        } else {
+            clipped = max(max(clip4.r, clip4.g), clip4.b);
+            stripe_color = clip4.rgb;              // additive per-channel colour
+        }
+        if (clipped > 0.5) {
+            // Diagonal screen-space bands, scrolling with time. PERIOD = one
+            // colour+black pair in px; half lit, half black.
+            const float PERIOD = 14.0;
+            const float SPEED = 36.0; // px/sec
+            float diag = gl_FragCoord.x + gl_FragCoord.y - u_time * SPEED;
+            float lit = step(0.5, fract(diag / PERIOD));
+            vec3 stripe = stripe_color * lit; // channel colour on lit bands, black between
+            // Composite over the DISPLAY-CLAMPED colour: clipped regions are exactly
+            // where the display value blows past 1.0, and 0.25*huge would still clip
+            // to white — so the stripes would be invisible without the clamp.
+            color = mix(clamp(color, 0.0, 1.0), stripe, 0.75);
+            out_alpha = 1.0; // make the warning visible even over transparency
+        }
+    }
 
     // 5. Guide lines, drawn last so they sit on top of every mode. The line
     //    sticks to the image (compared in image-uv space) but is a constant ~1px

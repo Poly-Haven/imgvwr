@@ -44,5 +44,8 @@ pub fn load_exr_native(path: &Path) -> Result<ImageData> {
         pixels: PixelBuffer::F32(data),
         is_encoded_srgb: false,
         animation: None,
+        camera: None,
+        // OpenEXR fallback decodes to f32 scene-linear → unbounded, never clips.
+        clip_max: crate::image_loader::CLIP_MAX_NONE,
     })
 }

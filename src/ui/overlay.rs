@@ -735,8 +735,28 @@ fn draw_reset_glyph(painter: &egui::Painter, c: egui::Pos2, r: f32, color: egui:
     ));
 }
 
-/// The settings dialog (opened from the toolbar): startup-display picker and the
-/// "set as default viewer" action (with a confirmation step).
+/// Fixed content width of the settings dialog (px). The app grows the OS window
+/// to comfortably fit this when Settings opens, so controls never wrap.
+const SETTINGS_WIDTH: f32 = 440.0;
+
+/// A bold section heading with an underline, used to group the settings dialog.
+fn settings_heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(10.0);
+    ui.label(
+        egui::RichText::new(text)
+            .strong()
+            .color(egui::Color32::from_gray(205))
+            .size(13.0),
+    );
+    ui.add_space(2.0);
+    ui.separator();
+    ui.add_space(4.0);
+}
+
+/// The settings dialog (opened from the toolbar gear). Organised into labelled
+/// sections; each row is a left-aligned label and a right-aligned control via a
+/// two-column grid, scrollable so it never overflows the window. The app grows
+/// the window to [`SETTINGS_WIDTH`]+ when this opens (see `App::sync_settings_window`).
 fn settings_dialog(
     ctx: &egui::Context,
     inputs: &UiInputs,
@@ -746,125 +766,204 @@ fn settings_dialog(
     if !state.show_settings {
         return;
     }
+    let max_h = (ctx.screen_rect().height() - 80.0).max(200.0);
     egui::Area::new(egui::Id::new("imgvwr_settings"))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             overlay_frame().show(ui, |ui| {
-                ui.set_min_width(340.0);
-                ui.vertical_centered(|ui| {
+                ui.set_width(SETTINGS_WIDTH);
+                ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("Settings")
                             .strong()
                             .color(egui::Color32::WHITE)
                             .size(18.0),
                     );
-                });
-                ui.add_space(14.0);
-
-                // Startup display.
-                ui.horizontal(|ui| {
-                    ui.label("Open on display:");
-                    let current = match &inputs.startup_display {
-                        None => "Remember last used".to_string(),
-                        Some(name) => inputs
-                            .monitors
-                            .iter()
-                            .find(|(n, _)| n == name)
-                            .map(|(_, l)| l.clone())
-                            .unwrap_or_else(|| name.clone()),
-                    };
-                    egui::ComboBox::from_id_salt("imgvwr_startup_display")
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(
-                                    inputs.startup_display.is_none(),
-                                    "Remember last used",
-                                )
-                                .clicked()
-                            {
-                                actions.push(UiAction::SetStartupDisplay(None));
-                            }
-                            for (name, label) in &inputs.monitors {
-                                let selected = inputs.startup_display.as_deref() == Some(name);
-                                if ui.selectable_label(selected, label).clicked() {
-                                    actions.push(UiAction::SetStartupDisplay(Some(name.clone())));
-                                }
-                            }
-                        });
-                });
-                ui.add_space(14.0);
-
-                // Window corner radius (live).
-                ui.horizontal(|ui| {
-                    ui.label("Window corner radius:");
-                    let mut radius = inputs.corner_radius;
-                    let resp = ui.add(
-                        egui::DragValue::new(&mut radius)
-                            .range(0..=40)
-                            .suffix(" px"),
-                    );
-                    if resp.changed() {
-                        actions.push(UiAction::SetCornerRadius(radius));
-                    }
-                });
-                ui.add_space(14.0);
-
-                // Background colour (behind transparent images).
-                ui.horizontal(|ui| {
-                    ui.label("Background colour:");
-                    let mut col = inputs.background_color;
-                    if ui.color_edit_button_srgb(&mut col).changed() {
-                        actions.push(UiAction::SetBackgroundColor(col));
-                    }
-                });
-                ui.add_space(14.0);
-
-                // Guide-line colour.
-                ui.horizontal(|ui| {
-                    ui.label("Guide colour:");
-                    let mut col = inputs.guide_color;
-                    if ui.color_edit_button_srgb(&mut col).changed() {
-                        actions.push(UiAction::SetGuideColor(col));
-                    }
-                });
-                ui.add_space(14.0);
-
-                // Auto-exposure for HDR panoramas on load.
-                let mut auto = inputs.auto_exposure;
-                if ui
-                    .checkbox(&mut auto, "Auto-expose HDR panoramas on open")
-                    .changed()
-                {
-                    actions.push(UiAction::SetAutoExposure(auto));
-                }
-                ui.add_space(14.0);
-
-                // Set as default viewer, with a confirmation step.
-                if state.confirm_default {
-                    ui.label("Make imgvwr the default viewer for all supported image types?");
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if clickable(ui.button("Confirm")).clicked() {
-                            actions.push(UiAction::SetDefaultApp);
-                            state.confirm_default = false;
-                        }
-                        if clickable(ui.button("Cancel")).clicked() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if clickable(ui.button("Close")).clicked() {
+                            state.show_settings = false;
                             state.confirm_default = false;
                         }
                     });
-                } else if clickable(ui.button("⭐  Set as default viewer")).clicked() {
-                    state.confirm_default = true;
-                }
-
-                ui.add_space(14.0);
-                ui.vertical_centered(|ui| {
-                    if clickable(ui.button("Close")).clicked() {
-                        state.show_settings = false;
-                        state.confirm_default = false;
-                    }
                 });
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
+                    .max_height(max_h)
+                    .show(ui, |ui| {
+                        ui.set_width(SETTINGS_WIDTH);
+
+                        // ── Display & view ──────────────────────────────────
+                        settings_heading(ui, "Display & view");
+                        egui::Grid::new("set_display")
+                            .num_columns(2)
+                            .spacing([16.0, 10.0])
+                            .min_col_width(170.0)
+                            .show(ui, |ui| {
+                                if inputs.ocio_available {
+                                    ui.label("Default view transform");
+                                    default_view_combo(ui, inputs, actions);
+                                    ui.end_row();
+                                }
+                                ui.label("Open on display");
+                                startup_display_combo(ui, inputs, actions);
+                                ui.end_row();
+                            });
+
+                        // ── Appearance ──────────────────────────────────────
+                        settings_heading(ui, "Appearance");
+                        egui::Grid::new("set_appearance")
+                            .num_columns(2)
+                            .spacing([16.0, 10.0])
+                            .min_col_width(170.0)
+                            .show(ui, |ui| {
+                                ui.label("Window corner radius");
+                                let mut radius = inputs.corner_radius;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut radius)
+                                            .range(0..=40)
+                                            .suffix(" px"),
+                                    )
+                                    .changed()
+                                {
+                                    actions.push(UiAction::SetCornerRadius(radius));
+                                }
+                                ui.end_row();
+
+                                ui.label("Background colour");
+                                let mut bg = inputs.background_color;
+                                if ui.color_edit_button_srgb(&mut bg).changed() {
+                                    actions.push(UiAction::SetBackgroundColor(bg));
+                                }
+                                ui.end_row();
+
+                                ui.label("Guide colour");
+                                let mut gc = inputs.guide_color;
+                                if ui.color_edit_button_srgb(&mut gc).changed() {
+                                    actions.push(UiAction::SetGuideColor(gc));
+                                }
+                                ui.end_row();
+                            });
+
+                        // ── On open (per-image-type exposure) ───────────────
+                        settings_heading(ui, "On open");
+                        let mut auto = inputs.auto_exposure;
+                        if ui
+                            .checkbox(&mut auto, "Auto-expose HDR panoramas")
+                            .changed()
+                        {
+                            actions.push(UiAction::SetAutoExposure(auto));
+                        }
+                        ui.add_space(4.0);
+                        let mut raw_auto = inputs.raw_auto_exposure;
+                        if ui
+                            .checkbox(&mut raw_auto, "Auto-expose RAW photos")
+                            .changed()
+                        {
+                            actions.push(UiAction::SetRawAutoExposure(raw_auto));
+                        }
+
+                        // ── Review tools ────────────────────────────────────
+                        settings_heading(ui, "Review tools");
+                        egui::Grid::new("set_review")
+                            .num_columns(2)
+                            .spacing([16.0, 10.0])
+                            .min_col_width(170.0)
+                            .show(ui, |ui| {
+                                ui.label("Clipping overlay margin");
+                                let mut pct = inputs.clip_margin * 100.0;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut pct, 0.0..=5.0)
+                                            .suffix("%")
+                                            .fixed_decimals(1),
+                                    )
+                                    .changed()
+                                {
+                                    actions.push(UiAction::SetClipMargin(pct / 100.0));
+                                }
+                                ui.end_row();
+                            });
+
+                        // ── System ──────────────────────────────────────────
+                        settings_heading(ui, "System");
+                        if state.confirm_default {
+                            ui.label(
+                                "Make imgvwr the default viewer for all supported image types?",
+                            );
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if clickable(ui.button("Confirm")).clicked() {
+                                    actions.push(UiAction::SetDefaultApp);
+                                    state.confirm_default = false;
+                                }
+                                if clickable(ui.button("Cancel")).clicked() {
+                                    state.confirm_default = false;
+                                }
+                            });
+                        } else if clickable(ui.button("⭐  Set as default viewer")).clicked() {
+                            state.confirm_default = true;
+                        }
+                        ui.add_space(6.0);
+                    });
             });
+        });
+}
+
+/// The Default View Transform dropdown — lists the views available on the active
+/// (or first) OCIO display; the stored name is matched case-insensitively.
+fn default_view_combo(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
+    let display = inputs
+        .active
+        .as_ref()
+        .map(|(d, _)| d.clone())
+        .or_else(|| inputs.displays().into_iter().next());
+    let views = display
+        .as_ref()
+        .map(|d| inputs.views_for(d))
+        .unwrap_or_default();
+    egui::ComboBox::from_id_salt("imgvwr_default_view")
+        .selected_text(&inputs.default_view_transform)
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            for v in &views {
+                let selected = v.eq_ignore_ascii_case(&inputs.default_view_transform);
+                if ui.selectable_label(selected, v).clicked() {
+                    actions.push(UiAction::SetDefaultView(v.clone()));
+                }
+            }
+        });
+}
+
+/// The "Open on display" startup-monitor dropdown.
+fn startup_display_combo(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
+    let current = match &inputs.startup_display {
+        None => "Remember last used".to_string(),
+        Some(name) => inputs
+            .monitors
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, l)| l.clone())
+            .unwrap_or_else(|| name.clone()),
+    };
+    egui::ComboBox::from_id_salt("imgvwr_startup_display")
+        .selected_text(current)
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(inputs.startup_display.is_none(), "Remember last used")
+                .clicked()
+            {
+                actions.push(UiAction::SetStartupDisplay(None));
+            }
+            for (name, label) in &inputs.monitors {
+                let selected = inputs.startup_display.as_deref() == Some(name);
+                if ui.selectable_label(selected, label).clicked() {
+                    actions.push(UiAction::SetStartupDisplay(Some(name.clone())));
+                }
+            }
         });
 }
 
@@ -1297,7 +1396,10 @@ fn progress_bar(ui: &mut egui::Ui, value: Option<f32>) {
         let h = rect.height();
         const BAND: f32 = 13.0;
         const SPEED: f32 = 64.0;
-        let t = ui.input(|i| i.time) as f32 * SPEED;
+        // Negative time → bands travel right-to-left (against the bar's own
+        // left-to-right fill), which reads as faster. rem_euclid/floor below
+        // stay continuous for negative `t`.
+        let t = -(ui.input(|i| i.time) as f32) * SPEED;
         let scroll = (t / BAND).floor() as i64;
         let phase = t.rem_euclid(BAND);
         let mut x = fill.left() - h - BAND + phase;
@@ -1747,6 +1849,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
             "Inspect",
             &[
                 ("S", "Sharpness (original res)"),
+                ("C", "Clipping overlay (per channel)"),
                 ("Alt + middle-drag", "Squash / stretch image"),
                 ("G", "Add guide level (½, ¼ … 1/32)"),
                 ("Pull from a ruler", "Drag out a guide"),

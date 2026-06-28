@@ -1640,22 +1640,36 @@ impl App {
 
     /// N: recall comparator slot `n`. Pressing it again while already viewing
     /// that slot toggles back to the previously-shown image (A/B compare).
-    fn recall_slot(&mut self, n: usize) {
+    /// Recall comparator slot `n` (1-based). `refit_window` chooses the framing:
+    /// the keyboard shortcut (`true`) re-frames the window to the image and shows
+    /// it fit — exactly like folder navigation / opening a file — while a flag
+    /// click (`false`) keeps the current window size and the native-scale A/B
+    /// framing, so the flags don't reflow out from under the cursor.
+    ///
+    /// `for_compare` (the inverse of `refit_window`) drives keep-window +
+    /// preserve-view; `old_scale` drives native-scale matching. Both are off for
+    /// the re-fitting path so it behaves like a fresh load.
+    fn recall_slot(&mut self, n: usize, refit_window: bool) {
         let idx = n - 1;
         let Some(target) = self.slots[idx].clone() else {
             return;
         };
-        let old_scale = self.flat_scale_ref();
+        let for_compare = !refit_window;
+        let old_scale = if refit_window {
+            None
+        } else {
+            self.flat_scale_ref()
+        };
         if self.active_slot == Some(idx) {
             // Toggle back to the previously-viewed image (swap so a third press
             // returns to the slot).
             if let Some(prev) = self.compare_prev.take() {
                 self.compare_prev = self.current_image.clone();
-                self.begin_adopt(prev, true, old_scale);
+                self.begin_adopt(prev, for_compare, old_scale);
             }
         } else {
             self.compare_prev = self.current_image.clone();
-            self.begin_adopt(target, true, old_scale);
+            self.begin_adopt(target, for_compare, old_scale);
         }
     }
 
@@ -2131,14 +2145,39 @@ impl App {
         }
     }
 
+    /// Centre-of-view on-screen scale for a panorama — device pixels per *image*
+    /// (equirectangular texel) pixel at the look direction. `None` in 2D mode.
+    ///
+    /// The equirect image is isotropic at `H/π` texels per radian (height `H` spans
+    /// 180°). The rectilinear projection's angular resolution at screen centre is
+    /// `vh / (2·tan(½fov))` screen px per radian (the shader builds the centre ray
+    /// as `ndc.y · tan_half_fov`, so `dθ/dpx = 2·tan_half_fov/vh` there; horizontal
+    /// matches once aspect is applied). Their ratio is the texel→screen scale, so
+    /// the 200% nearest switch lands when one texel covers two screen pixels — same
+    /// rule as 2D, just FOV/dimension-aware.
+    fn pano_scale_now(&self) -> Option<f32> {
+        if !self.camera.is_panorama() {
+            return None;
+        }
+        let ih = self.file_info.height;
+        if ih == 0 {
+            return None;
+        }
+        let (_, vh) = self.viewport();
+        let tan_half = self.camera.camera.tan_half_fov().max(1e-6);
+        Some(pano_center_scale(vh, ih as f32, tan_half))
+    }
+
     /// Whether to sample nearest-neighbour this frame. With `nearest_auto` (the
-    /// default) it's chosen automatically — a 2D image magnified past 200% reads
-    /// nearest (crisp pixels), everything else (and panoramas) bilinear. Once the I
-    /// key pins a manual choice (`nearest_auto` off) that value is used verbatim.
-    /// Feeds both the sampler and the Lanczos gate (`is_u8 && !nearest`), so a
-    /// manual nearest also turns Lanczos off, exactly as the auto path does.
+    /// default) it's chosen automatically — an image magnified past 200% at the
+    /// view centre reads nearest (crisp pixels), less-magnified views bilinear;
+    /// this now covers panoramas too (via [`pano_scale_now`], FOV/dimension-aware).
+    /// Once the I key pins a manual choice (`nearest_auto` off) that value is used
+    /// verbatim. Feeds both the sampler and the Lanczos gate (`is_u8 && !nearest`),
+    /// so a manual nearest also turns Lanczos off, exactly as the auto path does.
     fn effective_nearest(&self) -> bool {
-        pick_nearest(self.nearest_auto, self.nearest_filter, self.flat_scale_now())
+        let scale = self.flat_scale_now().or_else(|| self.pano_scale_now());
+        pick_nearest(self.nearest_auto, self.nearest_filter, scale)
     }
 
     /// Target 2D zoom as a percentage where 100% == 1 image px : 1 monitor px.
@@ -4053,7 +4092,8 @@ impl App {
                 self.ui_state.show_help = false;
                 self.request_redraw();
             }
-            UiAction::RecallSlot(i) => self.recall_slot(i + 1),
+            // A flag click keeps the window size so the flags don't reflow.
+            UiAction::RecallSlot(i) => self.recall_slot(i + 1, false),
             UiAction::SetDefaultApp => match register_default_app() {
                 Ok(n) => self.show_toast(format!("Default viewer for {n} file types")),
                 Err(e) => {
@@ -4761,7 +4801,9 @@ impl ApplicationHandler<UserEvent> for App {
                     } else if self.ctrl() {
                         self.save_slot(slot as usize);
                     } else {
-                        self.recall_slot(slot as usize);
+                        // Keyboard recall re-frames the window to the image (like
+                        // arrow-key navigation / opening a file).
+                        self.recall_slot(slot as usize, true);
                     }
                 } else {
                     let text = match &event.logical_key {
@@ -4940,6 +4982,15 @@ impl ApplicationHandler<UserEvent> for App {
 fn fit_zoom_no_upscale(vw: f32, vh: f32, iw: f32, ih: f32) -> f32 {
     let s_fit = (vw / iw.max(1.0)).min(vh / ih.max(1.0));
     s_fit.min(1.0) * (ih.max(1.0) / vh.max(1.0))
+}
+
+/// Centre-of-view on-screen scale (device px per equirect texel) for a panorama,
+/// given the viewport height `vh`, image height `ih`, and `tan(½ vertical-FOV)`.
+/// The equirect is `ih/π` texels per radian; the rectilinear projection is
+/// `vh/(2·tan½fov)` screen px per radian at centre — their ratio. > 2.0 ⇒ one
+/// texel covers two screen px (the nearest-neighbour switch threshold).
+fn pano_center_scale(vh: f32, ih: f32, tan_half_fov: f32) -> f32 {
+    std::f32::consts::PI * vh / (2.0 * tan_half_fov.max(1e-6) * ih.max(1.0))
 }
 
 /// Choose nearest-neighbour vs bilinear. In `auto` mode a 2D image magnified past
@@ -5694,6 +5745,21 @@ mod tests {
         assert!(pick_nearest(true, false, Some(2.0001)), "just over 200% -> nearest");
         assert!(pick_nearest(true, false, Some(8.0)), "800% -> nearest");
         assert!(!pick_nearest(true, true, None), "panorama -> bilinear (manual ignored in auto)");
+    }
+
+    #[test]
+    fn pano_center_scale_math() {
+        // Narrower FOV (more zoomed in) ⇒ larger texel→screen scale; wider ⇒ smaller.
+        let narrow = pano_center_scale(1000.0, 512.0, (30f32).to_radians().tan()); // 60° FOV
+        let wide = pano_center_scale(1000.0, 512.0, (70f32).to_radians().tan()); // 140° FOV
+        assert!(narrow > wide, "narrow FOV must magnify more: {narrow} vs {wide}");
+        // The 200% switch (scale == 2) is self-consistently at tan(½fov)=π·vh/(4·ih).
+        let tan_at_2 = std::f32::consts::PI * 1000.0 / (4.0 * 512.0);
+        let s = pano_center_scale(1000.0, 512.0, tan_at_2);
+        assert!((s - 2.0).abs() < 1e-3, "expected scale 2, got {s}");
+        // Zoom in a touch past it (smaller tan) ⇒ nearest; out ⇒ bilinear.
+        assert!(pano_center_scale(1000.0, 512.0, tan_at_2 * 0.95) > 2.0);
+        assert!(pano_center_scale(1000.0, 512.0, tan_at_2 * 1.05) < 2.0);
     }
 
     #[test]

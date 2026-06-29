@@ -1488,8 +1488,33 @@ impl App {
             .path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned());
-        if let Some(gfx) = &mut self.gfx {
-            gfx.renderer.start_upload(data.as_ref());
+        // Begin the GPU upload. If the allocation fails (out of VRAM, or dims past
+        // a driver limit), free memory and retry before giving up — so a too-big
+        // image reports an error in the centre of the screen instead of silently
+        // showing a blank frame.
+        let started = self
+            .gfx
+            .as_mut()
+            .is_some_and(|gfx| gfx.renderer.start_upload(data.as_ref()))
+            || self.recover_vram_and_retry(data.as_ref());
+        if !started {
+            log::error!(
+                "could not allocate GPU memory for {} ({}x{}, {})",
+                data.path.display(),
+                data.width,
+                data.height,
+                data.dtype_name
+            );
+            self.load_state = LoadState::Failed(
+                "Not enough GPU memory to open this image.\n\nTry enabling \
+                 \u{201c}Store 32-bit float as 16-bit\u{201d} in Settings, or close \
+                 other open images first."
+                    .to_string(),
+            );
+            self.pending = None;
+            self.nav_pending = None;
+            self.request_redraw();
+            return;
         }
         // For a recall there is no decode phase, so time the upload itself.
         if for_compare {
@@ -1502,6 +1527,43 @@ impl App {
             old_scale,
         });
         self.request_redraw();
+    }
+
+    /// An image upload couldn't be allocated (out of VRAM). Free GPU memory in
+    /// stages — cheapest first, keeping the displayed image as long as possible —
+    /// retrying the upload after each, and return whether it eventually started.
+    /// Note: the comparator slots and the look-ahead cache live in *system* RAM,
+    /// not VRAM, so only freeing GPU textures (aux, then the resident image) can
+    /// actually relieve VRAM pressure; the cache is dropped too to relieve overall
+    /// memory pressure.
+    fn recover_vram_and_retry(&mut self, data: &ImageData) -> bool {
+        log::warn!("image upload allocation failed; freeing memory and retrying");
+        // Drop the RAM look-ahead cache (decoded images kept for instant
+        // back/forward). Oldest are at the end, but we clear the lot — it only
+        // holds neighbours, and the current image stays in `current_image`.
+        self.image_cache.clear();
+        // We're about to free the clip-overlay mask (an aux GPU texture); mark it
+        // dirty so the overlay rebuilds it on the next frame instead of silently
+        // dropping to the per-texel fallback (the mask is normally only re-marked
+        // dirty by finalize_adopt, which won't run if every retry still fails).
+        self.clip_mask_dirty = true;
+        let Some(gfx) = self.gfx.as_mut() else {
+            return false;
+        };
+        // Free auxiliary GPU textures (slot-diff image + clip-overlay mask) and
+        // retry; they rebuild lazily when next needed.
+        let freed = gfx.renderer.free_aux_gpu_memory();
+        if freed > 0 && gfx.renderer.start_upload(data) {
+            log::info!("upload recovered after freeing {freed} auxiliary texture(s)");
+            return true;
+        }
+        // Last resort: drop the resident image texture itself and retry. The old
+        // image disappears during the upload, but that beats a blank failure.
+        if gfx.renderer.free_image_texture() && gfx.renderer.start_upload(data) {
+            log::info!("upload recovered after freeing the resident image texture");
+            return true;
+        }
+        false
     }
 
     /// Advance the in-progress GPU upload by one budget; finalize when complete.

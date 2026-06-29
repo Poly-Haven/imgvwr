@@ -2002,9 +2002,7 @@ impl App {
         self.guide_drag.is_some()
             || self.ui_state.guide_spawn.is_some()
             || self.stretching
-            || self
-                .adjust_repeat_until
-                .is_some_and(|t| Instant::now() < t)
+            || self.adjust_repeat_until.is_some_and(|t| Instant::now() < t)
     }
 
     /// Called once per frame after input: if the editing state changed away from
@@ -4563,7 +4561,8 @@ impl App {
         // overlay is on (lazy — nothing is built while the overlay is off).
         if self.clip_overlay && self.clip_mask_dirty {
             if let (Some(img), Some(gfx)) = (self.current_image.clone(), self.gfx.as_mut()) {
-                gfx.renderer.set_clip_mask(Some(&img), self.prefs.clip_margin);
+                gfx.renderer
+                    .set_clip_mask(Some(&img), self.prefs.clip_margin);
             }
             self.clip_mask_dirty = false;
         }
@@ -5104,11 +5103,7 @@ impl ApplicationHandler<UserEvent> for App {
             .flatten();
         // Wake to flip to the next GIF frame (the advance + upload happens in
         // `render`). `None` while paused or for a static image.
-        let anim_deadline = self
-            .anim
-            .as_ref()
-            .filter(|a| !a.paused)
-            .map(|a| a.next_at);
+        let anim_deadline = self.anim.as_ref().filter(|a| !a.paused).map(|a| a.next_at);
         if self.capture_active() {
             // Drive continuous frames while a capture is pending.
             event_loop.set_control_flow(ControlFlow::Poll);
@@ -5962,10 +5957,19 @@ mod tests {
     fn pick_nearest_auto_switches_above_200_percent() {
         // Auto: nearest strictly above 200%, bilinear at/below, bilinear in pano.
         assert!(!pick_nearest(true, false, Some(1.0)), "100% -> bilinear");
-        assert!(!pick_nearest(true, false, Some(2.0)), "exactly 200% -> bilinear");
-        assert!(pick_nearest(true, false, Some(2.0001)), "just over 200% -> nearest");
+        assert!(
+            !pick_nearest(true, false, Some(2.0)),
+            "exactly 200% -> bilinear"
+        );
+        assert!(
+            pick_nearest(true, false, Some(2.0001)),
+            "just over 200% -> nearest"
+        );
         assert!(pick_nearest(true, false, Some(8.0)), "800% -> nearest");
-        assert!(!pick_nearest(true, true, None), "panorama -> bilinear (manual ignored in auto)");
+        assert!(
+            !pick_nearest(true, true, None),
+            "panorama -> bilinear (manual ignored in auto)"
+        );
     }
 
     #[test]
@@ -5973,7 +5977,10 @@ mod tests {
         // Narrower FOV (more zoomed in) ⇒ larger texel→screen scale; wider ⇒ smaller.
         let narrow = pano_center_scale(1000.0, 512.0, (30f32).to_radians().tan()); // 60° FOV
         let wide = pano_center_scale(1000.0, 512.0, (70f32).to_radians().tan()); // 140° FOV
-        assert!(narrow > wide, "narrow FOV must magnify more: {narrow} vs {wide}");
+        assert!(
+            narrow > wide,
+            "narrow FOV must magnify more: {narrow} vs {wide}"
+        );
         // The 200% switch (scale == 2) is self-consistently at tan(½fov)=π·vh/(4·ih).
         let tan_at_2 = std::f32::consts::PI * 1000.0 / (4.0 * 512.0);
         let s = pano_center_scale(1000.0, 512.0, tan_at_2);
@@ -6004,16 +6011,28 @@ mod tests {
         // From auto-nearest (250%): I -> manual bilinear, and it stays bilinear even
         // if we later zoom back under 200%.
         let (auto, manual) = press(true, false, Some(2.5));
-        assert!(!auto && !pick_nearest(auto, manual, Some(2.5)), "250%: nearest -> bilinear");
-        assert!(!pick_nearest(auto, manual, Some(1.0)), "persists under 200%");
+        assert!(
+            !auto && !pick_nearest(auto, manual, Some(2.5)),
+            "250%: nearest -> bilinear"
+        );
+        assert!(
+            !pick_nearest(auto, manual, Some(1.0)),
+            "persists under 200%"
+        );
 
         // From auto-bilinear (150%): I -> manual nearest.
         let (auto, manual) = press(true, false, Some(1.5));
-        assert!(!auto && pick_nearest(auto, manual, Some(1.5)), "150%: bilinear -> nearest");
+        assert!(
+            !auto && pick_nearest(auto, manual, Some(1.5)),
+            "150%: bilinear -> nearest"
+        );
 
         // Pressing I again flips back (still manual).
         let (auto, manual) = press(auto, manual, Some(1.5));
-        assert!(!auto && !pick_nearest(auto, manual, Some(1.5)), "second press flips back");
+        assert!(
+            !auto && !pick_nearest(auto, manual, Some(1.5)),
+            "second press flips back"
+        );
     }
 
     #[test]
@@ -6027,11 +6046,17 @@ mod tests {
         // Larger-than-screen image -> shrinks to fit (scale == fit < 1).
         let z = fit_zoom_no_upscale(2560.0, 1440.0, 4000.0, 3000.0);
         let s = scale(z, 3000.0, 1440.0);
-        assert!(s < 1.0 && (s - 0.48).abs() < eps, "large -> fit 0.48, got {s}");
+        assert!(
+            s < 1.0 && (s - 0.48).abs() < eps,
+            "large -> fit 0.48, got {s}"
+        );
         // Wide image (wider than the screen, but shorter) -> fits to width.
         let z = fit_zoom_no_upscale(2560.0, 1440.0, 5000.0, 1000.0);
         let s = scale(z, 1000.0, 1440.0);
-        assert!((s - 2560.0 / 5000.0).abs() < eps, "wide -> fit width, got {s}");
+        assert!(
+            (s - 2560.0 / 5000.0).abs() < eps,
+            "wide -> fit width, got {s}"
+        );
         // Exactly screen-sized -> 1:1.
         let z = fit_zoom_no_upscale(2560.0, 1440.0, 2560.0, 1440.0);
         assert!((scale(z, 1440.0, 1440.0) - 1.0).abs() < eps, "exact -> 1:1");

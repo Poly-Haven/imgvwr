@@ -205,26 +205,6 @@ Target platform is **Windows only** (x64).
   a non-sRGB embedded profile are converted to sRGB on load); `libraw` develops
   camera RAW files to scene-linear float.
 
-### Packaging & releasing
-
-`scripts\package.ps1` bundles `imgvwr.exe`, the full runtime DLL closure, the
-`resources/` directory, and the licenses into a self-contained
-`dist\imgvwr-<version>-windows-x64.zip`.
-
-Releases are built **locally** rather than in CI — the native deps
-(OpenColorIO / OpenEXR) compile from source via vcpkg, which takes 20+ minutes
-on a clean GitHub runner. From a shell with `VCPKG_ROOT` and `LIBCLANG_PATH`
-set (see the prerequisites above):
-
-```powershell
-# Bump the version in Cargo.toml first, then:
-pwsh scripts\release.ps1            # build + package only -> dist\
-pwsh scripts\release.ps1 -Publish   # also tag vX.Y.Z and create the GitHub release (needs gh)
-```
-
-`-Publish` derives the tag from `Cargo.toml`, pushes it, and uploads the zip to
-a new GitHub release via the `gh` CLI.
-
 ### Build
 
 ```bat
@@ -241,13 +221,6 @@ cargo build --no-default-features
 > A gamma-only build is a development convenience only. Shipped release builds
 > must include OCIO (this is enforced by `build.rs` when the `ocio` feature is
 > enabled).
-
-### Running the distributed build
-
-The release zip is self-contained: extract it and run `imgvwr.exe`. No
-prerequisites, vcpkg, or environment setup are required. Because the build is
-unsigned, Windows SmartScreen may prompt on first launch — choose *More info →
-Run anyway*.
 
 ## License
 

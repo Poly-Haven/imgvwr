@@ -4,7 +4,11 @@ A minimal, GPU-accelerated image viewer for HDR panoramas and standard images.
 
 ![screenshot](https://u.polyhaven.org/PAb/2026-06-29_13-45-18.jpg)
 
-Are you looking for a screenshot of imgvwr? That's it. That's the whole thing.
+Oh, were you looking for a screenshot of imgvwr? Sure, here's one:
+
+![screenshot2](https://u.polyhaven.org/MmH/2026-06-29_16-10-46.jpg)
+
+That's it. That's the whole thing.
 
 I told you it was minimal, there isn't even a titlebar - until you need it.
 

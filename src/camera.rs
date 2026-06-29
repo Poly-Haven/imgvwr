@@ -571,11 +571,7 @@ mod tests {
             // mp (pitch about X), columns (0,cp,-sp)/(0,sp,cp): mp*(0,0,1) = col2.
             let r = Vec3::new(0.0, sp, cp);
             // my (yaw about Y), columns (cy,0,sy)/(0,1,0)/(-sy,0,cy): my*r.
-            Vec3::new(
-                r.x * cy + r.z * (-sy),
-                r.y,
-                r.x * sy + r.z * cy,
-            )
+            Vec3::new(r.x * cy + r.z * (-sy), r.y, r.x * sy + r.z * cy)
         }
         for (yaw, pitch) in [(0.0_f32, 0.0_f32), (1.0, 0.5), (-2.0, -0.8), (3.0, 0.3)] {
             let got = forward_dir(yaw, pitch);

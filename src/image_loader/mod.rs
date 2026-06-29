@@ -245,6 +245,20 @@ pub fn load_image(path: &Path, progress: &std::sync::Arc<ReadProgress>) -> Resul
         .unwrap_or("")
         .to_ascii_lowercase();
 
+    // Reject clearly-unsupported files up front with a readable message (it shows
+    // in the centre error panel) instead of a cryptic decoder error from below.
+    if !is_supported(path) {
+        let what = if ext.is_empty() {
+            "files without an extension".to_string()
+        } else {
+            format!(".{ext} files")
+        };
+        anyhow::bail!(
+            "Unsupported file type: imgvwr can't open {what}.\n\nIt supports JPEG, PNG, \
+             GIF, BMP, TIFF, WebP, HDR, OpenEXR and camera RAW."
+        );
+    }
+
     if ext == "exr" {
         formats::load_exr(path, progress)
     } else if ext == "gif" {

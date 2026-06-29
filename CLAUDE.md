@@ -34,6 +34,10 @@ If no relevant test images are found for the current task, generate one.
 
 If during testing or validation you are struggling to screenshot the correct region of interest over and over again, instead crop an existing image carefully and reuse it.
 
+## Release
+
+When asked to make a GitHub release, update the version string in the codebase, tag in git, push, and create the release on github. Write user-facing release notes with sections.
+
 ## Conventions & lessons
 
 - **Adding a user-facing feature?** Always update the help popup (`KEYS` in

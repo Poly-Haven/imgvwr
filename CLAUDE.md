@@ -36,13 +36,10 @@ If during testing or validation you are struggling to screenshot the correct reg
 
 ## Release
 
-Releases are built **locally** (the native deps compile from source via vcpkg — too slow for CI). With `VCPKG_ROOT` set:
+Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump `version` in `Cargo.toml` (the tag derives from it), commit as `Release vX.Y.Z`, push `master`, then `pwsh scripts/release.ps1 -Publish` (builds, packages the self-contained zip, tags, pushes, creates the release).
 
-1. Bump `version` in `Cargo.toml` (single source of truth — the tag derives from it), refresh `Cargo.lock` (any build does this), and commit as `Release vX.Y.Z`.
-2. Push `master` — the release commits belong on it (`origin/master` tracks each release).
-3. `pwsh scripts/release.ps1 -Publish` — builds the optimised binary, bundles the self-contained `dist/imgvwr-<ver>-windows-x64.zip` (full runtime DLL closure), then tags `vX.Y.Z`, pushes the tag, and creates the GitHub release.
-4. **`release.ps1` writes only a placeholder note** — replace it with detailed, user-facing notes covering everything since the previous tag (`git log <prevtag>..HEAD`): `gh release edit vX.Y.Z --notes-file <file>`. Match the established style — `## What's new in vX.Y.Z`, then `### Features` / `### Fixes` bullets (bold name + ` — ` em-dash), and the self-contained / unsigned-SmartScreen footer. Verify with `gh release view vX.Y.Z --json body`.
-5. **Smoke-test that the packaged zip is self-contained** before declaring done: extract it to a fresh folder and run `imgvwr.exe` with the PATH stripped to System32 (so it can't borrow dev/vcpkg DLLs) plus a headless capture — `$env:PATH="$env:SystemRoot\System32"; $env:IMGVWR_CAPTURE="$env:TEMP\smoke.png"; & .\imgvwr.exe <a test image>` — and confirm it renders a frame with no missing-DLL error.
+- It writes only a placeholder note — replace with detailed notes covering everything since the previous tag: `gh release edit vX.Y.Z --notes-file <file>` (`## What's new`, then `### Features` / `### Fixes` bullets, self-contained/SmartScreen footer).
+- Smoke-test the zip is self-contained: extract it and run with the PATH stripped to System32 plus `IMGVWR_CAPTURE` — it must render with no missing-DLL error.
 
 ## Conventions & lessons
 

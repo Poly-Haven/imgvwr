@@ -24,6 +24,8 @@ At Poly Haven we look at images all day, it's kind of our whole job. I was sick 
 
 Equirectangular panoramas are automatically detected and displayed in an interactive 3D view.
 
+Left/middle click to pan around, scroll to zoom.
+
 You can adjust the exposure (`,`&`.`) to see the full dynamic range of HDRIs.
 
 It doesn't try to make *your images* look pretty, it just shows them to you as truthfully as possible. If you want to, you can enable OCIO view transforms (Filmic, ACES, AGX, etc) to make high-dynamic-range content easier on the eyes.
@@ -74,12 +76,12 @@ This is the standard in VFX and digital content creation. Using the same system 
 | Numpad `1`–`9` | Zoom in `2^(N-1)×` (1=100%, 2=200%, 3=400%…); with `Ctrl`, zoom out |
 | `Home` / `R` | Reset the view and window to the default |
 | `Backspace` | Centre the image and fit the window to it at the current zoom |
-| `↑` / `↓` | Rotate the image 90° (counter-clockwise / clockwise); remembered per image for the session |
 | `P` | Toggle 2D ↔ panorama mode |
 | `W` | Toggle tiled wrap (2D) |
 | `I` | Pin nearest ↔ bilinear filtering (by default it's automatic: a 2D image magnified past 200% samples nearest for crisp pixels, everything else bilinear; `I` overrides that and persists) |
 | `M` | Toggle the navigation minimap (auto-shows on 2D pan/zoom; click/drag it to jump) |
-| `B` | Cycle the background backdrop (your setting → black → grey checkerboard → white) |
+| `B` | Cycle the background color (your setting → black → grey checkerboard → white) |
+| `↑` / `↓` | Rotate the image 90° (counter-clockwise / clockwise); remembered per image for the session |
 
 ### Tone & files
 
@@ -87,8 +89,8 @@ This is the standard in VFX and digital content creation. Using the same system 
 |---|---|
 | `,` / `.` | Exposure −/+ 0.5 stops (hold to ramp) |
 | `Ctrl + ,` / `Ctrl + .` | Gamma −/+ 0.1 (hold to ramp) |
-| `[` / `]` | Clarity (local contrast) radius −/+ (hold to ramp) |
 | `;` / `'` | Clarity strength −/+ (0 = off; crank high to make issues pop; hold to ramp) |
+| `[` / `]` | Clarity (local contrast) radius −/+ (hold to ramp) |
 | `Ctrl + R` | Reset all adjustments (exposure, gamma, clarity, channel, sharpness, diff) |
 | `Ctrl + Z` / `Ctrl + Shift + Z` (or `Ctrl + Y`) | Undo / redo edits — guides, adjustments and toggle modes (not navigation); up to 256 steps, per image |
 | `T` | Toggle Standard ↔ the Default View Transform (set in Settings; defaults to Filmic) |

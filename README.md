@@ -16,7 +16,7 @@ imgvwr was built around three paradigms:
 
 At Poly Haven we look at images all day, it's kind of our whole job. I was sick of juggling different programs for different purposes and built one that fits all my needs:
 
-### Viewing HDRIs
+## Viewing HDRIs
 
 Equirectangular panoramas are automatically detected and displayed in an interactive 3D view.
 
@@ -26,7 +26,7 @@ It doesn't try to make *your images* look pretty, it just shows them to you as t
 
 Press `P` to toggle between 3D mode and 2D mode and view the panorama as a plain image.
 
-### Viewing Textures
+## Viewing Textures
 
 The color space and bit-depth of your images are respected.
 
@@ -38,11 +38,11 @@ Want to compare two images? Save them in a slot with `Ctrl`-`1-9`, and recall wi
 
 Want to see the mathematical difference between two images? save it in a slot and press `Alt`-`1-9` (same as *Difference* blending mode). Exposure controls still work if you want to amplify the difference.
 
-### Viewing RAW Photos
+## Viewing RAW Photos
 
 Most image viewers will simply show you the embedded JPG/TIFF inside the RAW file for a fast preview. That's nice and fast, but I want to see the real data, the *actual* linear RAW image with only demosaicing and basic black/white point handling.
 
-### Reviewing Images
+## Reviewing Images
 
 One of my roles at Poly Haven is QC, I spend a lot of time inspecting pixels and looking for flaws. So in addition to the comparison tools above, I added a few features to help me find issues:
 
@@ -53,9 +53,9 @@ One of my roles at Poly Haven is QC, I spend a lot of time inspecting pixels and
 - **Guides:** Vertical and horizontal guides can be added for straight edge references. Helps you check your HDRIs are level. Press `G` to add them in automatic subdivided increments.
 - **Metadata:** Hover near the top right or press `F2` to show the file metadata (bit depth, resolution, etc). Inspect channels individually.
 
-### OCIO Color Management
+## OCIO Color Management
 
-This is the standard in VFX and digital content creation, we might as well use the same system.
+This is the standard in VFX and digital content creation. Using the same system ensures that what we see is what we get further down the pipeline.
 
 ## Controls
 

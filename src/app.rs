@@ -906,17 +906,22 @@ impl App {
         // so the window opens already framing it — eliminating the size/position
         // jump that a post-decode resize would cause. RAW and equirectangular
         // images aren't pre-sized (no cheap probe / panoramas keep the window).
-        // Open on the configured startup monitor (by name) if set, else the
-        // primary. A fresh launch always auto-sizes and centres on that monitor
-        // (the previous window position/size is intentionally not restored).
-        let monitor = self
+        // Pick the monitor to open on (by winit name): an explicit "Open on
+        // display: X" wins; otherwise "Remember last used" reopens on the monitor
+        // we were on at last exit (`last_monitor`). Fall back to the primary if the
+        // chosen monitor isn't currently connected. A fresh launch always auto-sizes
+        // and centres on that monitor (the previous size/position isn't restored).
+        let wanted_monitor = self
             .prefs
             .startup_monitor
-            .as_ref()
+            .clone()
+            .or_else(|| self.prefs.last_monitor.clone());
+        let monitor = wanted_monitor
+            .as_deref()
             .and_then(|name| {
                 event_loop
                     .available_monitors()
-                    .find(|m| m.name().as_deref() == Some(name.as_str()))
+                    .find(|m| m.name().as_deref() == Some(name))
             })
             .or_else(|| event_loop.primary_monitor());
         let scale = monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
@@ -5461,9 +5466,17 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // The window geometry is intentionally not persisted — a fresh launch
-        // always auto-sizes and centres (see `startup_geometry`). Other prefs
-        // (views, colours, settings) are saved on change, but flush once more here.
+        // Remember which monitor the window is on so "Remember last used" (the
+        // default startup display) reopens there. Only the *display* is persisted —
+        // the size/position are not; a fresh launch auto-sizes and centres.
+        if let Some(name) = self
+            .gfx
+            .as_ref()
+            .and_then(|g| g.window.current_monitor())
+            .and_then(|m| m.name())
+        {
+            self.prefs.last_monitor = Some(name);
+        }
         self.prefs.save();
         // Release egui's GL resources (textures/buffers) before the painter is
         // dropped, else it warns "You forgot to call destroy() on the egui glow

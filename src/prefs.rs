@@ -24,11 +24,17 @@ pub struct AppPreferences {
     /// Keyed by lowercased file extension including the dot (e.g. ".exr").
     #[serde(default)]
     pub preferred_view_by_filetype: HashMap<String, PreferredView>,
-    /// Monitor to open on by default (winit monitor name). `None` = the primary
-    /// monitor. A fresh launch always auto-sizes and centres on this monitor (the
-    /// previous window position/size is intentionally not restored).
+    /// Monitor to open on by default (winit monitor name). `None` = "Remember last
+    /// used" (open on [`last_monitor`](Self::last_monitor)). A fresh launch always
+    /// auto-sizes and centres on the chosen monitor (the previous window
+    /// position/size is intentionally not restored — only which display).
     #[serde(default)]
     pub startup_monitor: Option<String>,
+    /// Internal (not a user setting): the winit name of the monitor the window was
+    /// on at last exit. Backs the "Remember last used" startup-display option; the
+    /// window reopens *centred* on this display (size/position are not restored).
+    #[serde(default)]
+    pub last_monitor: Option<String>,
     /// Window corner radius in physical pixels (0 = square corners).
     #[serde(default = "default_corner_radius")]
     pub corner_radius: u32,
@@ -102,6 +108,7 @@ impl Default for AppPreferences {
             version: PREFS_VERSION,
             preferred_view_by_filetype: HashMap::new(),
             startup_monitor: None,
+            last_monitor: None,
             corner_radius: default_corner_radius(),
             background_color: default_background_color(),
             default_view_transform: default_view_transform(),

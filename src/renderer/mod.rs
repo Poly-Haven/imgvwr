@@ -273,6 +273,9 @@ pub struct Renderer {
     ocio_apply: String,
     threshold: i32,
     max_texture_size: i32,
+    /// Store 32-bit-float images as RGBA16F to halve their VRAM footprint (set
+    /// from the `half_float_textures` preference; affects the next upload).
+    half_float: bool,
     /// Uploaded comparator-slot image for the difference checker (unit DIFF_UNIT).
     diff_texture: Option<glow::Texture>,
     /// Max-mipped per-channel clip mask for the clipping overlay (unit
@@ -315,6 +318,7 @@ impl Renderer {
                 ocio_apply: GAMMA_FALLBACK_APPLY.to_string(),
                 threshold,
                 max_texture_size,
+                half_float: false,
                 diff_texture: None,
                 clip_mask_texture: None,
                 post,
@@ -408,17 +412,67 @@ impl Renderer {
         &self.ocio.signature
     }
 
+    /// Set whether 32-bit-float images upload as RGBA16F (half the VRAM). Applies
+    /// to the next [`start_upload`](Self::start_upload), not the resident texture.
+    pub fn set_half_float(&mut self, on: bool) {
+        self.half_float = on;
+    }
+
     /// Begin an incremental upload of `data`. The previously-displayed image
     /// stays until [`pump_upload`](Self::pump_upload) reports completion. Any
-    /// in-progress upload is abandoned.
-    pub fn start_upload(&mut self, data: &ImageData) {
+    /// in-progress upload is abandoned. Returns `false` if the GPU allocation
+    /// failed (out of VRAM, or dims past a driver limit) — the caller can free
+    /// memory and retry, or report the failure, instead of waiting forever.
+    pub fn start_upload(&mut self, data: &ImageData) -> bool {
         let gl = self.gl.clone();
         if let Some(job) = self.upload.take() {
             unsafe { job.discard(&gl) };
         }
-        self.upload = unsafe { texture::begin_upload(&gl, data, self.threshold) };
+        self.upload = unsafe { texture::begin_upload(&gl, data, self.threshold, self.half_float) };
         if self.upload.is_none() {
             log::error!("failed to begin image upload for {}", data.path.display());
+        }
+        self.upload.is_some()
+    }
+
+    /// Abandon an in-progress incremental upload (deleting its partial texture),
+    /// keeping the currently-displayed image. Used to cancel a folder-navigation
+    /// load that the user reversed before it finished.
+    pub fn cancel_upload(&mut self) {
+        let gl = self.gl.clone();
+        if let Some(job) = self.upload.take() {
+            unsafe { job.discard(&gl) };
+        }
+    }
+
+    /// Free the auxiliary GPU textures (slot-difference image and clip-overlay
+    /// mask) to reclaim VRAM under memory pressure. They rebuild lazily when next
+    /// needed. Returns the number of textures freed.
+    pub fn free_aux_gpu_memory(&mut self) -> u32 {
+        let mut freed = 0;
+        unsafe {
+            if let Some(t) = self.diff_texture.take() {
+                self.gl.delete_texture(t);
+                freed += 1;
+            }
+            if let Some(t) = self.clip_mask_texture.take() {
+                self.gl.delete_texture(t);
+                freed += 1;
+            }
+        }
+        freed
+    }
+
+    /// Free the resident image texture to reclaim its VRAM (a last resort when an
+    /// upload can't be allocated otherwise). Leaves the view image-less until the
+    /// next upload completes. Returns true if a texture was freed.
+    pub fn free_image_texture(&mut self) -> bool {
+        let gl = self.gl.clone();
+        if let Some(prev) = self.image.take() {
+            unsafe { prev.delete(&gl) };
+            true
+        } else {
+            false
         }
     }
 

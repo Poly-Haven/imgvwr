@@ -298,16 +298,59 @@ impl UploadJob {
     }
 }
 
+/// Drain any pending GL errors so a subsequent [`took_oom`] check attributes the
+/// error to the call in between (and not to earlier state). # Safety: GL current.
+unsafe fn drain_gl_errors(gl: &glow::Context) {
+    // Bounded so a driver stuck reporting errors can't spin forever.
+    for _ in 0..64 {
+        if gl.get_error() == glow::NO_ERROR {
+            break;
+        }
+    }
+}
+
+/// True if the last GL call raised an out-of-memory / invalid-allocation error
+/// (so the caller can free VRAM and retry, or report it, instead of installing a
+/// broken texture). Call straight after a `tex_storage_*` allocation, with
+/// [`drain_gl_errors`] run beforehand. # Safety: GL current.
+unsafe fn took_oom(gl: &glow::Context, what: &str) -> bool {
+    match gl.get_error() {
+        glow::NO_ERROR => false,
+        glow::OUT_OF_MEMORY => {
+            log::error!("GL_OUT_OF_MEMORY allocating {what}");
+            true
+        }
+        // INVALID_VALUE etc. also mean the storage wasn't created (e.g. dims past
+        // a driver limit); treat any allocation error as a failed upload.
+        e => {
+            log::error!("GL error 0x{e:04x} allocating {what} (treating as failure)");
+            true
+        }
+    }
+}
+
 /// Allocate the texture(s) for `data` and return an [`UploadJob`] to pump. No
-/// pixels are uploaded yet. # Safety: the GL context must be current.
+/// pixels are uploaded yet. Returns `None` if the GPU allocation fails (out of
+/// VRAM, or dimensions past a driver limit) — the caller can then free memory and
+/// retry, or report the failure, rather than showing a blank frame.
+/// `half_float` stores 32-bit-float images as RGBA16F (half the VRAM; the source
+/// pixels stay F32 and the GPU converts on upload). # Safety: the GL context
+/// must be current.
 pub unsafe fn begin_upload(
     gl: &glow::Context,
     data: &ImageData,
     threshold: i32,
+    half_float: bool,
 ) -> Option<UploadJob> {
     let w = data.width as i32;
     let h = data.height as i32;
-    let (internal, _, _, bpp, _) = pixel_format(data);
+    let (mut internal, _, _, bpp, _) = pixel_format(data);
+    // Optionally halve VRAM for float images: store as 16-bit half. Only F32
+    // sources are affected (8-bit stays RGBA8); the upload still streams the
+    // original FLOAT pixels and the driver narrows them into the half storage.
+    if half_float && matches!(data.pixels, PixelBuffer::F32(_)) {
+        internal = glow::RGBA16F;
+    }
 
     let kind = if let Some((cols, rows, tile_size, layer_size)) = tile_grid(w, h, threshold) {
         let layers = cols * rows;
@@ -318,6 +361,7 @@ pub unsafe fn begin_upload(
         );
         let array = gl.create_texture().ok()?;
         gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(array));
+        drain_gl_errors(gl);
         gl.tex_storage_3d(
             glow::TEXTURE_2D_ARRAY,
             levels,
@@ -326,6 +370,11 @@ pub unsafe fn begin_upload(
             layer_size,
             layers,
         );
+        if took_oom(gl, &format!("{w}x{h} tiled array ({layers} layers)")) {
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+            gl.delete_texture(array);
+            return None;
+        }
         set_filters(gl, glow::TEXTURE_2D_ARRAY);
         set_anisotropy(gl, glow::TEXTURE_2D_ARRAY);
         gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
@@ -351,7 +400,13 @@ pub unsafe fn begin_upload(
         // tex_sub_image uploads that pump performs (a mutable tex_image_2d +
         // sub-image path is several times slower on NVIDIA for huge textures).
         let levels = (w.max(h) as f32).log2().floor() as i32 + 1;
+        drain_gl_errors(gl);
         gl.tex_storage_2d(glow::TEXTURE_2D, levels, internal, w, h);
+        if took_oom(gl, &format!("{w}x{h} texture")) {
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.delete_texture(texture);
+            return None;
+        }
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
         gl.tex_parameter_i32(
             glow::TEXTURE_2D,
@@ -665,7 +720,11 @@ pub unsafe fn build_clip_mask(
         glow::TEXTURE_MIN_FILTER,
         glow::LINEAR_MIPMAP_LINEAR as i32,
     );
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MAG_FILTER,
+        glow::LINEAR as i32,
+    );
     // S repeats (panorama longitude wrap); T clamps — matches the image sampler's
     // common case (exact edge wrap is immaterial for a clip indicator).
     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);

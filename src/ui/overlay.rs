@@ -787,6 +787,34 @@ fn settings_dialog(
                         }
                     });
                 });
+                // Version line, with a lime-green "update available" link appended
+                // when the daily check found a newer release (see App::poll_update).
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(
+                        egui::RichText::new(concat!("imgvwr v", env!("CARGO_PKG_VERSION")))
+                            .color(egui::Color32::from_gray(150))
+                            .size(12.0),
+                    );
+                    if let Some((ver, url)) = &inputs.available_update {
+                        ui.label(
+                            egui::RichText::new("·")
+                                .color(egui::Color32::from_gray(110))
+                                .size(12.0),
+                        );
+                        // Bright lime, to draw the eye to the available update.
+                        let lime = egui::Color32::from_rgb(140, 240, 80);
+                        clickable(
+                            ui.hyperlink_to(
+                                egui::RichText::new(format!("{ver} available"))
+                                    .color(lime)
+                                    .size(12.0),
+                                url,
+                            ),
+                        )
+                        .on_hover_text(url);
+                    }
+                });
                 ui.add_space(4.0);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, true])
@@ -886,6 +914,21 @@ fn settings_dialog(
                                 }
                                 ui.end_row();
                             });
+
+                        // ── Performance ─────────────────────────────────────
+                        settings_heading(ui, "Performance");
+                        let mut half = inputs.half_float_textures;
+                        if ui
+                            .checkbox(&mut half, "Store 32-bit float as 16-bit (less GPU memory)")
+                            .on_hover_text(
+                                "Halves the VRAM used by HDR / EXR / float images, \
+                                 with a small precision trade-off. Helps very large \
+                                 images fit; applies to images opened afterwards.",
+                            )
+                            .changed()
+                        {
+                            actions.push(UiAction::SetHalfFloat(half));
+                        }
 
                         // ── System ──────────────────────────────────────────
                         settings_heading(ui, "System");
@@ -987,9 +1030,9 @@ struct TitlebarFit {
 /// while a higher-priority one is hidden.
 fn titlebar_fit(width: f32, name_text_w: f32) -> TitlebarFit {
     const NAME_PAD: f32 = 12.0; // 6px left inset + a little gap before the next item
-    // Space left after reserving close + the filename's full width. Each button is
-    // then granted in priority order only if it still fits, and once one doesn't,
-    // every lower-priority one is dropped too (the `&&` chain).
+                                // Space left after reserving close + the filename's full width. Each button is
+                                // then granted in priority order only if it still fits, and once one doesn't,
+                                // every lower-priority one is dropped too (the `&&` chain).
     let mut rem = width - TB_BTN_W - (name_text_w + NAME_PAD);
     let minimize = rem >= TB_BTN_W;
     if minimize {
@@ -1045,8 +1088,11 @@ fn titlebar(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiAction>)
         inputs.title.as_str()
     };
     let name_font = egui::FontId::proportional(13.0);
-    let name_text_w =
-        ctx.fonts(|f| f.layout_no_wrap(name.to_owned(), name_font.clone(), fg).size().x);
+    let name_text_w = ctx.fonts(|f| {
+        f.layout_no_wrap(name.to_owned(), name_font.clone(), fg)
+            .size()
+            .x
+    });
 
     // Selectively hide elements when the window is too narrow for all of them.
     let TitlebarFit {
@@ -1698,10 +1744,7 @@ fn display_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAc
     let bar_id = ui.id();
     egui::menu::menu_custom_button(ui, chevron_button(&current), |ui| {
         for display in inputs.displays() {
-            if ui
-                .selectable_label(display == current, &display)
-                .clicked()
-            {
+            if ui.selectable_label(display == current, &display).clicked() {
                 let views = inputs.views_for(&display);
                 // Keep the current view if it's valid for the new display, else
                 // revert to Standard (then Raw, then the first view) — matching the
@@ -1710,8 +1753,18 @@ fn display_dropdown(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAc
                 let view = current_view
                     .clone()
                     .filter(|v| views.contains(v))
-                    .or_else(|| views.iter().find(|v| v.eq_ignore_ascii_case("standard")).cloned())
-                    .or_else(|| views.iter().find(|v| v.eq_ignore_ascii_case("raw")).cloned())
+                    .or_else(|| {
+                        views
+                            .iter()
+                            .find(|v| v.eq_ignore_ascii_case("standard"))
+                            .cloned()
+                    })
+                    .or_else(|| {
+                        views
+                            .iter()
+                            .find(|v| v.eq_ignore_ascii_case("raw"))
+                            .cloned()
+                    })
                     .or_else(|| views.first().cloned())
                     .unwrap_or_default();
                 actions.push(UiAction::SetView { display, view });
@@ -1980,9 +2033,13 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
     // set below). A measure≠render mismatch would shove the subtitle off-centre.
     let sub_w = |s: &str| {
         ctx.fonts(|f| {
-            f.layout_no_wrap(s.to_string(), egui::FontId::proportional(13.0), egui::Color32::WHITE)
-                .size()
-                .x
+            f.layout_no_wrap(
+                s.to_string(),
+                egui::FontId::proportional(13.0),
+                egui::Color32::WHITE,
+            )
+            .size()
+            .x
         })
     };
     let subtitle_w = sub_w(VERSION_LINE) + 6.0 + sub_w("·") + 6.0 + sub_w(repo_label);
@@ -2233,8 +2290,7 @@ mod tests {
         // interact rect spans the whole window and egui swallows clicks to the left
         // of the flags. Align::Min + uniform-width cells keeps it tight.
         let max = flag_area_rect(egui::Layout::top_down(egui::Align::Max), None);
-        let min_uniform =
-            flag_area_rect(egui::Layout::top_down(egui::Align::Min), Some(11.0));
+        let min_uniform = flag_area_rect(egui::Layout::top_down(egui::Align::Min), Some(11.0));
         eprintln!(
             "Align::Max width={} (screen 1000), Align::Min+uniform width={}",
             max.width(),

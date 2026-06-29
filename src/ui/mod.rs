@@ -101,6 +101,11 @@ pub struct UiInputs {
     /// Clipping-overlay margin (normalised fraction of the format max), for the
     /// settings slider.
     pub clip_margin: f32,
+    /// Whether 32-bit-float images upload as 16-bit half (the VRAM-saving toggle).
+    pub half_float_textures: bool,
+    /// A newer release than the running build, if known: `(version_label, url)`.
+    /// Shown as a lime-green "update available" link in the Settings dialog.
+    pub available_update: Option<(String, String)>,
     /// The configured Default View Transform (T-key target), for the settings
     /// dropdown.
     pub default_view_transform: String,
@@ -241,6 +246,8 @@ pub enum UiAction {
     SetRawAutoExposure(bool),
     /// Set the clipping-overlay margin (normalised fraction of the format max).
     SetClipMargin(f32),
+    /// Toggle storing 32-bit-float images as 16-bit half on the GPU (less VRAM).
+    SetHalfFloat(bool),
     /// Set the guide-line colour (sRGB 0–255).
     SetGuideColor([u8; 3]),
     /// Isolate a single channel as greyscale (`None` = show all channels).

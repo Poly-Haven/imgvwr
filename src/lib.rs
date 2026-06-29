@@ -7,13 +7,14 @@ pub mod camera;
 #[cfg(feature = "ocio")]
 pub mod exr_native;
 pub mod image_loader;
-#[cfg(feature = "ocio")]
-pub mod raw_native;
 pub mod logging;
 pub mod ocio;
 pub mod prefs;
+#[cfg(feature = "ocio")]
+pub mod raw_native;
 pub mod renderer;
 pub mod ui;
+pub mod update;
 
 use std::path::PathBuf;
 
@@ -29,6 +30,8 @@ pub enum UserEvent {
     LoadFinished(u64),
     /// A background *preload* (arrow-key look-ahead) finished; its generation id.
     PreloadFinished(u64),
+    /// A background "is there a newer release?" check finished (see `update`).
+    UpdateChecked,
 }
 
 /// Initialise logging and run the winit event loop until the window closes.

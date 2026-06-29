@@ -533,9 +533,25 @@ pub struct App {
     /// [`IMAGE_CACHE_CAP`]; for very large images this holds several GB. Shared
     /// (`Arc`) so comparator slots can pin an image without copying it.
     image_cache: Vec<Arc<ImageData>>,
+    /// Net offset (from the displayed image) of an in-flight folder-navigation
+    /// load: `Some(+1)` while loading the next image, `Some(-1)` the previous,
+    /// `None` when settled. While a nav load is in flight, pressing the same arrow
+    /// again is ignored (no queueing) and pressing the opposite arrow cancels it
+    /// and stays on the current image (so RL == stay, RRRRL == RL).
+    nav_pending: Option<i32>,
 
     /// Transient bottom-right status toast.
     toast: Option<Toast>,
+
+    // Update check (Settings dialog).
+    update_tx: Sender<Option<crate::update::LatestRelease>>,
+    update_rx: Receiver<Option<crate::update::LatestRelease>>,
+    /// True while a background update check is in flight (so we don't spawn more).
+    update_checking: bool,
+    /// A newer release than the running build, if one is known (from the daily
+    /// check or its cached result): `(version_label, release_url)`. Shown as a
+    /// lime-green link in the Settings dialog.
+    available_update: Option<(String, String)>,
 
     // Image comparator.
     /// The currently-displayed decoded image (shared so a slot can pin it).
@@ -599,6 +615,7 @@ impl App {
 
         let (load_tx, load_rx) = std::sync::mpsc::channel();
         let (preload_tx, preload_rx) = std::sync::mpsc::channel();
+        let (update_tx, update_rx) = std::sync::mpsc::channel();
         let ocio = OcioManager::new(resolve_resources_dir());
         let prefs = AppPreferences::load();
 
@@ -687,7 +704,12 @@ impl App {
             preload_rx,
             preload_gen: 0,
             image_cache: Vec::new(),
+            nav_pending: None,
             toast: None,
+            update_tx,
+            update_rx,
+            update_checking: false,
+            available_update: None,
             current_image: None,
             anim: None,
             slots: std::array::from_fn(|_| None),
@@ -984,7 +1006,9 @@ impl App {
         install_debug_callback(&mut gl);
 
         let gl = Arc::new(gl);
-        let renderer = Renderer::new(gl.clone()).context("failed to create renderer")?;
+        let mut renderer = Renderer::new(gl.clone()).context("failed to create renderer")?;
+        // Apply the float-precision preference before the first upload.
+        renderer.set_half_float(self.prefs.half_float_textures);
         let egui = egui_glow::EguiGlow::new(event_loop, gl.clone(), None, None, false);
         install_ui_font(&egui.egui_ctx);
         // SVG loader for the Bootstrap titlebar icons (egui::include_image!).
@@ -1144,6 +1168,10 @@ impl App {
             return;
         }
         self.settings_was_open = open;
+        if open {
+            // Surface a cached update link now and (daily) kick off a fresh check.
+            self.maybe_check_for_update();
+        }
         if self.fullscreen {
             return;
         }
@@ -1170,6 +1198,78 @@ impl App {
         } else if let Some(prev) = self.settings_restore_size.take() {
             self.resize_window_centered(prev);
         }
+    }
+
+    /// On Settings open: show any cached "update available" link immediately, and
+    /// — at most once per day — spawn a background check for a newer GitHub
+    /// release. The result updates the cache (and the link) when it returns.
+    fn maybe_check_for_update(&mut self) {
+        self.refresh_update_from_cache();
+        if self.update_checking {
+            return;
+        }
+        let now = crate::update::unix_now();
+        let last = self.prefs.last_update_check;
+        // Throttle to once per day; a backwards clock jump (now < last) re-checks.
+        if last > 0 && now >= last && now - last < 86_400 {
+            return;
+        }
+        self.update_checking = true;
+        let tx = self.update_tx.clone();
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("update-check".into())
+            .spawn(move || {
+                // Guard like the load threads: a panic must still send a result so
+                // poll_update clears `update_checking` (else checks stall for the
+                // session). fetch_latest_release has no panic path today, but the
+                // sibling spawns wrap their work too — keep it consistent.
+                let result =
+                    std::panic::catch_unwind(AssertUnwindSafe(crate::update::fetch_latest_release))
+                        .unwrap_or(None);
+                let _ = tx.send(result);
+                let _ = proxy.send_event(UserEvent::UpdateChecked);
+            });
+        if spawned.is_err() {
+            self.update_checking = false;
+        }
+    }
+
+    /// Drain finished update checks: cache a successful result (so it persists and
+    /// throttles the next check) and refresh the Settings "update available" link.
+    fn poll_update(&mut self) {
+        let mut got = false;
+        while let Ok(msg) = self.update_rx.try_recv() {
+            got = true;
+            self.update_checking = false;
+            // Only a *successful* check advances the daily throttle; a failure
+            // (offline / rate-limited) leaves it so the next open retries.
+            if let Some(rel) = msg {
+                log::info!("update check: latest release is {}", rel.tag);
+                self.prefs.last_update_check = crate::update::unix_now();
+                self.prefs.latest_known_version = rel.tag;
+                self.prefs.save();
+            } else {
+                log::debug!("update check: no result (offline or no releases)");
+            }
+        }
+        if got {
+            self.refresh_update_from_cache();
+            self.request_redraw();
+        }
+    }
+
+    /// Set `available_update` from the cached latest-known release tag (no
+    /// network): `Some((label, url))` when it is newer than the running build.
+    fn refresh_update_from_cache(&mut self) {
+        let cached = self.prefs.latest_known_version.clone();
+        self.available_update = if !cached.is_empty()
+            && crate::update::is_newer(&cached, crate::update::current_version())
+        {
+            Some((cached.clone(), crate::update::release_url(&cached)))
+        } else {
+            None
+        };
     }
 
     fn resize_window_centered(&mut self, target: PhysicalSize<u32>) {
@@ -3979,6 +4079,8 @@ impl App {
             auto_exposure: self.prefs.auto_exposure,
             raw_auto_exposure: self.prefs.raw_auto_exposure,
             clip_margin: self.prefs.clip_margin,
+            half_float_textures: self.prefs.half_float_textures,
+            available_update: self.available_update.clone(),
             default_view_transform: self.prefs.default_view_transform.clone(),
             guide_color: self.prefs.guide_color,
             background_color: self.prefs.background_color,
@@ -4352,6 +4454,26 @@ impl App {
                 self.prefs.save();
                 self.clip_mask_dirty = true; // margin is baked into the mask
                 self.request_redraw();
+            }
+            UiAction::SetHalfFloat(on) => {
+                self.prefs.half_float_textures = on;
+                self.prefs.save();
+                // Applies to the next upload — `set_half_float` doesn't touch the
+                // resident texture. (Re-uploading the current image in place was
+                // removed: it ran through finalize_adopt, which wipes the per-image
+                // undo history, and the new-precision upload could OOM and blank the
+                // on-screen image — a destructive surprise from flipping a setting.)
+                if let Some(gfx) = &mut self.gfx {
+                    gfx.renderer.set_half_float(on);
+                }
+                self.show_toast(
+                    if on {
+                        "Float images stored as 16-bit (applies on next open)"
+                    } else {
+                        "Float images stored at full precision (on next open)"
+                    }
+                    .to_string(),
+                );
             }
             UiAction::OpenSettings => {
                 self.ui_state.show_settings = true;
@@ -5185,6 +5307,7 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::LoadFinished(_gen) => self.poll_loads(),
             UserEvent::PreloadFinished(_gen) => self.poll_preloads(),
+            UserEvent::UpdateChecked => self.poll_update(),
         }
     }
 }

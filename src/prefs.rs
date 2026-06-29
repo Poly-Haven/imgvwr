@@ -67,6 +67,19 @@ pub struct AppPreferences {
     /// ~1 code of 255 at 8-bit. Configured in Settings; see the C-key overlay.
     #[serde(default = "default_clip_margin")]
     pub clip_margin: f32,
+    /// Store 32-bit-float images as 16-bit half on the GPU, roughly halving their
+    /// VRAM use (a small precision trade-off). Off by default; see Settings.
+    #[serde(default)]
+    pub half_float_textures: bool,
+    /// Internal (not user-facing): unix-seconds of the last successful update
+    /// check, so the daily check throttles. `0` = never checked.
+    #[serde(default)]
+    pub last_update_check: i64,
+    /// Internal: the latest release tag the update check found (e.g. "v1.2.0"),
+    /// cached so the Settings dialog can show an "update available" link within
+    /// the daily window without re-hitting the network. Empty = none/unknown.
+    #[serde(default)]
+    pub latest_known_version: String,
 }
 
 fn default_corner_radius() -> u32 {
@@ -108,6 +121,9 @@ impl Default for AppPreferences {
             raw_auto_exposure: false,
             guide_color: default_guide_color(),
             clip_margin: default_clip_margin(),
+            half_float_textures: false,
+            last_update_check: 0,
+            latest_known_version: String::new(),
         }
     }
 }

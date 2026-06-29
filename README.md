@@ -8,7 +8,10 @@ for Windows.
   (`width == height * 2`) and opens them in panorama mode. Press **P** to toggle.
 - **Full-quality HDR:** very high resolution (24k+) 32-bit float images are
   uploaded at full bit depth, tiled across multiple GPU textures when they exceed
-  `GL_MAX_TEXTURE_SIZE`.
+  `GL_MAX_TEXTURE_SIZE`. If the GPU runs out of memory the viewer frees what it
+  can and retries, and reports a clear message rather than showing a blank frame;
+  an optional *Store 32-bit float as 16-bit* setting halves the VRAM such images
+  use.
 - **High-quality downscaling:** 8-bit images are minified with a separable
   Lanczos-3 filter (sharper than bilinear, with mip pre-filtering so it stays
   alias-free at any zoom-out); higher bit depths and all upscaling use bilinear.
@@ -89,7 +92,7 @@ for Windows.
 | `A` | Toggle always-on-top |
 | `F` / `F11` / double-click | Toggle fullscreen (2D images fit the screen but smaller-than-screen ones show at 1:1; the cursor auto-hides when idle) |
 | `Escape` / `Q` | Exit fullscreen or close |
-| Move cursor to top edge | Show the titlebar (Open, Settings, window controls) |
+| Move cursor to top edge | Show the titlebar (Open, Settings, window controls) — also in fullscreen; dragging it there exits fullscreen and moves the window |
 | Move cursor to bottom edge | Show the adjustment sliders panel (Exposure, Gamma) |
 
 ### Comparator & help

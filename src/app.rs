@@ -1445,6 +1445,7 @@ impl App {
                 Err(e) => {
                     log::error!("load failed (gen {}): {e}", msg.gen);
                     self.load_state = LoadState::Failed(e);
+                    self.nav_pending = None;
                     adopted = true;
                 }
             }
@@ -1719,6 +1720,8 @@ impl App {
         // The new image starts settled — freeze the easing target at the camera
         // we just configured (incl. any debug override) so it doesn't animate in.
         self.camera.settle();
+        // The navigation (if any) has arrived: we're settled on this image.
+        self.nav_pending = None;
         // Undo never crosses an image load: start a fresh stack at this state.
         self.reset_undo();
         self.request_redraw();
@@ -1848,6 +1851,12 @@ impl App {
         } else {
             self.flat_scale_ref()
         };
+        // Recalling a slot supersedes any in-flight folder-navigation load: bump
+        // the load generation so the decode result is discarded when it lands
+        // (else poll_loads would adopt it and clobber this recall), and clear the
+        // nav debounce offset so a stale `nav_pending` doesn't perturb later arrows.
+        self.load_gen += 1;
+        self.nav_pending = None;
         if self.active_slot == Some(idx) {
             // Toggle back to the previously-viewed image (swap so a third press
             // returns to the slot).
@@ -1934,12 +1943,58 @@ impl App {
         let Some(current) = self.loaded_path.clone() else {
             return;
         };
+        // A folder-navigation load is already in flight.
+        if let Some(off) = self.nav_pending {
+            if dir == off.signum() {
+                // Same direction again: ignore it (don't queue a second step), so
+                // spamming → just steps once and waits for the load.
+                return;
+            }
+            // Opposite direction: the user reversed before the load finished, so
+            // they'd end up back here anyway — cancel it and stay put (RL == stay,
+            // RRRRL == RL).
+            self.cancel_nav_load();
+            return;
+        }
         let Some(target) = sibling_path(&current, dir) else {
+            // Only one supported image in the folder (or the file/folder vanished):
+            // there's nowhere to navigate to.
+            self.show_toast("No more images in this folder".to_string());
             return;
         };
         self.nav_dir = dir;
         self.preload_armed = true;
+        self.nav_pending = Some(dir);
         self.load_path(target);
+    }
+
+    /// Cancel an in-flight folder-navigation load and stay on the current image.
+    /// Handles both phases: an in-progress GPU upload is abandoned (keeping the
+    /// current texture), and a background decode is discarded by bumping the load
+    /// generation so its result is ignored when it arrives. The decode thread
+    /// itself can't be interrupted, but its output is dropped.
+    fn cancel_nav_load(&mut self) {
+        self.nav_pending = None;
+        if let Some(pending) = self.pending.take() {
+            if let Some(gfx) = &mut self.gfx {
+                gfx.renderer.cancel_upload();
+            }
+            self.upload_progress = 0.0;
+            // The decode already finished — keep it cached so revisiting that
+            // image is still instant (the upload, not the decode, was abandoned).
+            self.cache_insert(pending.data);
+        }
+        // Discard any in-flight / queued decode result for the abandoned target.
+        self.load_gen += 1;
+        // We're staying on the (already-loaded) current image.
+        self.load_state = LoadState::Loaded;
+        self.pending_name = self
+            .loaded_path
+            .as_deref()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned());
+        log::info!("navigation cancelled; staying on current image");
+        self.request_redraw();
     }
 
     /// Home: ease pan+zoom back to the fit view (2D) or default FOV (panorama).
@@ -4515,6 +4570,7 @@ impl App {
             // A manual open ends any arrow-nav preload chain (saved comparator
             // slots persist; only the A/B scratch is dropped).
             self.preload_armed = false;
+            self.nav_pending = None;
             self.image_cache.clear();
             self.compare_prev = None;
             self.load_path(path);
@@ -5094,6 +5150,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::DroppedFile(path) => {
                 // A manually-dropped file ends any arrow-nav preload chain.
                 self.preload_armed = false;
+                self.nav_pending = None;
                 self.image_cache.clear();
                 self.compare_prev = None;
                 self.load_path(path);
@@ -5554,6 +5611,13 @@ fn sibling_path(current: &Path, dir: i32) -> Option<PathBuf> {
         .filter(|p| p.is_file() && is_supported(p))
         .collect();
     if files.is_empty() {
+        return None;
+    }
+    // A single supported image: there's no sibling to navigate to. Detected here
+    // (not by comparing the returned path to `current`) so it's robust to path-form
+    // differences — e.g. a relative CLI arg vs the absolute `read_dir` path — which
+    // would otherwise make a `target == current` equality check miss.
+    if files.len() == 1 {
         return None;
     }
     files.sort_by_key(|p| {

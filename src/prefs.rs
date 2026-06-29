@@ -16,15 +16,6 @@ pub struct PreferredView {
     pub view: String,
 }
 
-/// Saved outer position and inner size of the main window (physical pixels).
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WindowGeometry {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppPreferences {
     /// Schema version, for forward-compatible migrations.
@@ -33,11 +24,9 @@ pub struct AppPreferences {
     /// Keyed by lowercased file extension including the dot (e.g. ".exr").
     #[serde(default)]
     pub preferred_view_by_filetype: HashMap<String, PreferredView>,
-    /// Last window position/size, restored on launch.
-    #[serde(default)]
-    pub window: Option<WindowGeometry>,
-    /// Monitor to open on by default (winit monitor name). `None` = remember the
-    /// last-used position (restore `window`).
+    /// Monitor to open on by default (winit monitor name). `None` = the primary
+    /// monitor. A fresh launch always auto-sizes and centres on this monitor (the
+    /// previous window position/size is intentionally not restored).
     #[serde(default)]
     pub startup_monitor: Option<String>,
     /// Window corner radius in physical pixels (0 = square corners).
@@ -112,7 +101,6 @@ impl Default for AppPreferences {
         Self {
             version: PREFS_VERSION,
             preferred_view_by_filetype: HashMap::new(),
-            window: None,
             startup_monitor: None,
             corner_radius: default_corner_radius(),
             background_color: default_background_color(),

@@ -58,7 +58,7 @@ use crate::image_loader::{
     is_equirectangular, is_supported, load_image, probe_dimensions, supported_extensions, ImageData,
 };
 use crate::ocio::OcioManager;
-use crate::prefs::{AppPreferences, PreferredView, WindowGeometry};
+use crate::prefs::{AppPreferences, PreferredView};
 use crate::renderer::{RenderParams, Renderer};
 use crate::ui::{self, UiAction, UiInputs, UiState};
 use crate::UserEvent;
@@ -895,15 +895,20 @@ impl App {
             // provided by the custom titlebar, body-drag, and edge hit-zones.
             // (DWM drop-shadow / Aero-snap polish is a follow-up.)
             .with_decorations(false)
+            // Created hidden to avoid a startup flash: an immediately-visible
+            // window would show the OS default (a standard-size white window on the
+            // primary monitor) for a few frames before our position/size attributes
+            // and the first GL clear land. `resumed` renders the first frame and
+            // then reveals it already framed, placed, and cleared to the backdrop.
+            .with_visible(false)
             .with_min_inner_size(LogicalSize::new(MIN_DIM as f64, MIN_DIM as f64));
         // Probe the initial image's dimensions from its header (cheap, no decode)
         // so the window opens already framing it — eliminating the size/position
         // jump that a post-decode resize would cause. RAW and equirectangular
         // images aren't pre-sized (no cheap probe / panoramas keep the window).
         // Open on the configured startup monitor (by name) if set, else the
-        // primary. `force_center` centres the window on that monitor rather than
-        // restoring the last-used position.
-        let force_center = self.prefs.startup_monitor.is_some();
+        // primary. A fresh launch always auto-sizes and centres on that monitor
+        // (the previous window position/size is intentionally not restored).
         let monitor = self
             .prefs
             .startup_monitor
@@ -922,13 +927,7 @@ impl App {
             .filter(|(w, h)| !is_equirectangular(*w, *h));
         // Set both size and position at creation so the window never visibly
         // jumps into place.
-        let (size, position) = startup_geometry(
-            self.prefs.window,
-            probed,
-            monitor.as_ref(),
-            scale,
-            force_center,
-        );
+        let (size, position) = startup_geometry(probed, monitor.as_ref(), scale);
         window_attributes = window_attributes.with_inner_size(size);
         if let Some(pos) = position {
             window_attributes = window_attributes.with_position(pos);
@@ -2991,6 +2990,45 @@ impl App {
         }
     }
 
+    /// Leave fullscreen for a titlebar drag, repositioning the restored window so
+    /// the mouse cursor stays on the titlebar. Without this, `set_fullscreen(false)`
+    /// restores the window to its pre-fullscreen position elsewhere on screen, and
+    /// the subsequent OS move loop would grab it from there — leaving the window
+    /// jumping away from the cursor that is still at the top of the screen.
+    fn exit_fullscreen_under_cursor(&mut self) {
+        // Global cursor position is independent of the window, but capture it
+        // before the restore for clarity.
+        let cursor = global_cursor_pos();
+        self.set_fullscreen(false);
+        // We place the window by hand below, so cancel the restore-time re-centre
+        // (`refit_windowed_pending`, just armed by set_fullscreen) — otherwise the
+        // next Resized would yank the window to the image-framed centre, away from
+        // the cursor mid-drag.
+        self.refit_windowed_pending = false;
+        let Some((cx, cy)) = cursor else {
+            return;
+        };
+        if let Some(gfx) = &self.gfx {
+            // winit applies the fullscreen-exit synchronously on Windows, so the
+            // window already has its restored windowed size here.
+            let scale = gfx.window.scale_factor();
+            let outer = gfx.window.outer_size();
+            // Titlebar height in physical px (overlay's TITLEBAR_H is 30 logical pt).
+            let tb = (30.0 * scale) as i32;
+            // Centre the window horizontally under the cursor and put the cursor in
+            // the middle of the titlebar, so the OS move loop grabs it right where
+            // the mouse is rather than from the stale pre-fullscreen position.
+            let mut x = cx - outer.width as i32 / 2;
+            let mut y = cy - tb / 2;
+            if let Some(m) = gfx.window.current_monitor() {
+                let (mp, ms) = (m.position(), m.size());
+                x = x.clamp(mp.x, mp.x + (ms.width as i32 - outer.width as i32).max(0));
+                y = y.clamp(mp.y, mp.y + (ms.height as i32 - outer.height as i32).max(0));
+            }
+            gfx.window.set_outer_position(PhysicalPosition::new(x, y));
+        }
+    }
+
     /// 2D zoom that fits the image to the `(vw, vh)` viewport but never magnifies
     /// past native 1:1 (device px). On-screen scale = `zoom * vh / img_h`, so a
     /// fit-scale clamped to ≤ 1 converts to this zoom: a sub-viewport image lands
@@ -3569,12 +3607,14 @@ impl App {
 
     /// The titlebar reveals only while the cursor is within the window and near
     /// its top edge (so it doesn't cover the image while looking around lower
-    /// down). Hidden in fullscreen.
+    /// down). It reveals in fullscreen too, so the window controls and Open /
+    /// Settings buttons stay reachable; dragging it there exits fullscreen and
+    /// then moves the window (see the `DragWindow` action).
     fn titlebar_should_show(&self) -> bool {
         if cfg!(debug_assertions) && self.force_overlay.as_deref() == Some("titlebar") {
             return true;
         }
-        if self.fullscreen || !self.cursor_in_window {
+        if !self.cursor_in_window {
             return false;
         }
         let scale = self
@@ -4599,6 +4639,13 @@ impl App {
             // Borderless titlebar controls.
             UiAction::DragWindow => {
                 self.freeze_animations();
+                // Dragging the titlebar in fullscreen leaves fullscreen first and
+                // then moves the window — but the restored window must land under
+                // the cursor (with the titlebar still grabbed), not back at its
+                // stale pre-fullscreen position somewhere else on screen.
+                if self.fullscreen {
+                    self.exit_fullscreen_under_cursor();
+                }
                 if let Some(gfx) = &self.gfx {
                     let _ = gfx.window.drag_window();
                 }
@@ -4609,6 +4656,12 @@ impl App {
                 }
             }
             UiAction::ToggleMaximize => {
+                // Maximize is incompatible with fullscreen (the titlebar — hence
+                // this button — is now reachable in fullscreen); leave fullscreen
+                // first so the OS window and `self.fullscreen` don't disagree.
+                if self.fullscreen {
+                    self.set_fullscreen(false);
+                }
                 if let Some(gfx) = &self.gfx {
                     let max = gfx.window.is_maximized();
                     gfx.window.set_maximized(!max);
@@ -5009,7 +5062,6 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match self.create_gfx(event_loop) {
             Ok(gfx) => {
-                gfx.window.request_redraw();
                 self.gfx = Some(gfx);
                 if let Some(c) = &mut self.capture {
                     c.start = Instant::now();
@@ -5017,6 +5069,17 @@ impl ApplicationHandler<UserEvent> for App {
                 // Build the OCIO program (or gamma fallback) before first draw.
                 self.rebuild_ocio();
                 self.load_initial_image();
+                // Render the first frame (backdrop + hint / loading) into the back
+                // buffer, then reveal the hidden window — so it appears already in
+                // its final place at the right size with the correct background,
+                // rather than flashing the OS default first (see `with_visible`).
+                if matches!(self.render(), RenderOutcome::Captured) {
+                    // Headless capture finished on the first frame — no window to show.
+                    event_loop.exit();
+                } else if let Some(gfx) = &self.gfx {
+                    gfx.window.set_visible(true);
+                    gfx.window.request_redraw();
+                }
             }
             Err(e) => {
                 log::error!("failed to initialise graphics: {e:?}");
@@ -5398,20 +5461,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // Persist the windowed (non-fullscreen) geometry for next launch.
-        if !self.fullscreen {
-            if let Some(gfx) = &self.gfx {
-                if let Ok(pos) = gfx.window.outer_position() {
-                    let size = gfx.window.inner_size();
-                    self.prefs.window = Some(WindowGeometry {
-                        x: pos.x,
-                        y: pos.y,
-                        width: size.width,
-                        height: size.height,
-                    });
-                }
-            }
-        }
+        // The window geometry is intentionally not persisted — a fresh launch
+        // always auto-sizes and centres (see `startup_geometry`). Other prefs
+        // (views, colours, settings) are saved on change, but flush once more here.
         self.prefs.save();
         // Release egui's GL resources (textures/buffers) before the painter is
         // dropped, else it warns "You forgot to call destroy() on the egui glow
@@ -5480,49 +5532,48 @@ fn fit_to_monitor(iw: f32, ih: f32, monitor: Option<&MonitorHandle>) -> (u32, u3
     (w, h)
 }
 
-/// Compute the window's inner size and outer position at creation, so it opens
-/// already in the right place (no post-load jump):
+/// The mouse cursor's position in global (virtual-screen) physical pixels via
+/// Win32 `GetCursorPos`. `None` if the call fails. Used to place the window under
+/// the cursor when leaving fullscreen for a titlebar drag.
+fn global_cursor_pos() -> Option<(i32, i32)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt = POINT { x: 0, y: 0 };
+    // SAFETY: `GetCursorPos` only writes through the out-pointer, which is valid.
+    if unsafe { GetCursorPos(&mut pt) } != 0 {
+        Some((pt.x, pt.y))
+    } else {
+        None
+    }
+}
+
+/// Compute the window's inner size and outer position at creation so it opens
+/// already framing its image, centred on the target monitor. A fresh launch
+/// always auto-sizes and centres — the previous window geometry is deliberately
+/// not restored:
 ///
-/// * With a probed initial image → frame it (capped to the monitor), centred on
-///   the saved window's centre if there is one, else on the screen (first launch).
-/// * No image but saved geometry → restore the saved window exactly.
-/// * Neither → a centred default.
+/// * With a probed initial image → frame it (capped to the monitor).
+/// * No image → a default size.
+///
+/// Either way the window is centred on `monitor` (the configured startup display,
+/// or the primary), clamped on-screen.
 fn startup_geometry(
-    saved: Option<WindowGeometry>,
     probed: Option<(u32, u32)>,
     monitor: Option<&MonitorHandle>,
     scale: f64,
-    force_center: bool,
 ) -> (PhysicalSize<u32>, Option<PhysicalPosition<i32>>) {
     let size = if let Some((iw, ih)) = probed {
         let (w, h) = fit_to_monitor(iw as f32, ih as f32, monitor);
         PhysicalSize::new(w, h)
-    } else if let Some(g) = saved {
-        PhysicalSize::new(g.width.max(MIN_DIM), g.height.max(MIN_DIM))
     } else {
         PhysicalSize::new((1280.0 * scale) as u32, (720.0 * scale) as u32)
     };
 
-    // No image to size to but a saved window → restore it verbatim, unless a
-    // startup monitor is configured (then centre on it instead).
-    if probed.is_none() && !force_center {
-        if let Some(g) = saved {
-            return (size, Some(PhysicalPosition::new(g.x, g.y)));
-        }
-    }
-
-    // Otherwise centre: on the chosen monitor when forced (or first launch), else
-    // on the saved window's centre. Clamped on-screen.
+    // Centre on the chosen monitor, clamped on-screen.
     let position = monitor.map(|m| {
         let (mp, ms) = (m.position(), m.size());
-        let (cx, cy) = match saved {
-            Some(g) if !force_center => (g.x + g.width as i32 / 2, g.y + g.height as i32 / 2),
-            _ => (mp.x + ms.width as i32 / 2, mp.y + ms.height as i32 / 2),
-        };
-        let x = (cx - size.width as i32 / 2)
-            .clamp(mp.x, mp.x + (ms.width as i32 - size.width as i32).max(0));
-        let y = (cy - size.height as i32 / 2)
-            .clamp(mp.y, mp.y + (ms.height as i32 - size.height as i32).max(0));
+        let x = (mp.x + (ms.width as i32 - size.width as i32) / 2).max(mp.x);
+        let y = (mp.y + (ms.height as i32 - size.height as i32) / 2).max(mp.y);
         PhysicalPosition::new(x, y)
     });
     (size, position)

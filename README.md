@@ -1,36 +1,61 @@
 # imgvwr
 
-A minimal, GPU-accelerated image viewer for HDR panoramas and standard images,
-for Windows.
+A minimal, GPU-accelerated image viewer for HDR panoramas and standard images.
 
-- **Two display modes:** 2D pan/zoom for ordinary images; rectilinear
-  equirectangular projection for panoramas. Auto-detects panoramas
-  (`width == height * 2`) and opens them in panorama mode. Press **P** to toggle.
-- **Full-quality HDR:** very high resolution (24k+) 32-bit float images are
-  uploaded at full bit depth, tiled across multiple GPU textures when they exceed
-  `GL_MAX_TEXTURE_SIZE`. If the GPU runs out of memory the viewer frees what it
-  can and retries, and reports a clear message rather than showing a blank frame;
-  an optional *Store 32-bit float as 16-bit* setting halves the VRAM such images
-  use.
-- **High-quality downscaling:** 8-bit images are minified with a separable
-  Lanczos-3 filter (sharper than bilinear, with mip pre-filtering so it stays
-  alias-free at any zoom-out); higher bit depths and all upscaling use bilinear.
-- **OCIO v2 colour management:** bundled Blender/AgX config, with AgX/Filmic and
-  other view transforms selectable from the metadata box's View dropdown.
-- **Accurate camera RAW:** RAW photos are developed (demosaiced) to scene-linear
-  with a **linear camera response** — camera white balance and the camera→sRGB
-  matrix, but *no* tone curve — so you see the sensor data as it is, not a
-  "make it pretty" rendering. White maps to 1.0 and highlights keep their
-  headroom, so lowering the exposure (or a Filmic/ACES view transform) recovers
-  detail in regions that first looked clipped.
-- **Review tools:** per-channel isolation, a **clipping overlay** (`C`) that marks
-  at-/near-max pixels with animated per-channel stripes (judged on the original
-  data, not the adjusted view), an auto-exposure pick for HDR panoramas, and a GPU
-  **Clarity** (local-contrast) filter that can be cranked well past photographic
+![screenshot](https://u.polyhaven.org/PAb/2026-06-29_13-45-18.jpg)
+
+Are you looking for a screenshot of imgvwr? That's it. That's the whole thing.
+
+I told you it was minimal, there isn't even a titlebar - until you need it.
+
+imgvwr was built around three paradigms:
+
+1. The image is the window.
+2. Nothing gets in your way.
+3. But it can do everything you need an image viewer to do.
+
+At Poly Haven we look at images all day, it's kind of our whole job. I was sick of juggling different programs for different purposes and built one that fits all my needs:
+
+### Viewing HDRIs
+
+Equirectangular panoramas are automatically detected and displayed in an interactive 3D view.
+
+You can adjust the exposure (`,`&`.`) to see the full dynamic range of HDRIs.
+
+It doesn't try to make *your images* look pretty, it just shows them to you as truthfully as possible. If you want to, you can enable OCIO view transforms (Filmic, ACES, AGX, etc) to make high-dynamic-range content easier on the eyes.
+
+Press `P` to toggle between 3D mode and 2D mode and view the panorama as a plain image.
+
+### Viewing Textures
+
+The color space and bit-depth of your images are respected.
+
+Toggle wrapping/tiling preview with `W`, pan infinitely far away.
+
+If you want to inspect the same tiny region in multiple PBR maps, press `L` to lock the view and navigate with `←` and `→`, or open another image entirely.
+
+Want to compare two images? Save them in a slot with `Ctrl`-`1-9`, and recall with `1-9` or click on the flags.
+
+Want to see the mathematical difference between two images? save it in a slot and press `Alt`-`1-9` (same as *Difference* blending mode). Exposure controls still work if you want to amplify the difference.
+
+### Viewing RAW Photos
+
+Most image viewers will simply show you the embedded JPG/TIFF inside the RAW file for a fast preview. That's nice and fast, but I want to see the real data, the *actual* linear RAW image with only demosaicing and basic black/white point handling.
+
+### Reviewing Images
+
+One of my roles at Poly Haven is QC, I spend a lot of time inspecting pixels and looking for flaws. So in addition to the comparison tools above, I added a few features to help me find issues:
+
+- **Clarity filter:** A large scale local contrast filter that can be cranked well past photographic
   levels to make issues pop.
-- **Minimal UI:** the image *is* the window; a borderless titlebar (Open,
-  Settings, window controls) reveals at the top edge, an adjustment-slider panel
-  at the bottom edge, and the metadata box at the top-right — all auto-hiding.
+- **Sharpness filter:** Not for *sharpening*, but for seeing *how* sharp an image is. `S` to toggle, darker regions are less sharp/detailed.
+- **Clipping overlay:** Press `C` to highlight pixels that are near to the limit of what the image format can store (RGB~=256 for 8-bit images and RAW photos, 65536 for 16-bit float, etc). Note that this can't tell you if an HDRI has clipped lighting, but it can tell you if the source images you start with are clipped.
+- **Guides:** Vertical and horizontal guides can be added for straight edge references. Helps you check your HDRIs are level. Press `G` to add them in automatic subdivided increments.
+- **Metadata:** Hover near the top right or press `F2` to show the file metadata (bit depth, resolution, etc). Inspect channels individually.
+
+### OCIO Color Management
+
+This is the standard in VFX and digital content creation, we might as well use the same system.
 
 ## Controls
 
@@ -121,7 +146,9 @@ numbered flags at the top-right; the active one is highlighted.
 JPEG, PNG / APNG, BMP, TIFF, WebP, GIF, ICO, TGA, PNM, Radiance HDR, OpenEXR, and
 camera RAW: NEF, CR2, CR3, ARW, DNG, RAF, ORF, RW2, PEF, and similar.
 
-Camera RAW is developed with **LibRaw** to scene-linear float (demosaic + camera
+Camera RAW is slow since we decode and demosaic the image ourselves, skipping the usual embedded JPG/TIFF that other image viewers settle for.
+
+RAW files are developed with **LibRaw** to scene-linear float (demosaic + camera
 white balance + camera→sRGB matrix, linear response — no tone curve), matching
 the HDR/EXR pipeline so exposure and view transforms behave the same. RAW photos
 do **not** auto-expose by default (the develop already respects the real

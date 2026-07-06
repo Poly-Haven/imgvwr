@@ -108,14 +108,16 @@ impl ImageData {
         }
     }
 
-    /// True when the image is a real equirectangular panorama: it has the 2:1
-    /// aspect ratio **and** its pixel content shows the structural signatures of
-    /// an equirect (see [`equirect_content_scores`]). The content test rejects
-    /// ordinary 2:1 images (crops, renders, side-by-side pairs) that merely share
-    /// the aspect ratio. Falls back to the aspect-only test if the buffer can't be
-    /// sampled.
+    /// True when the image is a real equirectangular panorama. Three gates, in
+    /// order: the format must be a float HDR one that panoramas actually ship in
+    /// ([`can_be_panorama`] — 8-bit / LDR images always read as ordinary 2D); the
+    /// aspect ratio must be 2:1; and the pixel content must show the structural
+    /// signatures of an equirect (see [`equirect_content_scores`]), which rejects
+    /// ordinary 2:1 HDRs (crops, renders, side-by-side pairs). Falls back to the
+    /// aspect-only test only if the buffer can't be sampled.
     pub fn is_equirectangular(&self) -> bool {
-        is_equirectangular(self.width, self.height)
+        can_be_panorama(&self.path)
+            && is_equirectangular(self.width, self.height)
             && equirect_content_scores(self.width, self.height, &self.pixels)
                 .as_ref()
                 .is_none_or(|s| s.looks_like_pano())
@@ -184,6 +186,22 @@ pub const HALF_MAX: f32 = 65504.0;
 /// for the content test that separates real panoramas from ordinary 2:1 images.
 pub fn is_equirectangular(width: u32, height: u32) -> bool {
     height > 0 && width == height * 2
+}
+
+/// Float HDR formats that panoramas actually ship in — the only formats eligible
+/// for panorama auto-detection. Everything else (8-bit / LDR: JPEG, PNG, WebP,
+/// GIF, …) always opens as an ordinary 2D image; `P` still flips it into the
+/// sphere by hand. `.pic` is the alternate extension for Radiance HDR.
+const PANO_EXTS: &[&str] = &["exr", "hdr", "pic"];
+
+/// True when `path`'s format is one panoramas ship in (see [`PANO_EXTS`]), so it's
+/// worth running the aspect + content panorama test. A cheap extension check —
+/// no I/O.
+pub fn can_be_panorama(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => PANO_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
+        None => false,
+    }
 }
 
 /// Structural signatures that distinguish a real equirectangular panorama from an
@@ -465,9 +483,9 @@ mod tests {
         PixelBuffer::U8(px)
     }
 
-    fn make_img(w: u32, h: u32, pixels: PixelBuffer) -> ImageData {
+    fn make_img(name: &str, w: u32, h: u32, pixels: PixelBuffer) -> ImageData {
         ImageData {
-            path: PathBuf::from("test"),
+            path: PathBuf::from(name),
             width: w,
             height: h,
             channels: 4,
@@ -519,12 +537,28 @@ mod tests {
     }
 
     #[test]
-    fn is_equirectangular_requires_aspect_and_content() {
-        // 2:1 with pano-like content -> panorama.
-        assert!(make_img(64, 32, buf(64, 32, |_, y| (y * 6) as u8)).is_equirectangular());
-        // Same flat content but a square aspect ratio -> not a panorama.
-        assert!(!make_img(32, 32, buf(32, 32, |_, y| (y * 6) as u8)).is_equirectangular());
-        // 2:1 aspect but ordinary 2D content -> not a panorama.
-        assert!(!make_img(64, 32, buf(64, 32, |x, _| ((x * 255) / 63) as u8)).is_equirectangular());
+    fn is_equirectangular_requires_format_aspect_and_content() {
+        let pole_flat = |w, h| buf(w, h, |_, y| (y * 6) as u8);
+        // HDR format, 2:1, pano-like content -> panorama.
+        assert!(make_img("p.exr", 64, 32, pole_flat(64, 32)).is_equirectangular());
+        // Same content & aspect but an 8-bit / LDR format -> never a panorama.
+        assert!(!make_img("p.png", 64, 32, pole_flat(64, 32)).is_equirectangular());
+        assert!(!make_img("p.jpg", 64, 32, pole_flat(64, 32)).is_equirectangular());
+        // HDR format + flat content but a square aspect ratio -> not a panorama.
+        assert!(!make_img("p.exr", 32, 32, pole_flat(32, 32)).is_equirectangular());
+        // HDR format + 2:1 aspect but ordinary 2D content -> not a panorama.
+        assert!(!make_img("p.exr", 64, 32, buf(64, 32, |x, _| ((x * 255) / 63) as u8))
+            .is_equirectangular());
+    }
+
+    #[test]
+    fn can_be_panorama_by_format() {
+        assert!(can_be_panorama(Path::new("a.exr")));
+        assert!(can_be_panorama(Path::new("A.HDR"))); // case-insensitive
+        assert!(can_be_panorama(Path::new("a.pic")));
+        assert!(!can_be_panorama(Path::new("a.png")));
+        assert!(!can_be_panorama(Path::new("a.jpg")));
+        assert!(!can_be_panorama(Path::new("a.webp")));
+        assert!(!can_be_panorama(Path::new("noext")));
     }
 }

@@ -22,7 +22,7 @@ At Poly Haven we look at images all day, it's kind of our whole job. I was sick 
 
 ## Viewing HDRIs
 
-Equirectangular panoramas are automatically detected and displayed in an interactive 3D view. Detection looks past the 2:1 aspect ratio at the actual pixels — an equirectangular projection collapses its top and bottom rows to single points and wraps seamlessly left-to-right — so ordinary 2:1 images stay in 2D. Press `P` if it ever guesses wrong.
+Equirectangular HDR panoramas (`.exr` / `.hdr`) are automatically detected and displayed in an interactive 3D view. Detection looks past the 2:1 aspect ratio at the actual pixels — an equirectangular projection collapses its top and bottom rows to single points and wraps seamlessly left-to-right — so ordinary 2:1 HDRs stay in 2D. 8-bit images (JPEG, PNG, …) always open flat; press `P` to view any image as a panorama.
 
 Left/middle click to pan around, scroll to zoom.
 

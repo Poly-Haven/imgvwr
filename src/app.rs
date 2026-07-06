@@ -55,7 +55,8 @@ use winit::window::{CursorGrabMode, Fullscreen, ResizeDirection, Window, WindowI
 
 use crate::camera::{Camera, CameraController};
 use crate::image_loader::{
-    is_equirectangular, is_supported, load_image, probe_dimensions, supported_extensions, ImageData,
+    equirect_content_scores, is_equirectangular, is_supported, load_image, probe_dimensions,
+    supported_extensions, ImageData,
 };
 use crate::ocio::OcioManager;
 use crate::prefs::{AppPreferences, PreferredView};
@@ -1598,6 +1599,21 @@ impl App {
             old_scale,
         } = pending;
         let equirect = data.is_equirectangular();
+        // Diagnostic (debug builds only): the raw content scores behind the
+        // panorama-vs-2D verdict, for tuning / explaining a misclassification.
+        if log::log_enabled!(log::Level::Debug) && is_equirectangular(data.width, data.height) {
+            if let Some(s) = equirect_content_scores(data.width, data.height, &data.pixels) {
+                log::debug!(
+                    "pano-detect {}x{}: pole_top={:.4} pole_bottom={:.4} wrap={:.4} -> {}",
+                    data.width,
+                    data.height,
+                    s.pole_top,
+                    s.pole_bottom,
+                    s.wrap,
+                    if equirect { "panorama" } else { "2D" },
+                );
+            }
+        }
         log::info!(
             "loaded {}x{} ({} ch, {}) {} from {}",
             data.width,

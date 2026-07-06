@@ -108,8 +108,17 @@ impl ImageData {
         }
     }
 
+    /// True when the image is a real equirectangular panorama: it has the 2:1
+    /// aspect ratio **and** its pixel content shows the structural signatures of
+    /// an equirect (see [`equirect_content_scores`]). The content test rejects
+    /// ordinary 2:1 images (crops, renders, side-by-side pairs) that merely share
+    /// the aspect ratio. Falls back to the aspect-only test if the buffer can't be
+    /// sampled.
     pub fn is_equirectangular(&self) -> bool {
         is_equirectangular(self.width, self.height)
+            && equirect_content_scores(self.width, self.height, &self.pixels)
+                .as_ref()
+                .is_none_or(|s| s.looks_like_pano())
     }
 
     /// True for 8-bit-per-channel (LDR) sources, uploaded as a `U8` texture. Used
@@ -169,10 +178,142 @@ pub const CLIP_MAX_NONE: [f32; 4] = [f32::MAX; 4];
 /// The largest finite IEEE-754 half-float — the clip point for a 16-bit-half EXR.
 pub const HALF_MAX: f32 = 65504.0;
 
-/// Panorama detection: an image is treated as equirectangular when its width is
-/// exactly twice its height.
+/// Panorama detection: an image has the *aspect ratio* of an equirectangular
+/// panorama when its width is exactly twice its height. This is necessary but not
+/// sufficient — see [`ImageData::is_equirectangular`] / [`equirect_content_scores`]
+/// for the content test that separates real panoramas from ordinary 2:1 images.
 pub fn is_equirectangular(width: u32, height: u32) -> bool {
     height > 0 && width == height * 2
+}
+
+/// Structural signatures that distinguish a real equirectangular panorama from an
+/// ordinary 2:1 image, measured straight from the pixels (no metadata):
+///
+/// * **Pole convergence** — every pixel in the top row maps to the zenith and
+///   every pixel in the bottom row to the nadir (one 3-D point each), so both edge
+///   rows are nearly a constant colour. `pole_top` / `pole_bottom` are the mean
+///   per-channel standard deviation along each row; ~0 means flat/pole-like.
+/// * **Horizontal wrap** — a 360° panorama is seamless, so its left and right edge
+///   columns match. `wrap` is the mean absolute left-vs-right difference.
+///
+/// All three are measured in a tonemapped space so unbounded HDR highlights can't
+/// dominate, and lower is more panorama-like for each.
+pub struct EquirectScores {
+    pub pole_top: f32,
+    pub pole_bottom: f32,
+    pub wrap: f32,
+}
+
+// Thresholds sit in the empty gap measured across real files: genuine equirect
+// HDRIs score poles ~0.000–0.003 and wrap ~0.000–0.001, while ordinary 2:1
+// renders (including a deliberately hard case with near-matching side colours)
+// score poles ~0.033–0.074 and wrap ~0.031–0.078. 0.015 / 0.012 leave a ~5×
+// margin below the panoramas and ~2× above the non-panoramas.
+/// A row counts as flat (pole-like) below this mean per-channel stddev.
+const POLE_FLAT_MAX: f32 = 0.015;
+/// Left/right edges count as seamless below this mean absolute difference.
+const WRAP_SEAM_MAX: f32 = 0.012;
+/// Points sampled along each edge. Subsampled for large images, so the whole test
+/// touches at most a few thousand texels regardless of resolution.
+const EDGE_SAMPLES: usize = 512;
+
+impl EquirectScores {
+    /// Whether the measured content looks like a real equirectangular panorama.
+    ///
+    /// Pole convergence is the primary signal — an ordinary 2:1 photo or render
+    /// has detail along its top/bottom rows, while a panorama's poles collapse to
+    /// near-constant colour. Both poles must be flat. A seamless horizontal wrap
+    /// then *confirms* a flat-poled image, but is deliberately **not** trusted on
+    /// its own: some 2:1 renders happen to have matching side colours, and a real
+    /// panorama cropped below 360° won't wrap — so wrap only rescues the borderline
+    /// case where one pole is slightly over the flatness threshold.
+    pub fn looks_like_pano(&self) -> bool {
+        let both_poles_flat = self.pole_top < POLE_FLAT_MAX && self.pole_bottom < POLE_FLAT_MAX;
+        let one_pole_flat = self.pole_top < POLE_FLAT_MAX || self.pole_bottom < POLE_FLAT_MAX;
+        both_poles_flat || (one_pole_flat && self.wrap < WRAP_SEAM_MAX)
+    }
+}
+
+/// Measure the panorama-content signatures of an image (see [`EquirectScores`]).
+/// Returns `None` when the buffer is too small to sample — callers then fall back
+/// to the aspect-ratio-only heuristic.
+pub fn equirect_content_scores(
+    width: u32,
+    height: u32,
+    pixels: &PixelBuffer,
+) -> Option<EquirectScores> {
+    let (w, h) = (width as usize, height as usize);
+    let len = match pixels {
+        PixelBuffer::U8(v) => v.len(),
+        PixelBuffer::F32(v) => v.len(),
+    };
+    if w == 0 || h == 0 || len < w * h * 4 {
+        return None;
+    }
+    Some(EquirectScores {
+        pole_top: row_roughness(pixels, w, 0),
+        pole_bottom: row_roughness(pixels, w, h - 1),
+        wrap: wrap_diff(pixels, w, h),
+    })
+}
+
+/// Tonemapped (Reinhard) RGB of one texel, keyed by pixel index. Reinhard maps
+/// `[0, ∞) → [0, 1)` so an unbounded HDR highlight can't dominate the variance /
+/// difference sums; it's monotonic, so 8-bit values (already `0..1`) are unharmed.
+fn texel_tonemapped(pixels: &PixelBuffer, idx: usize) -> [f32; 3] {
+    let reinhard = |x: f32| {
+        let x = x.max(0.0);
+        x / (1.0 + x)
+    };
+    let o = idx * 4;
+    match pixels {
+        PixelBuffer::U8(v) => [
+            reinhard(v[o] as f32 / 255.0),
+            reinhard(v[o + 1] as f32 / 255.0),
+            reinhard(v[o + 2] as f32 / 255.0),
+        ],
+        PixelBuffer::F32(v) => [reinhard(v[o]), reinhard(v[o + 1]), reinhard(v[o + 2])],
+    }
+}
+
+/// Mean per-channel standard deviation of tonemapped colour along row `y`, sampled
+/// at up to [`EDGE_SAMPLES`] points spread across the full width. Near-zero for a
+/// pole row (all one 3-D point); larger for a row of real image detail.
+fn row_roughness(pixels: &PixelBuffer, width: usize, y: usize) -> f32 {
+    let n = EDGE_SAMPLES.min(width).max(1);
+    let mut sum = [0.0f64; 3];
+    let mut sumsq = [0.0f64; 3];
+    for i in 0..n {
+        let x = if n > 1 { i * (width - 1) / (n - 1) } else { 0 };
+        let t = texel_tonemapped(pixels, y * width + x);
+        for c in 0..3 {
+            sum[c] += t[c] as f64;
+            sumsq[c] += (t[c] as f64) * (t[c] as f64);
+        }
+    }
+    let nf = n as f64;
+    let mut acc = 0.0f64;
+    for c in 0..3 {
+        let mean = sum[c] / nf;
+        acc += (sumsq[c] / nf - mean * mean).max(0.0).sqrt();
+    }
+    (acc / 3.0) as f32
+}
+
+/// Mean absolute tonemapped difference between the left and right edge columns,
+/// sampled at up to [`EDGE_SAMPLES`] rows. Near-zero for a seamless 360° wrap.
+fn wrap_diff(pixels: &PixelBuffer, width: usize, height: usize) -> f32 {
+    let n = EDGE_SAMPLES.min(height).max(1);
+    let mut acc = 0.0f64;
+    for i in 0..n {
+        let y = if n > 1 { i * (height - 1) / (n - 1) } else { 0 };
+        let l = texel_tonemapped(pixels, y * width);
+        let r = texel_tonemapped(pixels, y * width + width - 1);
+        for c in 0..3 {
+            acc += (l[c] - r[c]).abs() as f64;
+        }
+    }
+    (acc / (n as f64 * 3.0)) as f32
 }
 
 /// Camera RAW extensions handled (best-effort) by `rawler`.
@@ -306,5 +447,84 @@ mod tests {
         assert!(!is_equirectangular(2048, 4096));
         assert!(!is_equirectangular(100, 0));
         assert!(!is_equirectangular(0, 0));
+    }
+
+    /// Build a greyscale RGBA8 buffer from a per-pixel value closure.
+    fn buf(w: usize, h: usize, f: impl Fn(usize, usize) -> u8) -> PixelBuffer {
+        let mut px = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let o = (y * w + x) * 4;
+                let v = f(x, y);
+                px[o] = v;
+                px[o + 1] = v;
+                px[o + 2] = v;
+                px[o + 3] = 255;
+            }
+        }
+        PixelBuffer::U8(px)
+    }
+
+    fn make_img(w: u32, h: u32, pixels: PixelBuffer) -> ImageData {
+        ImageData {
+            path: PathBuf::from("test"),
+            width: w,
+            height: h,
+            channels: 4,
+            dtype_name: "test".into(),
+            compression: "test".into(),
+            pixels,
+            is_encoded_srgb: true,
+            clip_max: CLIP_MAX_NORM,
+            animation: None,
+            camera: None,
+        }
+    }
+
+    #[test]
+    fn looks_like_pano_decision() {
+        let s = |pole_top, pole_bottom, wrap| EquirectScores {
+            pole_top,
+            pole_bottom,
+            wrap,
+        };
+        // Both poles flat -> panorama regardless of wrap.
+        assert!(s(0.001, 0.002, 0.5).looks_like_pano());
+        // Neither pole flat -> not a panorama (the hard 2:1 render case), even
+        // with a smallish wrap.
+        assert!(!s(0.033, 0.034, 0.031).looks_like_pano());
+        // One pole flat + a seamless wrap -> rescued (e.g. a busy nadir).
+        assert!(s(0.001, 0.05, 0.005).looks_like_pano());
+        // One pole flat but the wrap isn't seamless -> not enough on its own.
+        assert!(!s(0.001, 0.05, 0.05).looks_like_pano());
+    }
+
+    #[test]
+    fn content_scores_flat_poles_vs_detail() {
+        // Vertical gradient: every row is constant across x, so both pole rows are
+        // flat and the left/right columns match -> reads as a panorama.
+        let pano = buf(64, 32, |_, y| (y * 6) as u8);
+        let s = equirect_content_scores(64, 32, &pano).unwrap();
+        assert!(s.pole_top < 0.001, "pole_top={}", s.pole_top);
+        assert!(s.pole_bottom < 0.001, "pole_bottom={}", s.pole_bottom);
+        assert!(s.wrap < 0.001, "wrap={}", s.wrap);
+        assert!(s.looks_like_pano());
+
+        // Horizontal ramp: colour varies along x, so the pole rows carry detail
+        // and the side columns differ -> not a panorama.
+        let flat2d = buf(64, 32, |x, _| ((x * 255) / 63) as u8);
+        let s = equirect_content_scores(64, 32, &flat2d).unwrap();
+        assert!(s.pole_top > 0.05, "pole_top={}", s.pole_top);
+        assert!(!s.looks_like_pano());
+    }
+
+    #[test]
+    fn is_equirectangular_requires_aspect_and_content() {
+        // 2:1 with pano-like content -> panorama.
+        assert!(make_img(64, 32, buf(64, 32, |_, y| (y * 6) as u8)).is_equirectangular());
+        // Same flat content but a square aspect ratio -> not a panorama.
+        assert!(!make_img(32, 32, buf(32, 32, |_, y| (y * 6) as u8)).is_equirectangular());
+        // 2:1 aspect but ordinary 2D content -> not a panorama.
+        assert!(!make_img(64, 32, buf(64, 32, |x, _| ((x * 255) / 63) as u8)).is_equirectangular());
     }
 }

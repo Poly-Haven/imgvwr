@@ -91,3 +91,13 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   in `resumed` is: create gfx → `rebuild_ocio` → `load_initial_image` → render one frame →
   `set_visible(true)`. Don't move `set_visible` before the first `render()` and don't drop
   `with_visible(false)` — either reintroduces the flash.
+- **Panorama detection is content-based, not just 2:1 aspect.** The free `is_equirectangular(w,h)`
+  is the aspect gate *only* — it's all that's available pre-decode (window sizing at `resumed`), and
+  it stays aspect-only on purpose. The real verdict is `ImageData::is_equirectangular()`, which also
+  runs `equirect_content_scores`: a true equirect collapses its top/bottom rows to single points
+  (near-constant `pole_top`/`pole_bottom`) and wraps seamlessly L↔R (`wrap`), all measured on
+  Reinhard-tonemapped edge samples so HDR highlights can't dominate. The scan is ~15µs and
+  resolution-independent (≤512 samples/edge). Real HDRIs score poles ~0.000–0.003; ordinary 2:1
+  renders ~0.03–0.07 — thresholds sit in the gap (`POLE_FLAT_MAX`/`WRAP_SEAM_MAX` in `mod.rs`). A
+  2:1 image now classed 2D still fits its window (post-decode `resize_window_to_image` at the
+  `!want_pano` branch of `finalize_adopt`).

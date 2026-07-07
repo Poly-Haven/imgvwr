@@ -107,6 +107,11 @@ const MINIMAP_FADE: f32 = 0.6;
 /// Fullscreen only: hide the mouse cursor after this long with no real movement.
 const CURSOR_IDLE_HIDE: Duration = Duration::from_millis(2500);
 
+/// Hold the loading bar back this long after a load starts, so it doesn't flash
+/// on-screen for a small image that decodes/uploads in a frame or two. A load
+/// slower than this crosses the threshold and reveals the bar as normal.
+const LOADING_BAR_DELAY: Duration = Duration::from_millis(200);
+
 /// A held adjustment key's repeats coalesce into one undo entry while presses
 /// keep arriving within this window (longer than the OS key-repeat interval, so
 /// the ramp stays one gesture; the entry commits this long after release).
@@ -4189,7 +4194,12 @@ impl App {
 
         // Overlay state, with headless-test overrides applied.
         let forced = self.force_overlay.as_deref();
-        let loading = self.is_busy() || forced == Some("loading");
+        let busy = self.is_busy() || forced == Some("loading");
+        // Reveal the loading bar only once a load has taken a moment, so it doesn't
+        // flicker on-screen for a small/fast image (the delay window shows neither
+        // bar nor hint, just the backdrop). A forced overlay skips the delay.
+        let loading =
+            busy && (forced == Some("loading") || self.load_start.elapsed() >= LOADING_BAR_DELAY);
         // One continuous bar across both phases: the file read is the first
         // 0→80% and the GPU upload is the final 80→100%, so it fills straight
         // through instead of zipping to full then restarting. The decode phase is
@@ -4207,7 +4217,7 @@ impl App {
             _ if forced == Some("error") => Some("Example decode error: unsupported format".into()),
             _ => None,
         };
-        let show_hint = (!has_image && !loading && error.is_none()) || forced == Some("hint");
+        let show_hint = (!has_image && !busy && error.is_none()) || forced == Some("hint");
 
         UiInputs {
             bottom_slide: self.bottom_slide,

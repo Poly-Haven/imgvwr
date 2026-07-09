@@ -20,7 +20,7 @@ imgvwr was built around three paradigms:
 
 At Poly Haven we look at images all day, it's kind of our whole job. I was sick of juggling different programs for different purposes and built one that fits all my needs:
 
-> # ⬇️ Download now: https://github.com/Poly-Haven/imgvwr/releases
+> ### ⬇️ [Download now](https://github.com/Poly-Haven/imgvwr/releases)
 
 ## Viewing HDRIs
 

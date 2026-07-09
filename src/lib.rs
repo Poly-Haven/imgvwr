@@ -40,7 +40,23 @@ pub fn run() {
         eprintln!("Warning: failed to initialise logger: {e}");
     }
 
-    let initial_path = std::env::args_os().nth(1).map(PathBuf::from);
+    let first = std::env::args_os().nth(1);
+
+    // Headless: register imgvwr as the default viewer and exit. Same code path as
+    // the Settings "Set as default" button; handy for scripts and for testing the
+    // registration without opening the GUI.
+    if first.as_deref().and_then(|s| s.to_str()) == Some("--register-default-app") {
+        match app::register_default_app() {
+            Ok(n) => println!("imgvwr registered as the default viewer for {n} file types"),
+            Err(e) => {
+                eprintln!("register-default-app failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    let initial_path = first.map(PathBuf::from);
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()

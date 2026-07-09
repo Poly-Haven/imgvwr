@@ -5674,55 +5674,105 @@ fn install_ui_font(ctx: &egui::Context) {
 /// The alphabetical sibling image `dir` steps from `current` in its folder
 /// (wrapping at the ends). `None` if the folder can't be read or has no
 /// supported images.
-/// Register imgvwr (per-user, no admin) as the handler for every supported
-/// extension: a ProgID with an open command + icon, each extension's
-/// `OpenWithProgids`, and the classic default association. Returns the number of
-/// extensions associated. Note: Windows protects an extension's *current*
-/// default with a hashed UserChoice, so already-defaulted types (e.g. .jpg) may
-/// still need confirmation in Settings → Default apps; unassociated types
-/// (most HDR/EXR/RAW) take effect immediately.
+/// A human-readable type name for an extension, shown in Explorer's Type column
+/// via the per-extension ProgID (see [`register_default_app`]). Distinct per
+/// format so a folder can be sorted by type; camera RAW formats share a common
+/// "Camera RAW Image" prefix so they cluster together in a sort yet stay
+/// separable from JPEG / PNG / EXR / …. Unknown extensions fall back to an
+/// uppercase `<EXT> Image`.
 #[cfg(windows)]
-fn register_default_app() -> Result<usize, String> {
+fn friendly_type_name(ext: &str) -> String {
+    let named = match ext {
+        "jpg" | "jpeg" => "JPEG Image",
+        "png" => "PNG Image",
+        "apng" => "Animated PNG Image",
+        "bmp" => "Bitmap Image",
+        "tif" | "tiff" => "TIFF Image",
+        "webp" => "WebP Image",
+        "gif" => "GIF Image",
+        "ico" => "Icon Image",
+        "tga" => "Targa Image",
+        "pnm" => "Netpbm Image",
+        "hdr" | "pic" => "Radiance HDR Image",
+        "exr" => "OpenEXR Image",
+        "nef" | "nrw" => "Camera RAW Image (Nikon)",
+        "cr2" | "cr3" | "crw" => "Camera RAW Image (Canon)",
+        "arw" | "sr2" | "srf" => "Camera RAW Image (Sony)",
+        "dng" => "Camera RAW Image (DNG)",
+        "raf" => "Camera RAW Image (Fujifilm)",
+        "orf" => "Camera RAW Image (Olympus)",
+        "rw2" => "Camera RAW Image (Panasonic)",
+        "pef" => "Camera RAW Image (Pentax)",
+        "rwl" => "Camera RAW Image (Leica)",
+        "raw" => "Camera RAW Image",
+        other => return format!("{} Image", other.to_uppercase()),
+    };
+    named.to_string()
+}
+
+/// Register imgvwr (per-user, no admin) as the handler for every supported
+/// extension. Each extension gets its **own** ProgID (`imgvwr.<ext>`) with a
+/// distinct [`friendly_type_name`], so Explorer's Type column shows a real,
+/// per-format type (JPEG Image, OpenEXR Image, Camera RAW Image (Nikon), …) and a
+/// folder can be sorted by type — a single shared ProgID would collapse them all
+/// to one type. Also cleans up the legacy single `imgvwr.Image` ProgID that older
+/// builds used. Returns the number of extensions associated.
+///
+/// Note: Windows protects an extension's *current* default with a hashed
+/// UserChoice, so already-defaulted types (e.g. .jpg) may still need confirmation
+/// in Settings → Default apps; unassociated types (most HDR/EXR/RAW) take effect
+/// immediately.
+#[cfg(windows)]
+pub fn register_default_app() -> Result<usize, String> {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
     use winreg::RegKey;
 
     let exe = std::env::current_exe().map_err(|e| format!("exe path: {e}"))?;
     let exe = exe.to_string_lossy().into_owned();
-    let progid = "imgvwr.Image";
+    let icon_val = format!("{exe},0");
+    let cmd_val = format!("\"{exe}\" \"%1\"");
 
     let classes = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags(r"Software\Classes", KEY_READ | KEY_WRITE)
         .map_err(|e| format!("open HKCU Classes: {e}"))?;
 
-    // ProgID: friendly name, icon, and open command.
-    let (prog, _) = classes.create_subkey(progid).map_err(|e| e.to_string())?;
-    prog.set_value("", &"imgvwr Image")
-        .map_err(|e| e.to_string())?;
-    let (icon, _) = prog
-        .create_subkey("DefaultIcon")
-        .map_err(|e| e.to_string())?;
-    icon.set_value("", &format!("{exe},0"))
-        .map_err(|e| e.to_string())?;
-    let (cmd, _) = prog
-        .create_subkey(r"shell\open\command")
-        .map_err(|e| e.to_string())?;
-    cmd.set_value("", &format!("\"{exe}\" \"%1\""))
-        .map_err(|e| e.to_string())?;
+    // Older builds registered a single "imgvwr.Image" ProgID for every extension,
+    // so Explorer's Type column read the same "imgvwr Image" for all of them and a
+    // folder couldn't be sorted by type (RAW vs JPEG, etc). Drop it; the
+    // per-extension ProgIDs below replace it with distinct, sortable type names.
+    let _ = classes.delete_subkey_all("imgvwr.Image");
 
-    // Associate each supported extension.
     let mut count = 0usize;
     for ext in crate::image_loader::supported_extensions() {
+        let progid = format!("imgvwr.{ext}");
+
+        // Per-extension ProgID: its own friendly type name plus the shared icon
+        // and open command.
+        let Ok((prog, _)) = classes.create_subkey(&progid) else {
+            continue;
+        };
+        let _ = prog.set_value("", &friendly_type_name(ext));
+        if let Ok((icon, _)) = prog.create_subkey("DefaultIcon") {
+            let _ = icon.set_value("", &icon_val);
+        }
+        if let Ok((cmd, _)) = prog.create_subkey(r"shell\open\command") {
+            let _ = cmd.set_value("", &cmd_val);
+        }
+
+        // Point the extension at this ProgID (classic default + OpenWithProgids),
+        // and drop the stale legacy entry from its Open-with list.
         let Ok((key, _)) = classes.create_subkey(format!(".{ext}")) else {
             continue;
         };
         if let Ok((owp, _)) = key.create_subkey("OpenWithProgids") {
-            let _ = owp.set_value(progid, &"");
+            let _ = owp.set_value(&progid, &"");
+            let _ = owp.delete_value("imgvwr.Image");
         }
         let _ = key.set_value("", &progid);
         count += 1;
     }
 
-    // Refresh shell file-association state (icons / defaults).
+    // Refresh shell file-association state (icons / defaults / type names).
     unsafe {
         windows_sys::Win32::UI::Shell::SHChangeNotify(
             windows_sys::Win32::UI::Shell::SHCNE_ASSOCCHANGED as i32,
@@ -5736,7 +5786,7 @@ fn register_default_app() -> Result<usize, String> {
 }
 
 #[cfg(not(windows))]
-fn register_default_app() -> Result<usize, String> {
+pub fn register_default_app() -> Result<usize, String> {
     Err("only supported on Windows".into())
 }
 
@@ -6312,6 +6362,22 @@ mod tests {
             !pick_nearest(true, true, None),
             "panorama -> bilinear (manual ignored in auto)"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn friendly_type_names_are_distinct_and_sortable() {
+        assert_eq!(friendly_type_name("jpg"), "JPEG Image");
+        assert_eq!(friendly_type_name("jpeg"), "JPEG Image");
+        assert_eq!(friendly_type_name("exr"), "OpenEXR Image");
+        // RAW clusters under a common prefix but stays per-brand distinct.
+        assert!(friendly_type_name("nef").starts_with("Camera RAW Image"));
+        assert!(friendly_type_name("cr2").starts_with("Camera RAW Image"));
+        assert_ne!(friendly_type_name("nef"), friendly_type_name("cr2"));
+        // RAW differs from JPEG, so a folder can be sorted to separate them.
+        assert_ne!(friendly_type_name("nef"), friendly_type_name("jpg"));
+        // Unknown extensions fall back to "<EXT> Image".
+        assert_eq!(friendly_type_name("xyz"), "XYZ Image");
     }
 
     #[test]

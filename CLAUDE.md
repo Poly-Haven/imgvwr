@@ -91,6 +91,17 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   in `resumed` is: create gfx → `rebuild_ocio` → `load_initial_image` → render one frame →
   `set_visible(true)`. Don't move `set_visible` before the first `render()` and don't drop
   `with_visible(false)` — either reintroduces the flash.
+- **Default-app registration uses one ProgID *per extension*, never a shared one.** Explorer's Type
+  column reads the (default) value of the extension's ProgID, so a single shared `imgvwr.Image` made
+  every type show "imgvwr Image" and broke sort-by-type. `register_default_app` writes
+  `imgvwr.<ext>` each with its own `friendly_type_name(ext)` (RAW share a "Camera RAW Image (…)"
+  prefix so they cluster yet stay per-brand). It also deletes the legacy `imgvwr.Image`. The button
+  can only set the *classic* default (`.ext\(default)` + `OpenWithProgids`); a Windows-hashed
+  `UserChoice` overrides it, so types the user already defaulted elsewhere keep their old type until
+  re-picked in Settings (that's why `.cr2`/`.dng` may still show "CR2 File"). Run the exact code
+  path headlessly with `imgvwr.exe --register-default-app`; verify the resulting Type strings with
+  `SHGetFileInfo(..., SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES)` from a fresh process (the shell
+  caches associations per-process).
 - **Panorama detection is format- + content-gated, not just 2:1 aspect.** `ImageData::is_equirectangular()`
   gates in order: `can_be_panorama(path)` (float HDR only — `PANO_EXTS` = exr/hdr/pic; 8-bit/LDR is
   *always* 2D by deliberate choice, since 360 JPEGs exist but the user wants them flat by default,

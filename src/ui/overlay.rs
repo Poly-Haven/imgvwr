@@ -1945,30 +1945,34 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
                 };
                 text_frame.show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = ROW_GAP;
+                    // `.font(font.clone())` (not `.size()`, which leaves the family at
+                    // the default proportional one) — the width measured above for
+                    // `box_w` used the monospace metrics, so rendering must match or
+                    // the box ends up wider than the text actually needs.
                     ui.label(
                         egui::RichText::new(coord_line)
                             .color(value_color)
-                            .size(FONT_SIZE),
+                            .font(font.clone()),
                     );
                     ui.label(
                         egui::RichText::new("Linear:")
                             .color(label_color)
-                            .size(FONT_SIZE),
+                            .font(font.clone()),
                     );
                     ui.label(
                         egui::RichText::new(linear_line)
                             .color(value_color)
-                            .size(FONT_SIZE),
+                            .font(font.clone()),
                     );
                     ui.label(
                         egui::RichText::new("Display:")
                             .color(label_color)
-                            .size(FONT_SIZE),
+                            .font(font.clone()),
                     );
                     ui.label(
                         egui::RichText::new(display_line)
                             .color(value_color)
-                            .size(FONT_SIZE),
+                            .font(font.clone()),
                     );
                 });
             });

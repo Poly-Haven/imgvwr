@@ -2,7 +2,7 @@
 //! "no image" hint, and the F2 metadata HUD (see plans/rewrite.md §12.3, §12.5,
 //! §12.6).
 
-use super::colors::{panel_bg, panel_bg_alpha, ACCENT, PANEL_ALPHA};
+use super::colors::{panel_bg, panel_bg_alpha, ACCENT, GUIDE_ADD, GUIDE_HOVER, PANEL_ALPHA};
 use super::{clickable, PanoProj, RulerInfo, UiAction, UiInputs, UiState};
 
 /// Height of the borderless custom titlebar; the top strip is reserved for it so
@@ -70,6 +70,7 @@ pub fn build_overlays(
     // (Grabbing / moving / deleting existing guides is handled in the app's input
     // layer — see App::guide_at_cursor — so it has a single authority over
     // mouse-button routing vs panning and works in both 2D and panorama.)
+    guide_tooltip(ctx, inputs, state);
 
     // Auto-hiding bottom panel (tone sliders + the merged bottom ruler).
     bottom_panel(ctx, inputs, state, actions);
@@ -1618,25 +1619,28 @@ fn metadata_hud(
                             );
                             ui.vertical(|ui| {
                                 let (iw, ih) = inputs.image_size;
+                                let pano = inputs.ruler.and_then(|r| r.pano).is_some();
                                 // `V 425px` (vertical → x pixel) / `H 312px`
-                                // (horizontal → y pixel), remove button on the right.
-                                // Sorted alphabetically (H before V, then by pixel),
-                                // keeping each row's original guide index for removal.
-                                let mut rows: Vec<(usize, &str, i64)> = inputs
+                                // (horizontal → y pixel), plus degrees in panorama
+                                // mode; remove button on the right. Sorted
+                                // alphabetically (H before V, then by pixel), keeping
+                                // each row's original guide index for removal.
+                                let mut rows: Vec<(usize, &str, i64, String)> = inputs
                                     .guides
                                     .iter()
                                     .enumerate()
-                                    .map(|(i, g)| {
+                                    .map(|(i, &g)| {
                                         let (axis, dim) =
                                             if g[1] >= 0.5 { ("H", ih) } else { ("V", iw) };
-                                        (i, axis, (g[0] * dim as f32).round() as i64)
+                                        let px = (g[0] * dim as f32).round() as i64;
+                                        (i, axis, px, guide_readout(g, inputs.image_size, pano))
                                     })
                                     .collect();
                                 rows.sort_by(|a, b| a.1.cmp(b.1).then(a.2.cmp(&b.2)));
-                                for (i, axis, px) in rows {
+                                for (i, _, _, text) in rows {
                                     ui.horizontal(|ui| {
                                         ui.label(
-                                            egui::RichText::new(format!("{axis} {px}px"))
+                                            egui::RichText::new(text)
                                                 .color(egui::Color32::WHITE)
                                                 .size(12.0),
                                         );
@@ -1653,6 +1657,78 @@ fn metadata_hud(
         });
     state.view_menu_open = view_menu_open;
     resp.response.contains_pointer() || view_menu_open
+}
+
+/// A guide's angle in panorama mode, from its stored image uv coord — the direct
+/// inverse of the shader's equirect uv mapping (`u = 1 - (lon/TAU + 0.5)`,
+/// `v = 0.5 - lat/PI`, see `direction_to_equirect_uv`). Horizontal guides
+/// (constant v) read latitude: 0° at centre, +90° top, -90° bottom. Vertical
+/// guides (constant u) read longitude: 0..360° left→right.
+fn guide_degrees(g: [f32; 2]) -> f32 {
+    if g[1] >= 0.5 {
+        (0.5 - g[0]) * 180.0
+    } else {
+        g[0].rem_euclid(1.0) * 360.0
+    }
+}
+
+/// A guide's readout text — `H 312px` / `V 425px`, plus degrees in panorama mode —
+/// shared by the F2 box's guide list and the cursor tooltip.
+fn guide_readout(g: [f32; 2], image_size: (u32, u32), pano: bool) -> String {
+    let (iw, ih) = image_size;
+    let (axis, dim) = if g[1] >= 0.5 { ("H", ih) } else { ("V", iw) };
+    let px = (g[0] * dim as f32).round() as i64;
+    if pano {
+        format!("{axis} {px}px  {:.1}°", guide_degrees(g))
+    } else {
+        format!("{axis} {px}px")
+    }
+}
+
+/// A colour-coded box hovering just above-right of the cursor while a guide is
+/// hovered/grabbed (blue, [`GUIDE_HOVER`]) or being dragged out of a ruler (green,
+/// [`GUIDE_ADD`]), showing its pixel (and, in panorama, degree) coordinate — so the
+/// value is visible without opening the F2 metadata box.
+fn guide_tooltip(ctx: &egui::Context, inputs: &UiInputs, state: &UiState) {
+    let (idx, color) = if let Some(idx) = state.guide_spawn {
+        (idx, GUIDE_ADD)
+    } else if let Some(idx) = state.hovered_guide {
+        (idx, GUIDE_HOVER)
+    } else {
+        return;
+    };
+    let (Some(&g), Some(pos)) = (inputs.guides.get(idx), ctx.pointer_hover_pos()) else {
+        return;
+    };
+    let pano = inputs.ruler.and_then(|r| r.pano).is_some();
+    let text = guide_readout(g, inputs.image_size, pano);
+
+    const FONT_SIZE: f32 = 13.0;
+    let text_color = egui::Color32::from_gray(20);
+    let font = egui::FontId::proportional(FONT_SIZE);
+    let galley = ctx.fonts(|f| f.layout_no_wrap(text.clone(), font, text_color));
+    let size = galley.size() + egui::vec2(16.0, 8.0);
+    // Hover to the top-right of the cursor.
+    let tip_pos = egui::pos2(pos.x + 16.0, pos.y - size.y - 16.0);
+
+    egui::Area::new(egui::Id::new("imgvwr_guide_tooltip"))
+        .fixed_pos(tip_pos)
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .show(ctx, |ui| {
+            let frame = egui::Frame {
+                fill: color,
+                inner_margin: egui::Margin::symmetric(8, 4),
+                corner_radius: egui::CornerRadius::same(3),
+                ..Default::default()
+            };
+            frame.show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).color(text_color).size(FONT_SIZE))
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                );
+            });
+        });
 }
 
 /// The `(label, colour, channel-index)` boxes to show for a channel count.

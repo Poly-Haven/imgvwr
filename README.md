@@ -112,7 +112,8 @@ This is the standard in VFX and digital content creation. Using the same system 
 | Drag / right-click a guide | Grab a guide to move it, or delete it (drag off the image, or right-click) — 2D and panorama |
 | `Alt` + middle-drag | Squash / stretch the image non-uniformly, unbounded (line straightness) |
 | Channel boxes (`F2`) | Click to isolate R / G / B / A as greyscale |
-| Guides list (`F2`) | Shows each guide (`V 425px` / `H 312px`); × removes; `Ctrl+R` resets all |
+| Guides list (`F2`) | Shows each guide (`V 425px` / `H 312px`, plus degrees in panorama); × removes; `Ctrl+R` resets all |
+| Hover / drag a guide | Shows a colour-coded tooltip near the cursor with its coordinate — blue while hovering or grabbing, green while dragging a new one out of a ruler |
 
 ### Window (borderless)
 

@@ -6830,6 +6830,75 @@ fn run_histogram_bench(
             hist.over[0],
         );
     }
+
+    // ---- progressive refinement -------------------------------------------
+    //
+    // Does accumulating S² phase-offset passes of an S-strided grid really
+    // converge on the exact full-resolution answer? It can only do so when S
+    // divides both dimensions — otherwise the residue classes don't tile and
+    // some pixels get visited twice while others are never visited at all.
+    // Compared bin-for-bin against the reference, so "close" doesn't pass.
+    //
+    // Whole-image only. The viewport is already measured 1:1 with the screen, so
+    // there is nothing to refine — and the phase offset is a *pan*, which in
+    // viewport mode would move the view rather than re-phase the sampling.
+    if !matches!(source, crate::renderer::HistogramSource::WholeImage { .. }) {
+        return;
+    }
+    let Some((_, _, _, truth)) =
+        renderer.benchmark_histogram(params, source, 0, true, Some((iw, ih)))
+    else {
+        return;
+    };
+    for stride in [2i32, 4, 6, 8] {
+        if iw % stride != 0 || ih % stride != 0 {
+            log::info!("hist-bench: progressive S={stride}: {iw}x{ih} not divisible — skipped");
+            continue;
+        }
+        let grid = (iw / stride, ih / stride);
+        let mut elapsed = 0.0f32;
+        let mut acc: Option<crate::renderer::Histogram> = None;
+        for p in 0..(stride * stride) {
+            let phase = (p % stride, p / stride);
+            let r = renderer.benchmark_histogram_phase(
+                params,
+                source,
+                0,
+                true,
+                Some(grid),
+                phase,
+                p > 0, // first pass clears, the rest add to it
+            );
+            if let Some((_, ms, _, h)) = r {
+                elapsed += ms;
+                acc = Some(h);
+            }
+        }
+        let Some(acc) = acc else { continue };
+        let exact = acc.bins == truth.bins && acc.over == truth.over;
+        let acc_total: u64 =
+            acc.bins[0].iter().map(|&n| n as u64).sum::<u64>() + acc.over[0] as u64;
+        let worst = acc.bins[0]
+            .iter()
+            .zip(truth.bins[0].iter())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        log::info!(
+            "hist-bench: progressive S={stride}: {:>2} passes of {}x{} = {} samples ({} px), \
+             {:.2} ms total / {:.2} ms per pass, bins {}/256, EXACT={} worst-bin-delta={}",
+            stride * stride,
+            grid.0,
+            grid.1,
+            acc_total,
+            image_px,
+            elapsed,
+            elapsed / (stride * stride) as f32,
+            acc.bins[0].iter().filter(|&&n| n > 0).count(),
+            exact,
+            worst,
+        );
+    }
 }
 
 /// Debug-log a landed display histogram as a coarse 16-bucket digest (percent of

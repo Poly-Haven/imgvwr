@@ -44,6 +44,14 @@ const CLIP_MASK_UNIT: u32 = 13;
 /// fragment shader.
 pub const MAX_GUIDES: usize = 64;
 
+/// Offset, in source pixels, that puts a histogram sample on the centre of
+/// residue class `phase` — see the call site in `run_histogram`. `dim` is the
+/// source extent along that axis and `grid` the measurement grid's.
+fn phase_px(phase: i32, dim: i32, grid: i32) -> f32 {
+    let stride = dim.max(1) as f32 / grid.max(1) as f32;
+    (phase as f32 + 0.5) - stride * 0.5
+}
+
 /// What the display histogram measures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HistogramSource {
@@ -906,7 +914,7 @@ impl Renderer {
         source: HistogramSource,
         samples: u32,
     ) -> bool {
-        self.run_histogram(params, source, samples, true, None)
+        self.run_histogram(params, source, samples, true, None, (0, 0), false)
     }
 
     /// The offscreen grid a source is measured on. The sample budget applies to
@@ -936,6 +944,8 @@ impl Renderer {
         samples: u32,
         point_sample: bool,
         force_grid: Option<(i32, i32)>,
+        phase: (i32, i32),
+        accumulate: bool,
     ) -> bool {
         if self.image.is_none() || self.upload.is_some() {
             return false;
@@ -980,10 +990,24 @@ impl Renderer {
             // Fit the whole image flat: pan 0 and tan_half_fov 1 map the quad
             // exactly onto image uv 0..1 (the framing convention
             // `render_minimap` documents).
-            HistogramSource::WholeImage { .. } => RenderParams {
+            HistogramSource::WholeImage { width, height } => RenderParams {
                 projection_mode: 1,
-                yaw: 0.0,
-                pitch: 0.0,
+                // Phase offset for progressive refinement. The 2D branch reads
+                // `pan_u = yaw / 2π`, so this shifts every sample by a whole
+                // number of source pixels; with an integer stride S the S²
+                // phases visit each source pixel exactly once, and `wrap_2d`
+                // below makes the shift wrap rather than run off the edge.
+                //
+                // The grid lands at `S·i + S/2`, so reaching the *centre* of
+                // residue class k needs `(k + 0.5) − S/2`. That half pixel is
+                // load-bearing: at an even integer stride the unshifted position
+                // is an exact texel boundary, where GL_NEAREST's floor tips to
+                // either neighbour on the smallest float error — visiting some
+                // pixels twice and others never. At the default phase of 0 this
+                // just selects residue 0 rather than residue S/2, which is the
+                // same sampling either way.
+                yaw: std::f32::consts::TAU * phase_px(phase.0, width, gw) / width.max(1) as f32,
+                pitch: -std::f32::consts::PI * phase_px(phase.1, height, gh) / height.max(1) as f32,
                 tan_half_fov: 1.0,
                 rotation: 0,
                 stretch: [1.0, 1.0],
@@ -1004,7 +1028,7 @@ impl Renderer {
         self.draw_quad(&hist_params, 0, 0, gw, gh);
         match &mut self.histogram {
             Some(pass) => {
-                unsafe { pass.dispatch(&gl) };
+                unsafe { pass.dispatch(&gl, accumulate) };
                 pass.is_pending()
             }
             None => false,
@@ -1051,10 +1075,43 @@ impl Renderer {
         point_sample: bool,
         force_grid: Option<(i32, i32)>,
     ) -> Option<((i32, i32), f32, f32, Histogram)> {
+        self.benchmark_histogram_phase(
+            params,
+            source,
+            samples,
+            point_sample,
+            force_grid,
+            (0, 0),
+            false,
+        )
+    }
+
+    /// [`benchmark_histogram`](Self::benchmark_histogram) with an explicit phase
+    /// offset and accumulation, for measuring progressive refinement.
+    #[cfg(debug_assertions)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn benchmark_histogram_phase(
+        &mut self,
+        params: &RenderParams,
+        source: HistogramSource,
+        samples: u32,
+        point_sample: bool,
+        force_grid: Option<(i32, i32)>,
+        phase: (i32, i32),
+        accumulate: bool,
+    ) -> Option<((i32, i32), f32, f32, Histogram)> {
         let grid = force_grid.unwrap_or_else(|| self.histogram_grid(source, samples));
         let gl = self.gl.clone();
         let start = std::time::Instant::now();
-        if !self.run_histogram(params, source, samples, point_sample, force_grid) {
+        if !self.run_histogram(
+            params,
+            source,
+            samples,
+            point_sample,
+            force_grid,
+            phase,
+            accumulate,
+        ) {
             return None;
         }
         unsafe { gl.finish() };

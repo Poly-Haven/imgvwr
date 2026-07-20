@@ -270,7 +270,11 @@ impl HistogramPass {
     /// result. Restores the default framebuffer and the scene's blend state.
     ///
     /// # Safety: the GL context must be current, and `begin` must have succeeded.
-    pub unsafe fn dispatch(&mut self, gl: &glow::Context) {
+    /// With `accumulate`, the counters are left alone so this pass adds to the
+    /// previous one — the shader only ever `atomicAdd`s, so summing several
+    /// offset passes is free. That is the whole mechanism behind progressive
+    /// refinement: same cost per frame, more of the image measured each time.
+    pub unsafe fn dispatch(&mut self, gl: &glow::Context, accumulate: bool) {
         let Some(target) = &self.target else {
             return;
         };
@@ -279,12 +283,14 @@ impl HistogramPass {
         gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, Some(self.ssbo));
         // Zero the counters: the shader only ever adds. Safe to write directly
         // because a dispatch is never started while another is in flight.
-        self.scratch.fill(0);
-        gl.buffer_sub_data_u8_slice(
-            glow::SHADER_STORAGE_BUFFER,
-            0,
-            bytemuck::cast_slice(&self.scratch),
-        );
+        if !accumulate {
+            self.scratch.fill(0);
+            gl.buffer_sub_data_u8_slice(
+                glow::SHADER_STORAGE_BUFFER,
+                0,
+                bytemuck::cast_slice(&self.scratch),
+            );
+        }
         gl.bind_buffer_base(glow::SHADER_STORAGE_BUFFER, 0, Some(self.ssbo));
 
         gl.use_program(Some(self.program));

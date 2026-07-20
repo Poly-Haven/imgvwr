@@ -1685,7 +1685,7 @@ fn guide_readout(g: [f32; 2], image_size: (u32, u32), pano: bool) -> String {
     let (axis, dim) = if g[1] >= 0.5 { ("H", ih) } else { ("V", iw) };
     let px = (g[0] * dim as f32).round() as i64;
     if pano {
-        format!("{axis} {px}px  {:.1}°", guide_degrees(g))
+        format!("{axis} {px}px  {:.2}°", guide_degrees(g))
     } else {
         format!("{axis} {px}px")
     }
@@ -1755,14 +1755,15 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
     const SWATCH_H: f32 = 16.0;
     const PAD: f32 = 8.0;
     const ROW_GAP: f32 = 3.0;
-    const FONT_SIZE: f32 = 13.0;
-    let font = egui::FontId::proportional(FONT_SIZE);
+    // Monospace (so the digit columns line up) at 80% of the guide tooltip's size.
+    const FONT_SIZE: f32 = 13.0 * 0.8;
+    let font = egui::FontId::monospace(FONT_SIZE);
     let value_color = egui::Color32::WHITE;
     let label_color = egui::Color32::from_gray(150);
 
     let coord_line = match cp.degrees {
         Some((lon, lat)) => format!(
-            "X {}px {lon:.1}°   Y {}px {lat:.1}°",
+            "X {}px {lon:.2}°   Y {}px {lat:.2}°",
             cp.x, cp.y
         ),
         None => format!("X {}px   Y {}px", cp.x, cp.y),

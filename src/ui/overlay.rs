@@ -1678,8 +1678,16 @@ fn metadata_hud(
                 ..Default::default()
             };
             frame.show(ui, |ui| {
-                let grid = egui::Grid::new("imgvwr_metadata_grid")
+                // Fixed content width, so the box no longer grows and shrinks
+                // with whatever the current file's metadata happens to say — and
+                // so the histogram's one-point-per-bin geometry always fits.
+                ui.set_width(HIST_ROW_W);
+                egui::Grid::new("imgvwr_metadata_grid")
                     .num_columns(2)
+                    // Pin the key column, so the value column's width — and so
+                    // where the text wraps — doesn't shift as metadata changes.
+                    .min_col_width(88.0)
+                    .max_col_width(HIST_ROW_W - 100.0)
                     .spacing([12.0, 2.0])
                     .show(ui, |ui| {
                         for (key, value) in &inputs.metadata {
@@ -1689,11 +1697,15 @@ fn metadata_hud(
                                 )
                                 .selectable(true),
                             );
+                            // Wrapped, not truncated: the box is a fixed width
+                            // now, and a long filename is exactly the value you'd
+                            // want to read in full (and to be able to select).
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(value).color(egui::Color32::WHITE),
                                 )
-                                .selectable(true),
+                                .selectable(true)
+                                .wrap(),
                             );
                             ui.end_row();
                         }
@@ -1793,7 +1805,7 @@ fn metadata_hud(
                 // Full width under the grid rather than inside it — a grid cell
                 // would pin the graph to the narrow value column.
                 if inputs.has_image {
-                    histogram_plot(ui, inputs, state, actions, grid.response.rect.width());
+                    histogram_plot(ui, inputs, state, actions);
                 }
             });
         });
@@ -2048,10 +2060,14 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
 
 /// Height of the histogram plot area, in points.
 const HIST_H: f32 = 68.0;
-/// Minimum plot width. The graph normally stretches to the metadata grid's own
-/// width so it lines up with the rows above it; this floor keeps it readable
-/// when the grid happens to be narrow (a file with very few metadata rows).
-const HIST_MIN_W: f32 = 208.0;
+/// Width of the plot area: exactly one point per bin, so a bin is one column and
+/// no resampling happens between the data and the picture. 256 is not arbitrary —
+/// it's 8-bit display quantisation, one bin per output code, so there is nothing
+/// finer to resolve and an 8-bit image maps to it exactly.
+const HIST_PLOT_W: f32 = crate::renderer::HISTOGRAM_BINS as f32;
+/// The plot's allocation: the plot itself, a 1pt inset each side, and the 1pt
+/// over-range spike with its separating gap.
+const HIST_ROW_W: f32 = HIST_PLOT_W + 4.0;
 /// Coverage each channel's filled area contributes. The three are composited
 /// *additively* — see [`hist_band_color`] — so red over green reads yellow and
 /// all three read white, and the sum saturates rather than wrapping.
@@ -2104,17 +2120,14 @@ fn histogram_plot(
     inputs: &UiInputs,
     state: &mut UiState,
     actions: &mut Vec<UiAction>,
-    width: f32,
 ) {
-    let plot_w = width.max(HIST_MIN_W);
-
     // Header: label on the left, the three scale selectors against the right
     // edge of the plot. Laid out right-to-left inside a rect of exactly the
     // plot's width — NOT by padding out `available_width`, which inside an
     // auto-sizing Area is however wide the box already is and so feeds straight
     // back into the box's width, ballooning it a little further every frame.
     ui.allocate_ui_with_layout(
-        egui::vec2(plot_w, 16.0),
+        egui::vec2(HIST_ROW_W, 16.0),
         egui::Layout::right_to_left(egui::Align::Center),
         |ui| {
             // Right-to-left, so the first item added is the rightmost: the eye
@@ -2143,7 +2156,7 @@ fn histogram_plot(
         },
     );
 
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(plot_w, HIST_H), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(HIST_ROW_W, HIST_H), egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, egui::CornerRadius::same(3), hist_plate());
 

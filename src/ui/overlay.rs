@@ -2115,15 +2115,19 @@ fn histogram_plot(
     // samples the screen can only show as full white. Dropping exposure pulls
     // them back into range and the spike shrinks away.
     let bins = crate::renderer::HISTOGRAM_BINS;
-    let greyscale = inputs.channel_count <= 2;
-    let palette: [egui::Color32; 3] = if greyscale {
+    // With a channel isolated, the pass measures that channel alone as the shader
+    // displays it — greyscale, alpha included — so it plots as a single white
+    // area. An L / LA image is the same story in neutral grey, matching how
+    // `channel_boxes` labels it. Both leave all three measured channels
+    // identical, so only the first is drawn; plotting all three would just stack
+    // the same curve on itself.
+    let single = inputs.channel_count <= 2;
+    let palette: [egui::Color32; 3] = if single {
         [egui::Color32::from_gray(190); 3]
     } else {
         [CHANNEL_R, CHANNEL_G, CHANNEL_B]
     };
-    // A greyscale image has three identical channels; drawing all of them would
-    // triple the coverage, so measure and draw only one.
-    let active = if greyscale { 1 } else { 3 };
+    let active = if single { 1 } else { 3 };
 
     // Reserve the rightmost pixel for the spike so it can never be mistaken for
     // the top bin, and inset by a hairline so the fills don't touch the plate's
@@ -2437,10 +2441,18 @@ fn channel_box(
     actions: &mut Vec<UiAction>,
 ) {
     let active = inputs.isolate_channel == Some(idx);
+    // While one channel is isolated the others fade right back, so the active one
+    // reads at a glance rather than only by its outline.
+    let muted = inputs.isolate_channel.is_some() && !active;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
     let painter = ui.painter();
     let radius = egui::CornerRadius::same(3);
-    painter.rect_filled(rect, radius, color);
+    let fill = if muted {
+        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 51)
+    } else {
+        color
+    };
+    painter.rect_filled(rect, radius, fill);
     if active {
         painter.rect_stroke(
             rect,
@@ -2454,7 +2466,13 @@ fn channel_box(
         egui::Align2::CENTER_CENTER,
         label,
         egui::FontId::proportional(11.0),
-        egui::Color32::from_gray(20),
+        // Dark-on-colour reads well on a full swatch, but vanishes on a 20% one
+        // over the dark panel — the muted label goes light instead.
+        if muted {
+            egui::Color32::from_gray(150)
+        } else {
+            egui::Color32::from_gray(20)
+        },
     );
     let resp = clickable(resp).on_hover_text(format!("Isolate {label} channel"));
     if resp.clicked() {

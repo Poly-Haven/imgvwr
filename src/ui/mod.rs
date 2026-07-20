@@ -122,6 +122,23 @@ pub struct UiInputs {
     /// Bottom-right navigation minimap (border + current-view box). `None` when
     /// hidden; the thumbnail itself is drawn by the GL renderer, not egui.
     pub minimap: Option<MinimapInfo>,
+    /// Right-drag colour-pick tooltip data, one frame behind the cursor. `None`
+    /// when not colour-picking or the cursor is off the image.
+    pub color_pick: Option<ColorPickInfo>,
+}
+
+/// Live pixel-inspection readout for the right-drag colour-pick tooltip:
+/// displayed pixel coords, panorama degrees, the raw ("Linear") value straight
+/// from the decoded image, and the on-screen ("Display") value after the full
+/// exposure / OCIO / gamma / clarity pipeline.
+#[derive(Clone, Copy)]
+pub struct ColorPickInfo {
+    pub x: i64,
+    pub y: i64,
+    /// `(longitude, latitude)` degrees — panorama mode only.
+    pub degrees: Option<(f32, f32)>,
+    pub linear: [f32; 3],
+    pub display: [f32; 3],
 }
 
 /// The bottom-right minimap overlay: where to draw the border and the

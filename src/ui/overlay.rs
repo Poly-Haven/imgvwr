@@ -72,6 +72,12 @@ pub fn build_overlays(
     // mouse-button routing vs panning and works in both 2D and panorama.)
     guide_tooltip(ctx, inputs, state);
 
+    // Right-drag colour-pick tooltip. Drawn after everything else that could
+    // auto-reveal (those are already suppressed by `App` while colour-picking,
+    // but ordering it last keeps it on top of anything that was already up when
+    // the drag started).
+    color_pick_tooltip(ctx, inputs);
+
     // Auto-hiding bottom panel (tone sliders + the merged bottom ruler).
     bottom_panel(ctx, inputs, state, actions);
 
@@ -1731,6 +1737,141 @@ fn guide_tooltip(ctx: &egui::Context, inputs: &UiInputs, state: &UiState) {
         });
 }
 
+/// The right-drag colour-pick tooltip: a header bar filled with the inspected
+/// pixel's colour, its coordinates (plus degrees in panorama), and its Linear /
+/// Display RGB values. Positioned to the right of the cursor, flipped to the left
+/// near the right edge and clamped fully on-screen near the top/bottom — but
+/// always with a horizontal gap from the cursor, so it can never cover the pixel
+/// being inspected regardless of how it's clamped vertically.
+fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
+    let Some(cp) = inputs.color_pick else {
+        return;
+    };
+    let Some(pos) = ctx.pointer_hover_pos() else {
+        return;
+    };
+
+    const MARGIN: f32 = 16.0;
+    const SWATCH_H: f32 = 16.0;
+    const PAD: f32 = 8.0;
+    const ROW_GAP: f32 = 3.0;
+    const FONT_SIZE: f32 = 13.0;
+    let font = egui::FontId::proportional(FONT_SIZE);
+    let value_color = egui::Color32::WHITE;
+    let label_color = egui::Color32::from_gray(150);
+
+    let coord_line = match cp.degrees {
+        Some((lon, lat)) => format!(
+            "X {}px {lon:.1}°   Y {}px {lat:.1}°",
+            cp.x, cp.y
+        ),
+        None => format!("X {}px   Y {}px", cp.x, cp.y),
+    };
+    let rgb_line =
+        |c: [f32; 3]| format!("R:{:.3} G:{:.3} B:{:.3}", c[0], c[1], c[2]);
+    let linear_line = rgb_line(cp.linear);
+    let display_line = rgb_line(cp.display);
+    let rows = [
+        coord_line.as_str(),
+        "Linear:",
+        linear_line.as_str(),
+        "Display:",
+        display_line.as_str(),
+    ];
+
+    // Measure before laying out: the box has to be positioned (and possibly
+    // flipped/clamped) before `Area::show` allocates its actual content.
+    let widest = rows
+        .iter()
+        .map(|t| {
+            ctx.fonts(|f| f.layout_no_wrap((*t).to_owned(), font.clone(), value_color))
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    let box_w = widest + PAD * 2.0;
+    let row_h = ctx.fonts(|f| f.row_height(&font));
+    let box_h = SWATCH_H + PAD * 2.0 + row_h * rows.len() as f32 + ROW_GAP * (rows.len() - 1) as f32;
+
+    let screen = ctx.screen_rect();
+    let left = if pos.x + MARGIN + box_w <= screen.right() {
+        pos.x + MARGIN
+    } else {
+        pos.x - MARGIN - box_w
+    };
+    let top = (pos.y - box_h / 2.0).clamp(screen.top(), (screen.bottom() - box_h).max(screen.top()));
+    let tip_pos = egui::pos2(
+        left.clamp(screen.left(), (screen.right() - box_w).max(screen.left())),
+        top,
+    );
+
+    egui::Area::new(egui::Id::new("imgvwr_color_pick_tooltip"))
+        .fixed_pos(tip_pos)
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .show(ctx, |ui| {
+            let outer = egui::Frame {
+                fill: panel_bg(),
+                inner_margin: egui::Margin::ZERO,
+                corner_radius: egui::CornerRadius::same(4),
+                ..Default::default()
+            };
+            outer.show(ui, |ui| {
+                ui.set_width(box_w);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let swatch = egui::Color32::from_rgb(
+                    (cp.display[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (cp.display[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (cp.display[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                );
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(box_w, SWATCH_H), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    rect,
+                    egui::CornerRadius {
+                        nw: 4,
+                        ne: 4,
+                        sw: 0,
+                        se: 0,
+                    },
+                    swatch,
+                );
+                let text_frame = egui::Frame {
+                    inner_margin: egui::Margin::symmetric(PAD as i8, PAD as i8),
+                    ..Default::default()
+                };
+                text_frame.show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = ROW_GAP;
+                    ui.label(
+                        egui::RichText::new(coord_line)
+                            .color(value_color)
+                            .size(FONT_SIZE),
+                    );
+                    ui.label(
+                        egui::RichText::new("Linear:")
+                            .color(label_color)
+                            .size(FONT_SIZE),
+                    );
+                    ui.label(
+                        egui::RichText::new(linear_line)
+                            .color(value_color)
+                            .size(FONT_SIZE),
+                    );
+                    ui.label(
+                        egui::RichText::new("Display:")
+                            .color(label_color)
+                            .size(FONT_SIZE),
+                    );
+                    ui.label(
+                        egui::RichText::new(display_line)
+                            .color(value_color)
+                            .size(FONT_SIZE),
+                    );
+                });
+            });
+        });
+}
+
 /// The `(label, colour, channel-index)` boxes to show for a channel count.
 fn channel_boxes(count: u8) -> Vec<(&'static str, egui::Color32, u8)> {
     let r = egui::Color32::from_rgb(220, 80, 80);
@@ -1983,6 +2124,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("G", "Add guide level (½, ¼ … 1/32)"),
                 ("Pull from a ruler", "Drag out a guide"),
                 ("Drag / right-click guide", "Move / delete it"),
+                ("Right-click + hold-drag", "Pick pixel colour values"),
                 ("Channel boxes (F2)", "Isolate R/G/B/A"),
             ],
         ),

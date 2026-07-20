@@ -22,6 +22,9 @@
 //!   * `IMGVWR_DEBUG_PROJECTION` = `pano` | `flat`
 //!   * `IMGVWR_DEBUG_WRAP` = `1`
 //!   * `IMGVWR_DEBUG_SLOT` = `1` (pin the loaded image into comparator slot 1)
+//!   * `IMGVWR_DEBUG_CURSOR` = `x,y` (physical px; also needed by `_COLOR_PICK`)
+//!   * `IMGVWR_DEBUG_COLOR_PICK` = `1` (force the colour-pick tooltip on, as if
+//!     right-drag-held at `_CURSOR`)
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -225,6 +228,16 @@ struct PendingAdopt {
     for_compare: bool,
     /// Pre-swap 2D `(zoom, height)` for native-scale matching on a slot recall.
     old_scale: Option<(f32, f32)>,
+}
+
+/// Colour-pick data computable without a GPU readback (see
+/// `App::color_pick_partial`); combined with the readback's "Display" value in
+/// `App::render` to build a frame's [`crate::ui::ColorPickInfo`].
+struct ColorPickPartial {
+    x: i64,
+    y: i64,
+    degrees: Option<(f32, f32)>,
+    linear: [f32; 3],
 }
 
 /// Playback state for an animated GIF. The frames themselves live in the
@@ -473,6 +486,24 @@ pub struct App {
     /// the cursor moved more than `DBLCLICK_DRAG_TOL` (i.e. it was a drag).
     pending_dblclick: bool,
     dblclick_motion: f32,
+    /// Guide captured at a right-press (if the cursor was over one), deleted on
+    /// release only if the press stayed under `DBLCLICK_DRAG_TOL` — past that it
+    /// becomes a colour-pick drag instead (see `color_picking`) and the guide
+    /// survives.
+    right_press_guide: Option<usize>,
+    /// Screen position (physical px) at a right-press; `None` when the right
+    /// button isn't held. Compared against the current cursor each move to detect
+    /// the colour-pick drag threshold.
+    right_press_pos: Option<PhysicalPosition<f64>>,
+    /// True once a right-press has dragged past the threshold: the colour-pick
+    /// tooltip is showing and the auto-hiding toolbars are suppressed so they
+    /// can't cover the pixel under inspection.
+    color_picking: bool,
+    /// The colour-pick tooltip's data, one frame behind the cursor — the display
+    /// value needs a GPU readback of the previous frame's finished scene (see
+    /// `render`). `None` whenever `color_picking` is false or the cursor is off
+    /// the image.
+    color_pick_last: Option<crate::ui::ColorPickInfo>,
 
     // Borderless window interaction.
     /// True while the cursor is inside the window, driving the titlebar reveal.
@@ -703,6 +734,10 @@ impl App {
             suppress_manual_until: None,
             pending_dblclick: false,
             dblclick_motion: 0.0,
+            right_press_guide: None,
+            right_press_pos: None,
+            color_picking: false,
+            color_pick_last: None,
             locked: false,
             nav_dir: 1,
             preload_armed: false,
@@ -3278,6 +3313,62 @@ impl App {
         best.map(|(i, _)| i)
     }
 
+    /// Everything the colour-pick tooltip needs that doesn't require a GPU
+    /// readback: displayed pixel coords, panorama degrees, and the raw ("Linear")
+    /// value straight from the decoded image at the cursor. Combined with a
+    /// readback of the just-rendered frame's "Display" value in `render` to build
+    /// the frame's `color_pick_last`. `None` when not colour-picking, there's no
+    /// image, or the cursor is off a non-wrapping 2D image.
+    fn color_pick_partial(&self) -> Option<ColorPickPartial> {
+        if !self.color_picking || !self.cursor_in_window {
+            return None;
+        }
+        let img = self.current_image.as_ref()?;
+        let (u, v) = self.viewport_uv(self.cursor_pos.x, self.cursor_pos.y)?;
+        let pano = self.camera.is_panorama();
+        let (u, v) = if pano {
+            (u, v)
+        } else if self.wrap_2d {
+            (u.rem_euclid(1.0), v.rem_euclid(1.0))
+        } else if (0.0..1.0).contains(&u) && (0.0..1.0).contains(&v) {
+            (u, v)
+        } else {
+            return None;
+        };
+        let (dw, dh) = self.display_dims();
+        let disp_x = ((u * dw as f32).floor() as i64).clamp(0, dw as i64 - 1);
+        let disp_y = ((v * dh as f32).floor() as i64).clamp(0, dh as i64 - 1);
+        // Longitude 0..360° left→right, latitude +90° top … -90° bottom (0° at the
+        // centre) — the same convention as the guide tooltip's `guide_degrees`.
+        let degrees = pano.then_some((u * 360.0, (0.5 - v) * 180.0));
+        // Displayed uv -> raw (un-rotated) buffer uv: identity in panorama
+        // (rotation is inert there), the shader's `rotate_uv` permutation in 2D.
+        let (ru, rv) = if pano {
+            (u, v)
+        } else {
+            rotate_uv(u, v, self.rotation)
+        };
+        let rx = ((ru * img.width as f32).floor() as i64).clamp(0, img.width as i64 - 1) as u32;
+        let ry = ((rv * img.height as f32).floor() as i64).clamp(0, img.height as i64 - 1) as u32;
+        let anim_frame = self.anim.as_ref().map(|a| a.frame);
+        let raw = img.raw_pixel_at(anim_frame, rx, ry)?;
+        let linear = if img.is_encoded_srgb {
+            [
+                srgb_to_linear_channel(raw[0]),
+                srgb_to_linear_channel(raw[1]),
+                srgb_to_linear_channel(raw[2]),
+            ]
+        } else {
+            [raw[0], raw[1], raw[2]]
+        };
+        Some(ColorPickPartial {
+            x: disp_x,
+            y: disp_y,
+            degrees,
+            linear,
+        })
+    }
+
     // ---- Navigation minimap ----------------------------------------------
 
     /// The minimap panel rectangle in physical pixels (top-left origin, matching
@@ -3643,6 +3734,11 @@ impl App {
         if cfg!(debug_assertions) && self.force_overlay.as_deref() == Some("titlebar") {
             return true;
         }
+        // While colour-picking, no auto-hiding chrome may reveal — it would cover
+        // the pixel the user is trying to inspect.
+        if self.color_picking {
+            return false;
+        }
         if !self.cursor_in_window {
             return false;
         }
@@ -3951,16 +4047,17 @@ impl App {
             }
             (ElementState::Pressed, MouseButton::Right) => {
                 // A right-press over the minimap is inert (the overlay captures the
-                // pointer); otherwise right-click on a guide deletes it (and
-                // nothing else; a plain right-drag never pans). Alt+right is the
-                // third-resize, handled earlier in the router, so it never reaches
-                // here.
+                // pointer). Otherwise: capture the guide under the cursor (if any)
+                // but don't delete it yet — a stationary click deletes it on
+                // release, while dragging past the threshold instead starts the
+                // colour-pick tooltip and the guide survives (see `CursorMoved`
+                // and the `Released` arm below). Alt+right is the third-resize,
+                // handled earlier in the router, so it never reaches here.
                 if self.minimap_hit() {
                     return;
                 }
-                if let Some(idx) = self.guide_at_cursor() {
-                    self.remove_guide(idx);
-                }
+                self.right_press_guide = self.guide_at_cursor();
+                self.right_press_pos = Some(self.cursor_pos);
             }
             (ElementState::Pressed, MouseButton::Middle) => {
                 // A middle-press over the minimap is inert (the overlay captures the
@@ -4028,6 +4125,19 @@ impl App {
                 } else {
                     self.end_drag();
                 }
+            }
+            (ElementState::Released, MouseButton::Right) => {
+                // Past the drag threshold this was a colour-pick, not a click: end
+                // it without touching the guide. Otherwise it's a plain click —
+                // delete the guide captured at press time, exactly as before.
+                if self.color_picking {
+                    self.color_picking = false;
+                } else if let Some(idx) = self.right_press_guide {
+                    self.remove_guide(idx);
+                }
+                self.right_press_guide = None;
+                self.right_press_pos = None;
+                self.request_redraw();
             }
             _ => {}
         }
@@ -4110,6 +4220,17 @@ impl App {
         }
         if std::env::var_os("IMGVWR_DEBUG_GUIDES").is_some() {
             self.guides = vec![[0.5, 1.0], [0.5, 0.0], [0.25, 0.0]];
+        }
+        if let Ok(spec) = std::env::var("IMGVWR_DEBUG_CURSOR") {
+            if let Some((x, y)) = spec.split_once(',') {
+                if let (Ok(x), Ok(y)) = (x.trim().parse::<f64>(), y.trim().parse::<f64>()) {
+                    self.cursor_pos = PhysicalPosition::new(x, y);
+                    self.cursor_in_window = true;
+                }
+            }
+        }
+        if std::env::var_os("IMGVWR_DEBUG_COLOR_PICK").is_some() {
+            self.color_picking = true;
         }
         if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
             self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
@@ -4305,6 +4426,7 @@ impl App {
                 None
             },
             minimap: self.minimap_info(),
+            color_pick: self.color_pick_last,
         }
     }
 
@@ -4408,6 +4530,13 @@ impl App {
             self.bottom_visible = true;
             return;
         }
+        // While colour-picking, no auto-hiding chrome may reveal — it would cover
+        // the pixel the user is trying to inspect.
+        if self.color_picking {
+            self.bottom_visible = false;
+            self.bottom_hide_deadline = None;
+            return;
+        }
         let (scale, vh) = self
             .gfx
             .as_ref()
@@ -4445,6 +4574,11 @@ impl App {
     /// is over it so a guide can be dragged off. 2D only. Deliberately NOT tied to
     /// the bottom panel: hovering the bottom edge shows only the bottom ruler.
     fn tick_left_ruler(&mut self) {
+        if self.color_picking {
+            self.left_ruler_visible = false;
+            self.left_ruler_hide_deadline = None;
+            return;
+        }
         let scale = self
             .gfx
             .as_ref()
@@ -4496,7 +4630,8 @@ impl App {
         let edge = (80.0 * scale) as f64;
         let near_corner = self.cursor_in_window
             && (vw as f64 - self.cursor_pos.x) + self.cursor_pos.y <= edge
-            && !self.window_is_small();
+            && !self.window_is_small()
+            && !self.color_picking;
         // The corner reveal only fires on a real mouse move (or to keep the box
         // up once shown); a window-follow resize sliding the top-right corner
         // under a stationary cursor must not pop it. Hovering the box / an open
@@ -4962,9 +5097,15 @@ impl App {
                 .flatten()
         };
         let capture_ready = self.capture_ready();
+        // Everything the colour-pick tooltip needs except the "Display" value,
+        // which requires a GPU readback of this frame's just-rendered scene
+        // (done inside the block below, once `gfx.renderer.render` has run).
+        let color_pick_partial = self.color_pick_partial();
+        let cursor_pos = self.cursor_pos;
 
         let mut actions: Vec<UiAction> = Vec::new();
         let mut grabbed: Option<(i32, i32, Vec<u8>)> = None;
+        let mut new_color_pick: Option<crate::ui::ColorPickInfo> = None;
         // egui "is dragging a widget" this frame — coalesces slider drags into one
         // undo entry (set inside the gfx borrow below; only read on the path that
         // sets it, hence the allow for the otherwise-overwritten initial value).
@@ -4987,6 +5128,40 @@ impl App {
                 ..base
             };
             gfx.renderer.render(&params);
+
+            // Colour-pick "Display" value: a 1×1 readback of the pixel under the
+            // cursor from the scene just rendered above — before the minimap /
+            // egui overlay draw on top of it, so it's the pure image colour. No
+            // CPU-side OCIO processor exists (the display transform is GPU-only),
+            // so a readback is the only way to get the exact on-screen value.
+            if let Some(partial) = &color_pick_partial {
+                let fx = (cursor_pos.x.round() as i32).clamp(0, w - 1);
+                let fy = (h - 1 - cursor_pos.y.round() as i32).clamp(0, h - 1);
+                let mut buf = [0u8; 4];
+                unsafe {
+                    gfx.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+                    gfx.gl.read_pixels(
+                        fx,
+                        fy,
+                        1,
+                        1,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelPackData::Slice(Some(&mut buf)),
+                    );
+                }
+                new_color_pick = Some(crate::ui::ColorPickInfo {
+                    x: partial.x,
+                    y: partial.y,
+                    degrees: partial.degrees,
+                    linear: partial.linear,
+                    display: [
+                        buf[0] as f32 / 255.0,
+                        buf[1] as f32 / 255.0,
+                        buf[2] as f32 / 255.0,
+                    ],
+                });
+            }
 
             // Minimap thumbnail: a fit-the-whole-image 2D view drawn into the
             // bottom-right corner (GL origin bottom-left), composited over the
@@ -5048,6 +5223,7 @@ impl App {
                 log::error!("swap_buffers failed: {e}");
             }
         }
+        self.color_pick_last = new_color_pick;
 
         for action in actions {
             self.handle_ui_action(action);
@@ -5227,6 +5403,17 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.alt_resize.is_some() {
                     self.update_alt_resize();
                 }
+                // A right-press past the drag threshold turns into a colour-pick
+                // (not a click) — cancel the pending guide-delete once it does.
+                if !self.color_picking {
+                    if let Some(press) = self.right_press_pos {
+                        let (dx, dy) = (position.x - press.x, position.y - press.y);
+                        if ((dx * dx + dy * dy).sqrt() as f32) >= DBLCLICK_DRAG_TOL {
+                            self.color_picking = true;
+                            self.right_press_guide = None;
+                        }
+                    }
+                }
                 // Move a grabbed guide to follow the cursor along its constant-uv
                 // axis (clamped on-image; the release decides keep vs discard).
                 if let Some(idx) = self.guide_drag {
@@ -5237,11 +5424,16 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 // Hover highlight: the dragged guide, else the one under the
-                // cursor — but not while panning/stretching/resizing (the cursor
-                // is grabbed and hidden then, so a stray highlight just flickers).
+                // cursor — but not while panning/stretching/resizing/colour-picking
+                // (the cursor is grabbed/busy then, so a stray highlight just
+                // flickers or fights the colour-pick tooltip).
                 self.ui_state.hovered_guide =
                     self.guide_drag.or(self.ui_state.guide_spawn).or_else(|| {
-                        if self.dragging || self.stretching || self.alt_resize.is_some() {
+                        if self.dragging
+                            || self.stretching
+                            || self.alt_resize.is_some()
+                            || self.color_picking
+                        {
                             None
                         } else {
                             self.guide_at_cursor()
@@ -5929,6 +6121,30 @@ fn srgb_u8_to_f32(c: [u8; 3]) -> [f32; 3] {
         c[1] as f32 / 255.0,
         c[2] as f32 / 255.0,
     ]
+}
+
+/// Permute a displayed image uv to the source-texture uv for a 90°-CW quarter-turn
+/// display rotation `rot` (0-3) — mirrors the fragment shader's `rotate_uv` exactly
+/// (2D only; rotation is inert in panorama, see `App::rotation`).
+fn rotate_uv(u: f32, v: f32, rot: u8) -> (f32, f32) {
+    match rot {
+        1 => (v, 1.0 - u),
+        2 => (1.0 - u, 1.0 - v),
+        3 => (1.0 - v, u),
+        _ => (u, v),
+    }
+}
+
+/// The sRGB electro-optical transfer function for one channel — mirrors the
+/// fragment shader's `srgb_to_linear`. Used to turn a colour-picked 8-bit source
+/// pixel into a true linear-light value for the tooltip's "Linear" row.
+fn srgb_to_linear_channel(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c < 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// Rotate a colour's hue by `deg` degrees while keeping its saturation and value.

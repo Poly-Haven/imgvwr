@@ -159,6 +159,42 @@ impl ImageData {
         let (r, g, b) = (sr / n as f64, sg / n as f64, sb / n as f64);
         Some((0.2126 * r + 0.7152 * g + 0.0722 * b) as f32)
     }
+
+    /// Raw RGBA at un-rotated buffer coordinates `(x, y)`, straight from the
+    /// decoded pixels — `U8` normalised to 0..1 (still sRGB-encoded if
+    /// [`Self::is_encoded_srgb`]), `F32` as-is (scene-linear, may exceed 1.0).
+    /// `frame` selects an animation frame (ignored for static images); `None` out
+    /// of bounds. Used by the colour-pick tooltip to read the "Linear" value.
+    pub fn raw_pixel_at(&self, frame: Option<usize>, x: u32, y: u32) -> Option<[f32; 4]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let idx = (y as usize * self.width as usize + x as usize) * 4;
+        if let (Some(anim), Some(f)) = (&self.animation, frame) {
+            let p = anim.frames.get(f)?.pixels.get(idx..idx + 4)?;
+            return Some([
+                p[0] as f32 / 255.0,
+                p[1] as f32 / 255.0,
+                p[2] as f32 / 255.0,
+                p[3] as f32 / 255.0,
+            ]);
+        }
+        match &self.pixels {
+            PixelBuffer::U8(v) => {
+                let p = v.get(idx..idx + 4)?;
+                Some([
+                    p[0] as f32 / 255.0,
+                    p[1] as f32 / 255.0,
+                    p[2] as f32 / 255.0,
+                    p[3] as f32 / 255.0,
+                ])
+            }
+            PixelBuffer::F32(v) => {
+                let p = v.get(idx..idx + 4)?;
+                Some([p[0], p[1], p[2], p[3]])
+            }
+        }
+    }
 }
 
 /// Interleaved HxWx4 RGBA pixel data, either 8-bit or 32-bit float.

@@ -34,12 +34,6 @@ const BIN_SRC: &str = include_str!("../../resources/shaders/histogram.glsl");
 /// output code — finer would only resolve the display's own rounding.
 pub const BINS: usize = 256;
 
-/// Samples taken across the whole image. A 256-bin histogram is statistically
-/// saturated long before a million samples; the real cost here is the atomics,
-/// so there is nothing to gain from going higher. Images at or below this many
-/// pixels are measured in full.
-const TARGET_SAMPLES: f64 = 1_000_000.0;
-
 /// `over[4]` in the shader — three channels plus one slot of padding.
 const OVER_SLOTS: usize = 4;
 const BUF_U32: usize = BINS * 3 + OVER_SLOTS;
@@ -203,18 +197,24 @@ impl HistogramPass {
     }
 
     /// The offscreen grid to render `image_w × image_h` into: the image's own
-    /// size, scaled down to about [`TARGET_SAMPLES`] pixels while preserving the
-    /// aspect ratio (never upscaled).
+    /// size, scaled down by one uniform factor until it fits `samples` pixels,
+    /// preserving the aspect ratio and never upscaling.
+    ///
+    /// Because the draw then reads exactly one source texel per target texel
+    /// (`point_sample`), that factor *is* the sampling stride — a 4096×2048
+    /// image at a 1M budget becomes a 1414×707 grid, every ~3rd pixel each way,
+    /// spread evenly over the whole image. Anything already at or under the
+    /// budget is measured in full.
     ///
     /// A total-pixel budget alone doesn't bound either side — a 1×200000 strip is
     /// well under the budget yet far past `GL_MAX_TEXTURE_SIZE`, and the
     /// allocation would simply fail. Each axis is clamped as well; the resulting
     /// aspect skew only re-weights which parts of such a pathological image get
     /// sampled, which beats having no histogram at all.
-    pub fn grid_size(image_w: i32, image_h: i32, max_texture: i32) -> (i32, i32) {
+    pub fn grid_size(image_w: i32, image_h: i32, samples: u32, max_texture: i32) -> (i32, i32) {
         let (w, h) = (image_w.max(1), image_h.max(1));
         let px = w as f64 * h as f64;
-        let scale = (TARGET_SAMPLES / px).sqrt().min(1.0);
+        let scale = (samples.max(1) as f64 / px).sqrt().min(1.0);
         let cap = max_texture.max(1);
         (
             ((w as f64 * scale).round() as i32).clamp(1, cap),

@@ -68,6 +68,8 @@ pub struct UiInputs {
     pub histogram: Option<std::sync::Arc<crate::renderer::Histogram>>,
     /// Vertical scale for that graph (the L / Sq / Log selector).
     pub histogram_scale: crate::prefs::HistogramScale,
+    /// How many pixels that graph samples (the Settings picker).
+    pub histogram_samples: u32,
     /// Display black/white points as `(black, white)` in the histogram's own
     /// 0..1 axis — the positions of the two handles under the graph.
     pub levels: (f32, f32),
@@ -428,6 +430,8 @@ pub enum UiAction {
     SetChannelIsolate(Option<u8>),
     /// Set the histogram's vertical scale (the L / Sq / Log selector).
     SetHistogramScale(crate::prefs::HistogramScale),
+    /// Set how many pixels the histogram samples.
+    SetHistogramSamples(u32),
     /// Set the display black/white points (dragged on the histogram's handles).
     SetLevels {
         black: f32,

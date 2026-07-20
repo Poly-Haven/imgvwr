@@ -969,6 +969,28 @@ fn settings_dialog(
                                     actions.push(UiAction::SetClipMargin(pct / 100.0));
                                 }
                                 ui.end_row();
+
+                                ui.label("Histogram samples");
+                                let cur = inputs.histogram_samples;
+                                egui::ComboBox::from_id_salt("set_hist_samples")
+                                    .selected_text(crate::prefs::histogram_samples_label(cur))
+                                    .width(200.0)
+                                    .show_ui(ui, |ui| {
+                                        for n in crate::prefs::HISTOGRAM_SAMPLE_STEPS {
+                                            let label = crate::prefs::histogram_samples_label(n);
+                                            if ui.selectable_label(n == cur, label).clicked() {
+                                                actions.push(UiAction::SetHistogramSamples(n));
+                                            }
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "Pixels the F2 histogram looks at, spread evenly over the \
+                                         image. A million is already plenty for the overall shape; \
+                                         raising it catches small populations — a few blown \
+                                         highlights — that can otherwise fall between samples.",
+                                    );
+                                ui.end_row();
                             });
 
                         // ── Performance ─────────────────────────────────────

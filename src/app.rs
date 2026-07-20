@@ -356,6 +356,9 @@ struct HistogramKey {
     /// Isolating a channel puts that channel on screen as greyscale, and the
     /// graph follows it, so switching channels is a re-measure.
     isolate: Option<u8>,
+    /// The sample budget sizes the measurement grid, so changing it in Settings
+    /// re-measures rather than waiting for the next unrelated change.
+    samples: u32,
 }
 
 /// The navigation minimap panel rectangle in physical pixels (top-left origin),
@@ -4721,6 +4724,7 @@ impl App {
             // like the colour-pick readback.
             histogram: self.histogram.clone(),
             histogram_scale: self.prefs.histogram_scale,
+            histogram_samples: self.prefs.histogram_samples,
             levels: (self.levels_black, self.levels_white),
             show_help: self.ui_state.show_help || forced == Some("help"),
             toast: self.toast_render(),
@@ -5086,6 +5090,13 @@ impl App {
                 self.set_levels(black, white);
                 self.request_redraw();
             }
+            UiAction::SetHistogramSamples(n) => {
+                // In the key, so the graph re-measures at the new budget instead
+                // of waiting for the next unrelated change.
+                self.prefs.histogram_samples = n;
+                self.prefs.save();
+                self.request_redraw();
+            }
             UiAction::SetHistogramScale(scale) => {
                 // Purely how the same counts are drawn — no re-measurement.
                 self.prefs.histogram_scale = scale;
@@ -5413,11 +5424,13 @@ impl App {
         // the same laziness as the clip mask above. `wanted` carries the image's
         // raw (unrotated) dimensions, which is what sizes the sample grid; a
         // rotation permutes pixels but cannot change their values.
+        let histogram_samples = self.prefs.histogram_samples;
         let histogram_now = HistogramKey {
             epoch: self.histogram_epoch,
             exposure: self.exposure,
             gamma: self.gamma,
             isolate: self.isolate_channel,
+            samples: histogram_samples,
         };
         // The key a measurement is currently in flight for, kept so a result that
         // lands after the image changed can be recognised and thrown away.
@@ -5548,7 +5561,10 @@ impl App {
             // its own framebuffer and viewport; `render` re-binds both anyway.
             new_histogram = gfx.renderer.poll_histogram();
             if let Some((key, iw, ih)) = histogram_want {
-                if gfx.renderer.update_histogram(&base, iw, ih) {
+                if gfx
+                    .renderer
+                    .update_histogram(&base, iw, ih, histogram_samples)
+                {
                     histogram_measured = Some(key);
                 }
             }

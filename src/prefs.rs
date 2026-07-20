@@ -116,6 +116,9 @@ pub struct AppPreferences {
     /// Vertical scale of the F2 box's histogram (the L / Sq / Log selector).
     #[serde(default)]
     pub histogram_scale: HistogramScale,
+    /// How many pixels the histogram samples. See [`HISTOGRAM_SAMPLE_STEPS`].
+    #[serde(default = "default_histogram_samples")]
+    pub histogram_samples: u32,
     /// Internal (not user-facing): unix-seconds of the last successful update
     /// check, so the daily check throttles. `0` = never checked.
     #[serde(default)]
@@ -125,6 +128,28 @@ pub struct AppPreferences {
     /// the daily window without re-hitting the network. Empty = none/unknown.
     #[serde(default)]
     pub latest_known_version: String,
+}
+
+/// Selectable histogram sample budgets, doubling each step.
+///
+/// The measurement scales the image down by one uniform factor until it fits the
+/// budget, then reads exactly one source texel per target texel — so the budget
+/// is literally how many pixels get looked at, spread evenly over the image.
+/// A million is already far more than 256 bins need statistically; raising it
+/// buys the *tails*, where a few blown pixels can otherwise fall between
+/// samples. Cost is the atomic adds, which is why it's opt-in rather than
+/// simply always high.
+pub const HISTOGRAM_SAMPLE_STEPS: [u32; 7] = [
+    1_000_000, 2_000_000, 4_000_000, 8_000_000, 16_000_000, 32_000_000, 64_000_000,
+];
+
+fn default_histogram_samples() -> u32 {
+    HISTOGRAM_SAMPLE_STEPS[0]
+}
+
+/// Label a sample budget as e.g. "1M" / "16M".
+pub fn histogram_samples_label(n: u32) -> String {
+    format!("{}M", n / 1_000_000)
 }
 
 fn default_corner_radius() -> u32 {
@@ -169,6 +194,7 @@ impl Default for AppPreferences {
             half_float_textures: false,
             pin_titlebar: false,
             histogram_scale: HistogramScale::default(),
+            histogram_samples: default_histogram_samples(),
             last_update_check: 0,
             latest_known_version: String::new(),
         }

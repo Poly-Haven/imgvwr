@@ -2121,8 +2121,10 @@ fn histogram_plot(
     // `channel_boxes` labels it. Both leave all three measured channels
     // identical, so only the first is drawn; plotting all three would just stack
     // the same curve on itself.
-    let single = inputs.channel_count <= 2;
-    let palette: [egui::Color32; 3] = if single {
+    let single = inputs.isolate_channel.is_some() || inputs.channel_count <= 2;
+    let palette: [egui::Color32; 3] = if inputs.isolate_channel.is_some() {
+        [egui::Color32::WHITE; 3]
+    } else if single {
         [egui::Color32::from_gray(190); 3]
     } else {
         [CHANNEL_R, CHANNEL_G, CHANNEL_B]

@@ -353,6 +353,9 @@ struct HistogramKey {
     epoch: u64,
     exposure: f32,
     gamma: f32,
+    /// Isolating a channel puts that channel on screen as greyscale, and the
+    /// graph follows it, so switching channels is a re-measure.
+    isolate: Option<u8>,
 }
 
 /// The navigation minimap panel rectangle in physical pixels (top-left origin),
@@ -5416,6 +5419,7 @@ impl App {
             epoch: self.histogram_epoch,
             exposure: self.exposure,
             gamma: self.gamma,
+            isolate: self.isolate_channel,
         };
         // The key a measurement is currently in flight for, kept so a result that
         // lands after the image changed can be recognised and thrown away.

@@ -918,8 +918,13 @@ impl Renderer {
             // black pixels in bin 0.
             wrap_2d: true,
             point_sample: true,
-            // Every review overlay off: they would all bin themselves.
-            isolate_channel: -1,
+            // Channel isolation is deliberately *kept*: when a single channel is
+            // on screen as greyscale, that is what the graph should describe. The
+            // shader's isolation happens before the tone pipeline, so the result
+            // is measured exactly as displayed — and it costs nothing to support
+            // alpha, which has no colour channel of its own to bin.
+            //
+            // Every other review overlay is off; they would all bin themselves.
             sharpness: false,
             diff: false,
             clip_overlay: false,

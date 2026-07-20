@@ -119,7 +119,7 @@ This is the standard in VFX and digital content creation. Using the same system 
 | Channel boxes (`F2`) | Click to isolate R / G / B / A as greyscale |
 | Guides list (`F2`) | Shows each guide (`V 425px` / `H 312px`, plus degrees in panorama); × removes; `Ctrl+R` resets all |
 | Hover / drag a guide | Shows a colour-coded tooltip near the cursor with its coordinate — blue while hovering or grabbing, green while dragging a new one out of a ruler |
-| Right-click + hold-drag | Colour-pick tooltip: swatch, pixel (and panorama degree) coordinates, and Linear / Display RGB values under the cursor. Suppresses the other auto-hiding toolbars while active; a plain right-click still deletes a guide |
+| Right-click + hold-drag | Colour-pick tooltip: swatch, pixel (and panorama degree) coordinates, and Linear / Display values under the cursor — R/G/B(/A) or L(/A) depending on the image's channels, coloured like the F2 box's channel swatches. Suppresses the other auto-hiding toolbars while active; a plain right-click still deletes a guide |
 
 ### Window (borderless)
 

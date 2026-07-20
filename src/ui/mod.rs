@@ -139,8 +139,8 @@ pub struct ColorPickInfo {
     pub y: i64,
     /// `(longitude, latitude)` degrees — panorama mode only.
     pub degrees: Option<(f32, f32)>,
-    pub linear: [f32; 3],
-    pub display: [f32; 3],
+    pub linear: [f32; 4],
+    pub display: [f32; 4],
 }
 
 /// The bottom-right minimap overlay: where to draw the border and the

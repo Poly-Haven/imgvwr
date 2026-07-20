@@ -1873,10 +1873,17 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
         ),
         None => format!("X {}px   Y {}px", cp.x, cp.y),
     };
-    let rgb_line =
-        |c: [f32; 3]| format!("R:{:.3} G:{:.3} B:{:.3}", c[0], c[1], c[2]);
-    let linear_line = rgb_line(cp.linear);
-    let display_line = rgb_line(cp.display);
+    // Plain text for width measurement only — matches what `channel_row` (below)
+    // actually renders, one channel set per `inputs.channel_count` (1=L, 2=LA,
+    // 3=RGB, 4=RGBA), same grouping as the F2 box's `channel_boxes`.
+    let channel_line = |c: [f32; 4]| match inputs.channel_count {
+        1 => format!("L:{:.3}", c[0]),
+        2 => format!("L:{:.3} A:{:.3}", c[0], c[3]),
+        3 => format!("R:{:.3} G:{:.3} B:{:.3}", c[0], c[1], c[2]),
+        _ => format!("R:{:.3} G:{:.3} B:{:.3} A:{:.3}", c[0], c[1], c[2], c[3]),
+    };
+    let linear_line = channel_line(cp.linear);
+    let display_line = channel_line(cp.display);
     let rows = [
         coord_line.as_str(),
         "Linear:",
@@ -1946,29 +1953,36 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
                     inner_margin: egui::Margin::symmetric(PAD as i8, PAD as i8),
                     ..Default::default()
                 };
-                // Each RGB row as three colour-coded spans (R/G/B, matching the F2
-                // box's channel swatches) rather than one uniformly-coloured string.
-                // A trailing space baked into each span's text (instead of egui
-                // inter-widget spacing) keeps the monospace columns aligned exactly
-                // like a single string would.
-                let rgb_row = |ui: &mut egui::Ui, c: [f32; 3]| {
+                // Each row as colour-coded spans (matching the F2 box's channel
+                // swatches: R/G/B, plus L/A in a neutral grey) rather than one
+                // uniformly-coloured string. A trailing space baked into each span's
+                // text (instead of egui inter-widget spacing) keeps the monospace
+                // columns aligned exactly like a single string would.
+                let la_color = egui::Color32::from_gray(190);
+                let channel_row = |ui: &mut egui::Ui, c: [f32; 4]| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.label(
-                            egui::RichText::new(format!("R:{:.3} ", c[0]))
-                                .color(CHANNEL_R)
-                                .font(font.clone()),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("G:{:.3} ", c[1]))
-                                .color(CHANNEL_G)
-                                .font(font.clone()),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("B:{:.3}", c[2]))
-                                .color(CHANNEL_B)
-                                .font(font.clone()),
-                        );
+                        let span = |ui: &mut egui::Ui, text: String, color: egui::Color32| {
+                            ui.label(egui::RichText::new(text).color(color).font(font.clone()));
+                        };
+                        match inputs.channel_count {
+                            1 => span(ui, format!("L:{:.3}", c[0]), la_color),
+                            2 => {
+                                span(ui, format!("L:{:.3} ", c[0]), la_color);
+                                span(ui, format!("A:{:.3}", c[3]), la_color);
+                            }
+                            3 => {
+                                span(ui, format!("R:{:.3} ", c[0]), CHANNEL_R);
+                                span(ui, format!("G:{:.3} ", c[1]), CHANNEL_G);
+                                span(ui, format!("B:{:.3}", c[2]), CHANNEL_B);
+                            }
+                            _ => {
+                                span(ui, format!("R:{:.3} ", c[0]), CHANNEL_R);
+                                span(ui, format!("G:{:.3} ", c[1]), CHANNEL_G);
+                                span(ui, format!("B:{:.3} ", c[2]), CHANNEL_B);
+                                span(ui, format!("A:{:.3}", c[3]), la_color);
+                            }
+                        }
                     });
                 };
                 text_frame.show(ui, |ui| {
@@ -1987,13 +2001,13 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
                             .color(label_color)
                             .font(font.clone()),
                     );
-                    rgb_row(ui, cp.linear);
+                    channel_row(ui, cp.linear);
                     ui.label(
                         egui::RichText::new("Display:")
                             .color(label_color)
                             .font(font.clone()),
                     );
-                    rgb_row(ui, cp.display);
+                    channel_row(ui, cp.display);
                 });
             });
         });

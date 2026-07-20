@@ -243,7 +243,7 @@ struct ColorPickPartial {
     x: i64,
     y: i64,
     degrees: Option<(f32, f32)>,
-    linear: [f32; 3],
+    linear: [f32; 4],
 }
 
 /// Playback state for an animated GIF. The frames themselves live in the
@@ -3577,14 +3577,17 @@ impl App {
         let ry = ((rv * img.height as f32).floor() as i64).clamp(0, img.height as i64 - 1) as u32;
         let anim_frame = self.anim.as_ref().map(|a| a.frame);
         let raw = img.raw_pixel_at(anim_frame, rx, ry)?;
+        // Alpha is never sRGB-encoded (the shader passes `texel.a` straight
+        // through), so only the colour channels go through the EOTF.
         let linear = if img.is_encoded_srgb {
             [
                 srgb_to_linear_channel(raw[0]),
                 srgb_to_linear_channel(raw[1]),
                 srgb_to_linear_channel(raw[2]),
+                raw[3],
             ]
         } else {
-            [raw[0], raw[1], raw[2]]
+            raw
         };
         Some(ColorPickPartial {
             x: disp_x,
@@ -5424,10 +5427,17 @@ impl App {
                     y: partial.y,
                     degrees: partial.degrees,
                     linear: partial.linear,
+                    // Alpha isn't part of the RGB display transform (the shader
+                    // passes `texel.a` straight through) — the readback's own alpha
+                    // channel isn't a substitute for it, since compositing the scene
+                    // over the opaque background blends it into a physically
+                    // meaningless value (e.g. src_a=0.5 over an opaque bg reads back
+                    // ~0.75, not 0.5). Reuse the already-correct linear value.
                     display: [
                         buf[0] as f32 / 255.0,
                         buf[1] as f32 / 255.0,
                         buf[2] as f32 / 255.0,
+                        partial.linear[3],
                     ],
                 });
             }

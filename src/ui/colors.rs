@@ -21,9 +21,16 @@ pub fn panel_bg_alpha(alpha: u8) -> Color32 {
 /// Accent colour (active comparator slot flag, progress bar).
 pub const ACCENT: Color32 = Color32::from_rgb(190, 111, 255);
 
+/// R/G/B channel colours — the metadata box's channel-isolation swatches, and
+/// anywhere else a value wants to read as "this is the red/green/blue channel"
+/// (e.g. the colour-pick tooltip's Linear/Display rows).
+pub const CHANNEL_R: Color32 = Color32::from_rgb(220, 80, 80);
+pub const CHANNEL_G: Color32 = Color32::from_rgb(90, 195, 90);
+pub const CHANNEL_B: Color32 = Color32::from_rgb(95, 145, 240);
+
 /// Guide tooltip fill while hovering (or grab-dragging) an existing guide.
-/// Matches the metadata box's "B" channel swatch hue.
-pub const GUIDE_HOVER: Color32 = Color32::from_rgb(95, 145, 240);
-/// Guide tooltip fill while dragging a new guide out of a ruler. Matches the
-/// metadata box's "G" channel swatch hue.
-pub const GUIDE_ADD: Color32 = Color32::from_rgb(90, 195, 90);
+/// Matches [`CHANNEL_B`].
+pub const GUIDE_HOVER: Color32 = CHANNEL_B;
+/// Guide tooltip fill while dragging a new guide out of a ruler. Matches
+/// [`CHANNEL_G`].
+pub const GUIDE_ADD: Color32 = CHANNEL_G;

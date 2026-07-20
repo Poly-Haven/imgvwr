@@ -2,7 +2,10 @@
 //! "no image" hint, and the F2 metadata HUD (see plans/rewrite.md §12.3, §12.5,
 //! §12.6).
 
-use super::colors::{panel_bg, panel_bg_alpha, ACCENT, GUIDE_ADD, GUIDE_HOVER, PANEL_ALPHA};
+use super::colors::{
+    panel_bg, panel_bg_alpha, ACCENT, CHANNEL_B, CHANNEL_G, CHANNEL_R, GUIDE_ADD, GUIDE_HOVER,
+    PANEL_ALPHA,
+};
 use super::{clickable, PanoProj, RulerInfo, UiAction, UiInputs, UiState};
 
 /// Height of the borderless custom titlebar; the top strip is reserved for it so
@@ -1943,6 +1946,31 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
                     inner_margin: egui::Margin::symmetric(PAD as i8, PAD as i8),
                     ..Default::default()
                 };
+                // Each RGB row as three colour-coded spans (R/G/B, matching the F2
+                // box's channel swatches) rather than one uniformly-coloured string.
+                // A trailing space baked into each span's text (instead of egui
+                // inter-widget spacing) keeps the monospace columns aligned exactly
+                // like a single string would.
+                let rgb_row = |ui: &mut egui::Ui, c: [f32; 3]| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label(
+                            egui::RichText::new(format!("R:{:.3} ", c[0]))
+                                .color(CHANNEL_R)
+                                .font(font.clone()),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("G:{:.3} ", c[1]))
+                                .color(CHANNEL_G)
+                                .font(font.clone()),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("B:{:.3}", c[2]))
+                                .color(CHANNEL_B)
+                                .font(font.clone()),
+                        );
+                    });
+                };
                 text_frame.show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = ROW_GAP;
                     // `.font(font.clone())` (not `.size()`, which leaves the family at
@@ -1959,21 +1987,13 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
                             .color(label_color)
                             .font(font.clone()),
                     );
-                    ui.label(
-                        egui::RichText::new(linear_line)
-                            .color(value_color)
-                            .font(font.clone()),
-                    );
+                    rgb_row(ui, cp.linear);
                     ui.label(
                         egui::RichText::new("Display:")
                             .color(label_color)
                             .font(font.clone()),
                     );
-                    ui.label(
-                        egui::RichText::new(display_line)
-                            .color(value_color)
-                            .font(font.clone()),
-                    );
+                    rgb_row(ui, cp.display);
                 });
             });
         });
@@ -1981,15 +2001,17 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
 
 /// The `(label, colour, channel-index)` boxes to show for a channel count.
 fn channel_boxes(count: u8) -> Vec<(&'static str, egui::Color32, u8)> {
-    let r = egui::Color32::from_rgb(220, 80, 80);
-    let g = egui::Color32::from_rgb(90, 195, 90);
-    let b = egui::Color32::from_rgb(95, 145, 240);
     let a = egui::Color32::from_gray(190);
     match count {
         1 => vec![("L", a, 0)],
         2 => vec![("L", a, 0), ("A", a, 3)],
-        3 => vec![("R", r, 0), ("G", g, 1), ("B", b, 2)],
-        _ => vec![("R", r, 0), ("G", g, 1), ("B", b, 2), ("A", a, 3)],
+        3 => vec![("R", CHANNEL_R, 0), ("G", CHANNEL_G, 1), ("B", CHANNEL_B, 2)],
+        _ => vec![
+            ("R", CHANNEL_R, 0),
+            ("G", CHANNEL_G, 1),
+            ("B", CHANNEL_B, 2),
+            ("A", a, 3),
+        ],
     }
 }
 

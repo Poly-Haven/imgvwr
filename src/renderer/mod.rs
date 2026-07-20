@@ -908,13 +908,39 @@ impl Renderer {
     ///
     /// Returns whether a measurement is now in flight — so the caller only
     /// records the state it was measured from once the work really started.
+    /// `pass` is which phase-offset pass this is (0-based). Pass 0 clears the
+    /// counters; the rest accumulate onto it, so successive passes measure
+    /// disjoint sets of pixels and the total converges on having read the whole
+    /// image — see [`histogram_passes`](Self::histogram_passes).
     pub fn update_histogram(
         &mut self,
         params: &RenderParams,
         source: HistogramSource,
         samples: u32,
+        pass: u32,
     ) -> bool {
-        self.run_histogram(params, source, samples, true, None, (0, 0), false)
+        let stride = self.histogram_stride(source, samples);
+        let phase = (
+            (pass % stride.max(1) as u32) as i32,
+            (pass / stride.max(1) as u32) as i32,
+        );
+        self.run_histogram(params, source, samples, true, None, phase, pass > 0)
+    }
+
+    /// How many phase-offset passes it takes to measure every pixel of `source`
+    /// at this budget. 1 when the source already fits the budget.
+    pub fn histogram_passes(&self, source: HistogramSource, samples: u32) -> u32 {
+        HistogramPass::passes_for(self.histogram_stride(source, samples))
+    }
+
+    fn histogram_stride(&self, source: HistogramSource, samples: u32) -> i32 {
+        match source {
+            HistogramSource::WholeImage { width, height } => {
+                HistogramPass::stride(width, height, samples, self.max_texture_size)
+            }
+            // Already one sample per screen pixel; nothing left to refine.
+            HistogramSource::Viewport { .. } => 1,
+        }
     }
 
     /// The offscreen grid a source is measured on. The sample budget applies to

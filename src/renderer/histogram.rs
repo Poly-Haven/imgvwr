@@ -213,13 +213,37 @@ impl HistogramPass {
     /// sampled, which beats having no histogram at all.
     pub fn grid_size(image_w: i32, image_h: i32, samples: u32, max_texture: i32) -> (i32, i32) {
         let (w, h) = (image_w.max(1), image_h.max(1));
+        let s = Self::stride(w, h, samples, max_texture);
+        // Round *up*, so the grid covers the full extent even when the stride
+        // doesn't divide it. The overhang wraps (`wrap_2d`) onto columns already
+        // measured, which double-counts a sliver — far better than leaving an
+        // unmeasured strip down one edge.
+        // (`i32::div_ceil` is still unstable; both operands are positive here.)
+        ((w + s - 1) / s, (h + s - 1) / s)
+    }
+
+    /// Sampling stride: take every `stride`-th pixel on each axis.
+    ///
+    /// An integer stride is what makes progressive refinement exact — the
+    /// `stride²` phase offsets then partition the image into residue classes
+    /// that tile it perfectly, so each pass measures a disjoint set of pixels
+    /// and the accumulated result is identical to reading every pixel.
+    pub fn stride(image_w: i32, image_h: i32, samples: u32, max_texture: i32) -> i32 {
+        let (w, h) = (image_w.max(1), image_h.max(1));
         let px = w as f64 * h as f64;
-        let scale = (samples.max(1) as f64 / px).sqrt().min(1.0);
-        let cap = max_texture.max(1);
-        (
-            ((w as f64 * scale).round() as i32).clamp(1, cap),
-            ((h as f64 * scale).round() as i32).clamp(1, cap),
-        )
+        let ideal = (px / samples.max(1) as f64).sqrt().round() as i32;
+        // Also enough stride to keep the grid inside the driver's texture limit.
+        let by_limit = (w.max(h) as f64 / max_texture.max(1) as f64).ceil() as i32;
+        ideal.max(by_limit).max(1)
+    }
+
+    /// Phase-offset passes needed to visit every source pixel: `stride²`, capped
+    /// so a very small budget on a very large image can't schedule a refinement
+    /// that runs for many seconds. Past the cap the graph simply stops improving,
+    /// still having measured far more than a single pass.
+    pub fn passes_for(stride: i32) -> u32 {
+        const MAX_PASSES: u32 = 128; // ~2s at 60fps
+        ((stride as u32).saturating_mul(stride as u32)).min(MAX_PASSES)
     }
 
     /// The grid for measuring the viewport: one sample per screen pixel, no

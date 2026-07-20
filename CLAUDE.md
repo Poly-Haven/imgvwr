@@ -111,6 +111,16 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   bins each one resolves. On a 24k EXR (302 Mpx): cost is *flat* below ~8M (0.69 ms at 1M, 0.82 ms
   at 8M — the pass is overhead-bound down there), then 2.3 ms at 32M, 15.8 ms to read every pixel
   (plus 2.4 GB for the target). Hence the 8M default.
+- **The histogram refines progressively, and the half-pixel phase offset is load-bearing.** A big
+  image is measured a strided slice per frame; `dispatch(accumulate)` just skips zeroing the SSBO
+  (the shader only `atomicAdd`s), and the offset rides the existing 2D pan — `pan_u = yaw/2π`, so
+  `yaw = 2π·k/width` shifts every sample by *k* source pixels, wrapping via `wrap_2d`. With an
+  integer stride S the S² phases tile the image and the accumulation is *bit-identical* to reading
+  every pixel (verified: 36 × 4096×2048 = 301,989,888 samples, zero delta vs a full-res pass).
+  **But the grid lands at `S·i + S/2`, an exact texel boundary for even S**, where `GL_NEAREST`'s
+  floor tips either way on float error — visiting some pixels twice and others never. The offset is
+  `(k + 0.5) − S/2` (`phase_px`) to land on texel *centres*; without the half pixel, totals look
+  perfect while per-bin counts are off by ~0.16%.
 - **"Every texel of mip N" was measured against the grid and rejected — but for the right reason.**
   The bench compares them at *matched sample counts* (render at exactly `dims >> N` and the implicit
   LOD lands on mip N with no blend, so one output texel = one mip texel). Mip has 100% spatial

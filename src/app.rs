@@ -457,6 +457,13 @@ pub struct App {
     histogram: Option<Arc<crate::renderer::Histogram>>,
     /// The display state `histogram` describes, so a change can be spotted.
     histogram_key: Option<HistogramKey>,
+    /// Phase-offset passes dispatched for that key so far. A big image is
+    /// measured a strided slice at a time — each pass costs the same as the
+    /// whole measurement used to, and once every phase has run the accumulated
+    /// result is bit-identical to having read every pixel. Reset whenever the
+    /// key changes, so dragging exposure keeps the cheap live behaviour and the
+    /// refinement only runs once things settle.
+    histogram_pass: u32,
     /// Measure the histogram from the visible region rather than the whole
     /// image (the eye toggle in the F2 box) — zoom in for a focused reading.
     /// Session-only, like the other inspection toggles.
@@ -774,6 +781,7 @@ impl App {
             clip_mask_dirty: true,
             histogram: None,
             histogram_key: None,
+            histogram_pass: 0,
             histogram_viewport: false,
             #[cfg(debug_assertions)]
             bench_histogram_pending: std::env::var_os("IMGVWR_DEBUG_HIST_BENCH").is_some(),
@@ -5501,35 +5509,36 @@ impl App {
         // The key a measurement is currently in flight for, kept so a result that
         // lands after the image changed can be recognised and thrown away.
         let histogram_inflight = self.histogram_key;
-        let histogram_want =
-            if self.metadata_slide > 0.001 && self.histogram_key != Some(histogram_now) {
-                // Viewport mode measures whatever the window is currently showing;
-                // whole-image mode measures the raw (unrotated) pixel grid, since a
-                // rotation permutes pixels but cannot change their values.
-                match (
-                    self.histogram_viewport,
-                    viewport_px,
-                    self.current_image.as_ref(),
-                ) {
-                    (true, Some((w, h)), Some(_)) => Some((
-                        histogram_now,
-                        crate::renderer::HistogramSource::Viewport {
-                            width: w,
-                            height: h,
-                        },
-                    )),
-                    (false, _, Some(img)) => Some((
-                        histogram_now,
-                        crate::renderer::HistogramSource::WholeImage {
-                            width: img.width as i32,
-                            height: img.height as i32,
-                        },
-                    )),
-                    _ => None,
-                }
-            } else {
-                None
-            };
+        // A change restarts the accumulation from pass 0; otherwise keep adding
+        // phases until the whole image has been covered.
+        let histogram_stale = self.histogram_key != Some(histogram_now);
+        let histogram_pass = if histogram_stale {
+            0
+        } else {
+            self.histogram_pass
+        };
+        let histogram_want = if self.metadata_slide > 0.001 {
+            // Viewport mode measures whatever the window is currently showing;
+            // whole-image mode measures the raw (unrotated) pixel grid, since a
+            // rotation permutes pixels but cannot change their values.
+            match (
+                self.histogram_viewport,
+                viewport_px,
+                self.current_image.as_ref(),
+            ) {
+                (true, Some((w, h)), Some(_)) => Some(crate::renderer::HistogramSource::Viewport {
+                    width: w,
+                    height: h,
+                }),
+                (false, _, Some(img)) => Some(crate::renderer::HistogramSource::WholeImage {
+                    width: img.width as i32,
+                    height: img.height as i32,
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();
@@ -5623,7 +5632,7 @@ impl App {
         // the allow (same shape as `egui_busy` above).
         #[allow(unused_assignments)]
         let mut new_histogram: Option<crate::renderer::Histogram> = None;
-        let mut histogram_measured: Option<HistogramKey> = None;
+        let mut histogram_measured: Option<(HistogramKey, u32)> = None;
         #[allow(unused_assignments)]
         let mut histogram_pending = false;
         // egui "is dragging a widget" this frame — coalesces slider drags into one
@@ -5677,12 +5686,17 @@ impl App {
             // has gone stale. Done before the scene draw because the pass binds
             // its own framebuffer and viewport; `render` re-binds both anyway.
             new_histogram = gfx.renderer.poll_histogram();
-            if let Some((key, source)) = histogram_want {
-                if gfx
-                    .renderer
-                    .update_histogram(&base, source, histogram_samples)
+            if let Some(source) = histogram_want {
+                let passes = gfx.renderer.histogram_passes(source, histogram_samples);
+                if histogram_pass < passes
+                    && gfx.renderer.update_histogram(
+                        &base,
+                        source,
+                        histogram_samples,
+                        histogram_pass,
+                    )
                 {
-                    histogram_measured = Some(key);
+                    histogram_measured = Some((histogram_now, histogram_pass + 1));
                 }
             }
             histogram_pending = gfx.renderer.histogram_pending();
@@ -5831,8 +5845,9 @@ impl App {
                 histogram_landed = true;
             }
         }
-        if let Some(key) = histogram_measured {
+        if let Some((key, pass)) = histogram_measured {
             self.histogram_key = Some(key);
+            self.histogram_pass = pass;
         }
         // Two separate reasons to ask for another frame, and both are needed.
         //

@@ -3221,6 +3221,11 @@ impl App {
                     self.escape_or_exit(event_loop);
                 }
             }
+            // Enter confirms the delete dialog, same as clicking its Delete button.
+            (Key::Named(NamedKey::Enter), _) if self.ui_state.confirm_delete => {
+                self.ui_state.confirm_delete = false;
+                self.delete_current_file();
+            }
             _ => return,
         }
         self.request_redraw();

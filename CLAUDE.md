@@ -85,6 +85,13 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   1×1 `glReadPixels`, and why the F2 histogram renders the image flat into an offscreen target
   through the same fragment program and bins it with a GL 4.3 compute shader. Don't reach for a
   `cpu_processor` — there isn't one.
+- **Anything collected inside the gfx borrow is one frame late, and must request its own redraw.**
+  `ui_inputs()` snapshots App state *before* that borrow, so a value produced inside it (histogram
+  readback, colour-pick `glReadPixels`) can't reach the paint that just happened. The colour-pick
+  gets away with it because a drag emits continuous mouse events; the histogram doesn't — once the
+  tone ease settles, `about_to_wait` parks on `Wait` and the box would keep showing the previous
+  measurement until an unrelated event. **`IMGVWR_CAPTURE` cannot catch this class of bug**: capture
+  mode forces `ControlFlow::Poll` and a redraw every iteration, so the missing request is invisible.
 - **Bar charts narrower than a pixel drop bars.** The F2 histogram has 256 bins in ~205 points, so
   a per-bin quad is ~0.8px wide; `Shape::mesh` goes straight to the GPU with no anti-aliasing, and
   a quad containing no pixel *centre* rasterises to nothing. Contiguous columns still leave no

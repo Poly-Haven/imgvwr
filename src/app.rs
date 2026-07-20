@@ -5686,20 +5686,34 @@ impl App {
         // shown beside what's on screen now. Only the epoch is compared —
         // exposure and gamma ease continuously, and a single frame of lag there
         // is just the graph animating along with the image.
+        let mut histogram_landed = false;
         if let Some(h) = new_histogram {
             if histogram_inflight.is_some_and(|k| k.epoch == histogram_now.epoch) {
                 if log::log_enabled!(log::Level::Debug) {
                     log_histogram(&h);
                 }
                 self.histogram = Some(Arc::new(h));
+                histogram_landed = true;
             }
         }
         if let Some(key) = histogram_measured {
             self.histogram_key = Some(key);
         }
-        // `about_to_wait` would otherwise park on `Wait` and the finished
-        // measurement would sit in its buffer until the next unrelated event.
-        if histogram_pending {
+        // Two separate reasons to ask for another frame, and both are needed.
+        //
+        // `pending`: `about_to_wait` would otherwise park on `Wait` and the
+        // finished measurement would sit in its buffer until the next unrelated
+        // event.
+        //
+        // `landed`: the graph handed to egui was snapshotted by `ui_inputs()`
+        // *before* the gfx borrow, so a measurement collected inside that borrow
+        // is one frame too late for the paint that just happened. Once the tone
+        // ease settles nothing else schedules a frame, so without this the box
+        // keeps showing the previous measurement — or, right after navigating to
+        // a new image, an empty plate — until the user happens to move the mouse.
+        // Headless capture cannot expose this: it forces `Poll` and a redraw
+        // every iteration.
+        if histogram_pending || histogram_landed {
             self.request_redraw();
         }
 

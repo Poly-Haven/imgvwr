@@ -2029,13 +2029,13 @@ const HIST_H: f32 = 68.0;
 const HIST_MIN_W: f32 = 208.0;
 /// Coverage each channel's filled area contributes. The three are composited
 /// *additively* — see [`hist_band_color`] — so red over green reads yellow and
-/// all three read white, at 30% over the plate.
-const HIST_CHANNEL_ALPHA: f32 = 0.1;
+/// all three read white, and the sum saturates rather than wrapping.
+const HIST_CHANNEL_ALPHA: f32 = 0.9;
 
-/// The plot's own backing plate. Darker and more opaque than the surrounding
-/// box so the deliberately faint additive fills still read against it.
+/// The plot's own backing plate: black at 10%, just enough to seat the graph
+/// against the box without becoming a slab of black over the image.
 fn hist_plate() -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(8, 8, 8, 230)
+    egui::Color32::from_black_alpha(26)
 }
 
 /// The colour for a band covered by `channels`, as a *premultiplied* egui colour.

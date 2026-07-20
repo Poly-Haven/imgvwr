@@ -97,6 +97,7 @@ This is the standard in VFX and digital content creation. Using the same system 
 | `Ctrl + Z` / `Ctrl + Shift + Z` (or `Ctrl + Y`) | Undo / redo edits — guides, adjustments and toggle modes (not navigation); up to 256 steps, per image |
 | `T` | Toggle Standard ↔ the Default View Transform (set in Settings; defaults to Filmic) |
 | `O` | Open file… |
+| `Ctrl + C` | Copy the current window render to the clipboard — the displayed region at the current window size, adjustments and view transform baked in, guides/minimap/other UI included |
 | `←` / `→` | Previous / next image in the folder (alphabetical) |
 | `Space` | Pause / play an animation (GIF / animated WebP / APNG) |
 | `F2` | Toggle metadata overlay (also appears on top-right hover) |

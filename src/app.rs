@@ -27,6 +27,7 @@
 //!     right-drag-held at `_CURSOR`)
 //!   * `IMGVWR_DEBUG_GUIDE_CMD` = comma-separated `g`|`shift`|`ctrl` (replays a
 //!     sequence of G / Shift+G / Ctrl+G presses; applied after `_PROJECTION`)
+//!   * `IMGVWR_DEBUG_CLIPBOARD_COPY` = `1` (as if Ctrl+C were pressed)
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -345,6 +346,10 @@ pub struct App {
     initial_path: Option<PathBuf>,
     gfx: Option<Gfx>,
     capture: Option<Capture>,
+    /// Ctrl+C: copy the composited render to the clipboard on the next frame
+    /// (needs a GPU readback of the just-drawn scene, so it can't happen inline
+    /// in the key handler — see `render`).
+    clipboard_copy_pending: bool,
 
     // Background loading.
     load_tx: Sender<LoadResult>,
@@ -669,6 +674,7 @@ impl App {
             initial_path,
             gfx: None,
             capture,
+            clipboard_copy_pending: false,
             load_tx,
             load_rx,
             load_gen: 0,
@@ -3102,6 +3108,14 @@ impl App {
                 );
                 self.request_redraw();
             }
+            // Ctrl+C: copy the composited window render (adjustments, guides,
+            // minimap, everything currently on screen) to the clipboard.
+            (_, Some("c")) | (_, Some("C")) if ctrl => {
+                if self.current_image.is_some() {
+                    self.clipboard_copy_pending = true;
+                    self.request_redraw();
+                }
+            }
             (_, Some("c")) | (_, Some("C")) => {
                 self.clip_overlay = !self.clip_overlay;
                 self.show_toast(
@@ -4390,6 +4404,9 @@ impl App {
         if std::env::var_os("IMGVWR_DEBUG_COLOR_PICK").is_some() {
             self.color_picking = true;
         }
+        if std::env::var_os("IMGVWR_DEBUG_CLIPBOARD_COPY").is_some() {
+            self.clipboard_copy_pending = true;
+        }
         if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
             self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
         }
@@ -5276,6 +5293,7 @@ impl App {
                 .flatten()
         };
         let capture_ready = self.capture_ready();
+        let clipboard_copy_ready = self.clipboard_copy_pending;
         // Everything the colour-pick tooltip needs except the "Display" value,
         // which requires a GPU readback of this frame's just-rendered scene
         // (done inside the block below, once `gfx.renderer.render` has run).
@@ -5284,6 +5302,7 @@ impl App {
 
         let mut actions: Vec<UiAction> = Vec::new();
         let mut grabbed: Option<(i32, i32, Vec<u8>)> = None;
+        let mut clipboard_grab: Option<(i32, i32, Vec<u8>)> = None;
         let mut new_color_pick: Option<crate::ui::ColorPickInfo> = None;
         // egui "is dragging a widget" this frame — coalesces slider drags into one
         // undo entry (set inside the gfx borrow below; only read on the path that
@@ -5398,6 +5417,26 @@ impl App {
                 grabbed = Some((w, h, buf));
             }
 
+            // Ctrl+C: same idea as the debug capture above, but into the
+            // clipboard — the composited render (adjustments, guides, minimap,
+            // egui overlay), read back after `gfx.egui.paint` for the same reason.
+            if clipboard_copy_ready {
+                let mut buf = vec![0u8; (w * h * 4) as usize];
+                unsafe {
+                    gfx.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+                    gfx.gl.read_pixels(
+                        0,
+                        0,
+                        w,
+                        h,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelPackData::Slice(Some(&mut buf)),
+                    );
+                }
+                clipboard_grab = Some((w, h, buf));
+            }
+
             if let Err(e) = gfx.gl_surface.swap_buffers(&gfx.gl_context) {
                 log::error!("swap_buffers failed: {e}");
             }
@@ -5415,6 +5454,19 @@ impl App {
         // Record an undo entry if this frame's input changed the editing state
         // (after the UI actions and key handling above; coalesced during gestures).
         self.commit_undo_if_changed(egui_busy);
+
+        if let Some((w, h, buf)) = clipboard_grab {
+            self.clipboard_copy_pending = false;
+            self.show_toast(
+                match copy_rgba_to_clipboard(w as u32, h as u32, buf) {
+                    Ok(()) => "Copied to clipboard".to_string(),
+                    Err(e) => {
+                        log::error!("clipboard copy failed: {e}");
+                        "Clipboard copy failed".to_string()
+                    }
+                },
+            );
+        }
 
         if let Some((w, h, buf)) = grabbed {
             self.write_capture(w as u32, h as u32, buf);
@@ -5442,6 +5494,74 @@ impl App {
             None => log::error!("capture buffer size mismatch ({width}x{height})"),
         }
     }
+}
+
+/// Copy an RGBA framebuffer readback (GL row order: bottom row first) to the
+/// clipboard as a 32-bit `CF_DIB`. A DIB with a positive `biHeight` is bottom-up
+/// too, so — unlike `write_capture`'s PNG — the rows need no flip, just an
+/// RGBA → BGRA channel swizzle (CF_DIB has no real alpha channel).
+#[cfg(windows)]
+fn copy_rgba_to_clipboard(width: u32, height: u32, mut rgba: Vec<u8>) -> Result<(), String> {
+    use windows_sys::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFOHEADER};
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+    use windows_sys::Win32::System::Ole::CF_DIB;
+
+    for px in rgba.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+
+    let header = BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: width as i32,
+        biHeight: height as i32, // positive = bottom-up, matching the GL readback order
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        biSizeImage: 0,
+        biXPelsPerMeter: 0,
+        biYPelsPerMeter: 0,
+        biClrUsed: 0,
+        biClrImportant: 0,
+    };
+    let header_bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&raw const header) as *const u8,
+            std::mem::size_of::<BITMAPINFOHEADER>(),
+        )
+    };
+    let total = header_bytes.len() + rgba.len();
+
+    unsafe {
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, total);
+        if hmem.is_null() {
+            return Err("GlobalAlloc failed".to_string());
+        }
+        let ptr = GlobalLock(hmem) as *mut u8;
+        if ptr.is_null() {
+            return Err("GlobalLock failed".to_string());
+        }
+        std::ptr::copy_nonoverlapping(header_bytes.as_ptr(), ptr, header_bytes.len());
+        std::ptr::copy_nonoverlapping(rgba.as_ptr(), ptr.add(header_bytes.len()), rgba.len());
+        GlobalUnlock(hmem);
+
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            windows_sys::Win32::Foundation::GlobalFree(hmem);
+            return Err("OpenClipboard failed".to_string());
+        }
+        EmptyClipboard();
+        // On success the clipboard now owns `hmem` (must not free it ourselves);
+        // on failure it's still ours to free.
+        let ok = !SetClipboardData(CF_DIB as u32, hmem).is_null();
+        CloseClipboard();
+        if !ok {
+            windows_sys::Win32::Foundation::GlobalFree(hmem);
+            return Err("SetClipboardData failed".to_string());
+        }
+    }
+    Ok(())
 }
 
 impl ApplicationHandler<UserEvent> for App {

@@ -2127,6 +2127,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("Ctrl + Z / Y", "Undo / redo edits"),
                 ("T", "Standard / last view transform"),
                 ("O", "Open file…"),
+                ("Ctrl + C", "Copy the window to the clipboard"),
                 ("← / →", "Previous / next image"),
                 ("Space", "Pause / play animation (GIF/WebP/APNG)"),
                 ("F2", "Metadata overlay"),

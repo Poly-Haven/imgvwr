@@ -461,6 +461,10 @@ pub struct App {
     /// image (the eye toggle in the F2 box) — zoom in for a focused reading.
     /// Session-only, like the other inspection toggles.
     histogram_viewport: bool,
+    /// Dev-only: run the one-shot sample-budget sweep on the next frame that has
+    /// an image up (`IMGVWR_DEBUG_HIST_BENCH`).
+    #[cfg(debug_assertions)]
+    bench_histogram_pending: bool,
     /// Bumped by anything *other than* the eased tone values that changes the
     /// displayed pixels: a new image, a new animation frame, a different OCIO
     /// view. Cheaper than re-deriving all of that into [`HistogramKey`].
@@ -771,6 +775,8 @@ impl App {
             histogram: None,
             histogram_key: None,
             histogram_viewport: false,
+            #[cfg(debug_assertions)]
+            bench_histogram_pending: std::env::var_os("IMGVWR_DEBUG_HIST_BENCH").is_some(),
             histogram_epoch: 0,
             adjust_repeat_until: None,
             settings_was_open: false,
@@ -5478,6 +5484,20 @@ impl App {
                 }
             }),
         };
+        // Dev-only: fire the sample-budget sweep once, as soon as an image is up.
+        #[cfg(debug_assertions)]
+        let bench_histogram =
+            self.bench_histogram_pending && self.current_image.is_some() && self.pending.is_none();
+        #[cfg(debug_assertions)]
+        let bench_dims = self
+            .current_image
+            .as_ref()
+            .map(|i| (i.width as i32, i.height as i32));
+        #[cfg(debug_assertions)]
+        if bench_histogram {
+            self.bench_histogram_pending = false;
+        }
+
         // The key a measurement is currently in flight for, kept so a result that
         // lands after the image changed can be recognised and thrown away.
         let histogram_inflight = self.histogram_key;
@@ -5622,6 +5642,36 @@ impl App {
                 return RenderOutcome::Idle;
             }
             let (w, h) = (size.width as i32, size.height as i32);
+
+            // Dev-only: one-shot sample-budget sweep (IMGVWR_DEBUG_HIST_BENCH).
+            #[cfg(debug_assertions)]
+            if bench_histogram {
+                if let Some((iw, ih)) = bench_dims {
+                    run_histogram_bench(
+                        &mut gfx.renderer,
+                        &base,
+                        crate::renderer::HistogramSource::WholeImage {
+                            width: iw,
+                            height: ih,
+                        },
+                        iw as u64 * ih as u64,
+                    );
+                    // Synthetic viewport sizes: the real window is whatever it
+                    // is, but the question is what a 1080p/1440p/4K display
+                    // would cost, and the grid is all that changes.
+                    for (vw, vh) in [(w, h), (1920, 1080), (2560, 1440), (3840, 2160)] {
+                        run_histogram_bench(
+                            &mut gfx.renderer,
+                            &base,
+                            crate::renderer::HistogramSource::Viewport {
+                                width: vw,
+                                height: vh,
+                            },
+                            vw as u64 * vh as u64,
+                        );
+                    }
+                }
+            }
 
             // Land a finished measurement, then start the next one if the graph
             // has gone stale. Done before the scene draw because the pass binds
@@ -6698,6 +6748,70 @@ fn sibling_path(current: &Path, dir: i32) -> Option<PathBuf> {
     let n = files.len() as i32;
     let next = (idx as i32 + dir).rem_euclid(n) as usize;
     Some(files[next].clone())
+}
+
+/// Dev-only: sweep the histogram sample budget and both sampling strategies,
+/// reporting GPU cost and what each one actually resolves. Drives the choice of
+/// default budget; run with `IMGVWR_DEBUG_HIST_BENCH=1`.
+#[cfg(debug_assertions)]
+fn run_histogram_bench(
+    renderer: &mut crate::renderer::Renderer,
+    params: &crate::renderer::RenderParams,
+    source: crate::renderer::HistogramSource,
+    image_px: u64,
+) {
+    // Powers of two up to (and past) the full image, so the clamp shows up.
+    let mut budgets: Vec<u64> = (0..12).map(|i| 1_000_000u64 << i).collect();
+    budgets.push(image_px);
+    budgets.sort_unstable();
+    budgets.dedup();
+
+    log::info!(
+        "hist-bench: source {:?}, image {} Mpx",
+        source,
+        image_px / 1_000_000
+    );
+    log::info!("hist-bench: mode  budget    grid          samples     gpu_ms  read_ms  nonzero_bins  over  peak");
+    for point in [true, false] {
+        let mode = if point { "point" } else { "mip  " };
+        for &b in &budgets {
+            let b32 = b.min(u32::MAX as u64) as u32;
+            // One warm-up (shader/target allocation shouldn't land in the timing),
+            // then the best of three — the minimum is the least contaminated by
+            // whatever else the desktop compositor was doing.
+            let _ = renderer.benchmark_histogram(params, source, b32, point);
+            let mut best: Option<((i32, i32), f32, f32, crate::renderer::Histogram)> = None;
+            for _ in 0..3 {
+                let Some(r) = renderer.benchmark_histogram(params, source, b32, point) else {
+                    continue;
+                };
+                if best.as_ref().is_none_or(|p| r.1 < p.1) {
+                    best = Some(r);
+                }
+            }
+            let Some((grid, gpu_ms, read_ms, hist)) = best else {
+                log::info!("hist-bench: {mode} {:>7} — unavailable", b32 / 1_000_000);
+                continue;
+            };
+            let total: u64 =
+                hist.bins[0].iter().map(|&n| n as u64).sum::<u64>() + hist.over[0] as u64;
+            // How much of the range the graph actually resolves: a measure that
+            // drops when sampling starts missing sparse populations.
+            let nonzero = hist.bins[0].iter().filter(|&&n| n > 0).count();
+            log::info!(
+                "hist-bench: {mode} {:>5}M  {:>5}x{:<5}  {:>10}  {:>6.2}  {:>6.2}   {:>3}/256      {:>7}  {}",
+                b32 / 1_000_000,
+                grid.0,
+                grid.1,
+                total,
+                gpu_ms,
+                read_ms,
+                nonzero,
+                hist.over[0],
+                hist.peak(),
+            );
+        }
+    }
 }
 
 /// Debug-log a landed display histogram as a coarse 16-bucket digest (percent of

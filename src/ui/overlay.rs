@@ -986,9 +986,13 @@ fn settings_dialog(
                                     .response
                                     .on_hover_text(
                                         "Pixels the F2 histogram looks at, spread evenly over the \
-                                         image. A million is already plenty for the overall shape; \
-                                         raising it catches small populations — a few blown \
-                                         highlights — that can otherwise fall between samples.",
+                                         image. Anything up to 8M is effectively free; past that \
+                                         the cost shows up as frame rate while you're actively \
+                                         changing exposure. Raising it catches small populations \
+                                         — a few blown highlights — that can otherwise fall \
+                                         between samples. Doesn't affect the eye button's \
+                                         visible-region mode, which always reads every screen \
+                                         pixel.",
                                     );
                                 ui.end_row();
                             });

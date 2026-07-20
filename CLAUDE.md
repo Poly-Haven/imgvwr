@@ -106,6 +106,17 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   the box's width and balloons it every frame (the histogram header did this — a 208pt graph in a
   600pt box). Lay out against a width you computed yourself, e.g.
   `allocate_ui_with_layout(vec2(known_w, h), Layout::right_to_left(..))`.
+- **The histogram's sample budget is benchmarked, not guessed** — `IMGVWR_DEBUG_HIST_BENCH=1`
+  sweeps budgets × {point, mip} and prints GPU ms, VRAM-shaped grid dims, and how many of the 256
+  bins each one resolves. On a 24k EXR (302 Mpx): cost is *flat* below ~8M (0.69 ms at 1M, 0.82 ms
+  at 8M — the pass is overhead-bound down there), then 2.3 ms at 32M, 15.8 ms to read every pixel
+  (plus 2.4 GB for the target). Hence the 8M default. **Mip sampling was measured and rejected**: it
+  resolves *fewer* bins at every budget (239/256 vs 249/256 at 1M), and it can't be trusted to
+  smooth extremes down either, because the averaging happens in scene-linear space *before* the
+  tone curve — one blown texel at 1000.0 averaged with dim neighbours still lands far over the
+  display max and spreads its blowout across the footprint. It would also be inconsistent between
+  GPUs: an image past `GL_MAX_TEXTURE_SIZE` goes down the tiled path, whose mip chain is capped at
+  4 levels (`BORDER = 8`), so the same image would sample differently on a 16384-max card.
 - **The histogram pass must point-sample, and must see identity levels.** It sets
   `RenderParams::point_sample` (plain `GL_NEAREST`, *not* the I key's `NEAREST_MIPMAP_NEAREST`,
   which still picks a pre-averaged mip and would smooth away the clipped highlights the graph

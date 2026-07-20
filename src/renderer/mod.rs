@@ -906,12 +906,41 @@ impl Renderer {
         source: HistogramSource,
         samples: u32,
     ) -> bool {
+        self.run_histogram(params, source, samples, true)
+    }
+
+    /// The offscreen grid a source is measured on. The sample budget applies to
+    /// the image (which can be 300 Mpx); the viewport is measured pixel-for-pixel
+    /// because it is bounded by the display anyway.
+    fn histogram_grid(&self, source: HistogramSource, samples: u32) -> (i32, i32) {
+        let (w, h) = source.dims();
+        match source {
+            HistogramSource::WholeImage { .. } => {
+                HistogramPass::grid_size(w, h, samples, self.max_texture_size)
+            }
+            HistogramSource::Viewport { .. } => {
+                HistogramPass::viewport_grid(w, h, self.max_texture_size)
+            }
+        }
+    }
+
+    /// The measurement itself. `point_sample` picks how each target texel reads
+    /// the source: one exact texel (`true`, the normal path) or the filtered mip
+    /// chain (`false`). The mip variant exists only for
+    /// [`benchmark_histogram`](Self::benchmark_histogram) to A/B against — it
+    /// measurably resolves fewer distinct levels, see that method's notes.
+    fn run_histogram(
+        &mut self,
+        params: &RenderParams,
+        source: HistogramSource,
+        samples: u32,
+        point_sample: bool,
+    ) -> bool {
         if self.image.is_none() || self.upload.is_some() {
             return false;
         }
         let gl = self.gl.clone();
-        let (sw, sh) = source.dims();
-        let (gw, gh) = HistogramPass::grid_size(sw, sh, samples, self.max_texture_size);
+        let (gw, gh) = self.histogram_grid(source, samples);
         match &mut self.histogram {
             Some(pass) if !pass.is_pending() => {
                 if unsafe { pass.begin(&gl, gw, gh) }.is_none() {
@@ -926,7 +955,9 @@ impl Renderer {
             // so it must describe the image *entering* the adjustment — measuring
             // the levelled result would make the histogram chase its own handles.
             levels: [0.0, 1.0],
-            point_sample: true,
+            point_sample,
+            // Mip sampling needs the mip path, which `nearest` would defeat.
+            nearest: params.nearest && point_sample,
             // Channel isolation is deliberately *kept*: when a single channel is
             // on screen as greyscale, that is what the graph should describe. The
             // shader's isolation happens before the tone pipeline, so the result
@@ -977,6 +1008,52 @@ impl Renderer {
             }
             None => false,
         }
+    }
+
+    /// Dev-only: run one complete measurement synchronously and report how long
+    /// the GPU took. Used to calibrate the sample budget; not on any normal path.
+    /// Run it with `IMGVWR_DEBUG_HIST_BENCH=1`.
+    ///
+    /// The `finish()` is the point — it makes the cost visible as the wall time
+    /// a frame would have to absorb, which is what actually matters for pacing.
+    /// Returns `(grid, gpu_ms, readback_ms, histogram)`.
+    ///
+    /// What it established, on a 24576×12288 EXR (302 Mpx):
+    ///
+    /// * Cost is flat below ~8M samples — 0.69 ms at 1M, 0.82 ms at 8M — because
+    ///   the pass is dominated by fixed overhead (target clear, dispatch, fence)
+    ///   rather than by the sampling. 1M was giving away accuracy for nothing.
+    /// * It climbs steeply after that: 2.3 ms at 32M, 8.1 ms at 128M, and 15.8 ms
+    ///   to read every pixel — a whole 60 fps frame — for a target that also
+    ///   wants 2.4 GB of VRAM, as much again as the image texture itself.
+    /// * `point_sample: false` (mip filtering) resolves *fewer* distinct bins at
+    ///   every budget and every viewport size — 239/256 vs 249/256 at 1M,
+    ///   247/256 vs 250/256 for a 4K viewport. It also can't be relied on to
+    ///   smooth extremes *down*: the averaging happens in scene-linear space
+    ///   before the tone curve, so one blown texel at 1000.0 averaged with dim
+    ///   neighbours still lands far above the display maximum and spreads its
+    ///   blowout across the footprint. Faster only where both are already under
+    ///   a millisecond. Hence point sampling.
+    #[cfg(debug_assertions)]
+    pub fn benchmark_histogram(
+        &mut self,
+        params: &RenderParams,
+        source: HistogramSource,
+        samples: u32,
+        point_sample: bool,
+    ) -> Option<((i32, i32), f32, f32, Histogram)> {
+        let grid = self.histogram_grid(source, samples);
+        let gl = self.gl.clone();
+        let start = std::time::Instant::now();
+        if !self.run_histogram(params, source, samples, point_sample) {
+            return None;
+        }
+        unsafe { gl.finish() };
+        let gpu_ms = start.elapsed().as_secs_f32() * 1000.0;
+        let read_start = std::time::Instant::now();
+        let hist = self.poll_histogram()?;
+        let read_ms = read_start.elapsed().as_secs_f32() * 1000.0;
+        Some((grid, gpu_ms, read_ms, hist))
     }
 
     /// Collect a finished measurement, or `None` if the GPU is still working.

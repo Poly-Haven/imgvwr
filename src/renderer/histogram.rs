@@ -222,6 +222,19 @@ impl HistogramPass {
         )
     }
 
+    /// The grid for measuring the viewport: one sample per screen pixel, no
+    /// budget applied.
+    ///
+    /// The budget exists because an image can be 300 Mpx; a viewport cannot —
+    /// it is bounded by the display. Measured on a 24k HDRI, a full-resolution
+    /// 4K viewport costs 0.76 ms and a 1080p one 0.34 ms, so subsampling it
+    /// would save nothing worth having and would cost the property that makes
+    /// the reading easy to trust: that it is exactly the pixels on screen.
+    pub fn viewport_grid(w: i32, h: i32, max_texture: i32) -> (i32, i32) {
+        let cap = max_texture.max(1);
+        (w.clamp(1, cap), h.clamp(1, cap))
+    }
+
     /// Bind (creating or resizing as needed) the offscreen framebuffer the caller
     /// should draw the flat image into. `None` if it could not be allocated.
     ///

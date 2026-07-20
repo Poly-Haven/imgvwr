@@ -51,7 +51,10 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   hairline outline strokes render muddy; filled glyphs stay crisp.
 - **Headless verification:** `IMGVWR_CAPTURE=out.png` renders one frame to a PNG; `IMGVWR_DEBUG_*`
   env vars (debug builds only) force state — e.g. `IMGVWR_DEBUG_ZOOM`, `IMGVWR_DEBUG_EXPOSURE`,
-  `IMGVWR_DEBUG_PROJECTION=pano`, `IMGVWR_DEBUG_OVERLAY=settings|error`, `IMGVWR_DEBUG_BG=black|checker|white|user`.
+  `IMGVWR_DEBUG_PROJECTION=pano`, `IMGVWR_DEBUG_OVERLAY=settings|metadata|error|loading|hint|help`,
+  `IMGVWR_DEBUG_BG=black|checker|white|user`,
+  `IMGVWR_DEBUG_LEVELS=black,white`. `RUST_LOG=debug` also dumps each landed histogram as a
+  16-bucket digest, which is the only way to check the *numbers* rather than the picture.
 - **Panorama sampling must use `sample_image_grad`, never plain `sample_image`.** The grad variant
   applies seam-corrected derivatives; plain sampling produces a mip-LOD seam at the longitude wrap.
 - **Every GL pass drawn after the scene but before `egui.paint` must set its own `blend_func`.**
@@ -76,6 +79,19 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   `1/min(nonzero pre_mul)` so the green channel saturates at 1.0 and other channels can exceed 1.0 —
   lowering exposure / applying Filmic recovers blown regions. Don't change `highlight=1` (unclip)
   or the rescale: removing either makes blown highlights flatten to 1.0 with nothing to recover.
+- **There is no CPU-side display transform.** OCIO is only ever built as a *GPU* program
+  (`build_gpu_shader`; the shim never creates a CPU processor), so anything needing on-screen
+  values must read them back from the GPU. That's why the colour-pick tooltip's "Display" row is a
+  1×1 `glReadPixels`, and why the F2 histogram renders the image flat into an offscreen target
+  through the same fragment program and bins it with a GL 4.3 compute shader. Don't reach for a
+  `cpu_processor` — there isn't one.
+- **The histogram pass must point-sample, and must see identity levels.** It sets
+  `RenderParams::point_sample` (plain `GL_NEAREST`, *not* the I key's `NEAREST_MIPMAP_NEAREST`,
+  which still picks a pre-averaged mip and would smooth away the clipped highlights the graph
+  exists to report), and `levels: [0.0, 1.0]` so the graph describes the values *entering* the
+  levels adjustment — otherwise it chases its own handles. It also forces `wrap_2d`: the integer
+  sample grid can only approximate the image aspect, and without it the shader's out-of-bounds
+  branch returns transparent black and fabricates a spike in bin 0.
 - **Clip overlay composites over `clamp(color, 0, 1)`, NOT the raw display colour.** Clipped regions
   blow past 1.0, so `0.25 * huge` re-clips to white and makes the stripes invisible on float formats.
   This was a silent no-op on EXR/HDR (8-bit looked fine only because its clipped display value is

@@ -68,6 +68,9 @@ pub struct UiInputs {
     pub histogram: Option<std::sync::Arc<crate::renderer::Histogram>>,
     /// Vertical scale for that graph (the L / Sq / Log selector).
     pub histogram_scale: crate::prefs::HistogramScale,
+    /// Display black/white points as `(black, white)` in the histogram's own
+    /// 0..1 axis — the positions of the two handles under the graph.
+    pub levels: (f32, f32),
     /// Active guides as `[coord (0..1), orientation]` (orientation ≥ 0.5 =
     /// horizontal). Listed in the metadata box with a remove button each.
     pub guides: Vec<[f32; 2]>,
@@ -236,6 +239,11 @@ pub struct UiState {
     /// drag-start so the rest of the gesture targets that exact guide (robust to
     /// other guides being added/at the cap mid-drag). `None` = no ruler spawn-drag.
     pub guide_spawn: Option<usize>,
+    /// Which levels handle is being dragged under the histogram (`false` = the
+    /// black point, `true` = the white point), captured at drag-start so the rest
+    /// of the gesture stays on that handle even once the pointer passes the other
+    /// one. Also keeps the metadata box revealed for the duration of the drag.
+    pub levels_drag: Option<bool>,
     /// Whether the H help dialog is open.
     pub show_help: bool,
     /// Whether the settings dialog is open.
@@ -285,6 +293,11 @@ pub enum UiAction {
     SetChannelIsolate(Option<u8>),
     /// Set the histogram's vertical scale (the L / Sq / Log selector).
     SetHistogramScale(crate::prefs::HistogramScale),
+    /// Set the display black/white points (dragged on the histogram's handles).
+    SetLevels {
+        black: f32,
+        white: f32,
+    },
     /// Set the exposure target (EV) from the bottom-panel slider / buttons.
     SetExposure(f32),
     /// Set the gamma target from the bottom-panel slider / buttons.

@@ -10,6 +10,7 @@ uniform float u_tan_half_fov;
 uniform float u_aspect;
 uniform float u_exposure;            // stops; applied in scene-linear BEFORE the view transform
 uniform float u_gamma;               // output tweak; applied ONCE after the display transform (default 1.0)
+uniform vec2  u_levels;              // display black/white points (0,1 = no-op); see step 4a
 uniform int   u_projection_mode;     // 0 = equirectangular panorama, 1 = 2D pan/zoom
 uniform float u_image_aspect;
 uniform bool  u_input_is_encoded_srgb;  // true when source pixels are sRGB-encoded (JPEG / LDR PNG)
@@ -205,6 +206,19 @@ void main() {
     //    post-display tweak applied exactly ONCE in both the OCIO and fallback
     //    paths (do not also fold gamma into __OCIO_APPLY__).
     color = pow(max(color, vec3(0.0)), vec3(1.0 / max(u_gamma, 1e-6)));
+
+    // 4a. Display levels — the two handles under the F2 histogram. Stretches the
+    //     [black, white] slice of the display range back out to 0..1. Applied
+    //     HERE, after the view transform and gamma, because that is exactly where
+    //     the histogram is measured: the handles then line up 1:1 with the graph's
+    //     x axis, which is the whole point of putting them under it.
+    //
+    //     Deliberately left unclamped. Pushing black up drives dark pixels
+    //     negative and pulling white down drives bright ones past 1.0, and the
+    //     clip overlay below still needs to see how far out of range a value went
+    //     (it re-clamps for its own compositing). The histogram pass feeds an
+    //     identity (0, 1) here so the graph never moves under its own handles.
+    color = (color - u_levels.x) / max(u_levels.y - u_levels.x, 1e-4);
 
     // 4b. Clipping overlay (C): animated diagonal stripes over regions whose
     //     ORIGINAL per-channel value (clip_src, captured before any adjustment) is

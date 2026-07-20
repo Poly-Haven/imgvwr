@@ -1767,12 +1767,15 @@ fn metadata_hud(
                 // Full width under the grid rather than inside it — a grid cell
                 // would pin the graph to the narrow value column.
                 if inputs.has_image {
-                    histogram_plot(ui, inputs, actions, grid.response.rect.width());
+                    histogram_plot(ui, inputs, state, actions, grid.response.rect.width());
                 }
             });
         });
     state.view_menu_open = view_menu_open;
-    resp.response.contains_pointer() || view_menu_open
+    // A levels drag routinely wanders off the 11pt handle strip and out of the
+    // box; without this the box would slide away mid-gesture, taking the graph
+    // being aimed at with it.
+    resp.response.contains_pointer() || view_menu_open || state.levels_drag.is_some()
 }
 
 /// A guide's angle in panorama mode, from its stored image uv coord — the direct
@@ -2054,11 +2057,20 @@ fn hist_band_color(channels: &[egui::Color32]) -> egui::Color32 {
     egui::Color32::from_rgba_premultiplied(q(rgb[0]), q(rgb[1]), q(rgb[2]), q(a))
 }
 
-/// The histogram of the displayed image, plus its scale selector. Drawn full
-/// width under the metadata grid; `width` is the grid's measured width so the
-/// two line up. Greyscale images draw a single neutral curve, matching how
-/// [`channel_boxes`] collapses L / LA.
-fn histogram_plot(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>, width: f32) {
+/// Height of the levels handle strip below the plot.
+const LEVELS_STRIP_H: f32 = 11.0;
+
+/// The histogram of the displayed image, its scale selector, and the levels
+/// handles beneath it. Drawn full width under the metadata grid; `width` is the
+/// grid's measured width so the two line up. Greyscale images draw a single
+/// neutral curve, matching how [`channel_boxes`] collapses L / LA.
+fn histogram_plot(
+    ui: &mut egui::Ui,
+    inputs: &UiInputs,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+    width: f32,
+) {
     let Some(hist) = &inputs.histogram else {
         return;
     };
@@ -2133,6 +2145,115 @@ fn histogram_plot(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiActi
         &palette,
     );
     painter.add(egui::Shape::mesh(mesh));
+
+    // Where the two levels cuts fall on the graph, so the handles below read as
+    // positions on this data rather than as an unrelated pair of sliders.
+    let (black, white) = inputs.levels;
+    for t in [black, white] {
+        if t > 0.0 && t < 1.0 {
+            let x = plot.left() + t * plot.width();
+            painter.line_segment(
+                [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
+                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(60)),
+            );
+        }
+    }
+
+    levels_handles(ui, inputs, state, actions, plot);
+}
+
+/// The two levels handles, on their own strip directly under the plot and
+/// sharing its x axis. Dragging one remaps the display range; the graph itself
+/// deliberately doesn't follow (see `Renderer::update_histogram`).
+fn levels_handles(
+    ui: &mut egui::Ui,
+    inputs: &UiInputs,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+    plot: egui::Rect,
+) {
+    let (black, white) = inputs.levels;
+    // Allocate across the plot's full span, offset so the strip lines up with it
+    // rather than with the surrounding frame margin.
+    let (row, resp) = ui.allocate_exact_size(
+        egui::vec2(plot.width() + 2.0, LEVELS_STRIP_H),
+        egui::Sense::click_and_drag(),
+    );
+    let strip = egui::Rect::from_min_size(
+        egui::pos2(plot.left(), row.top()),
+        egui::vec2(plot.width(), row.height()),
+    );
+    let x_of = |t: f32| strip.left() + t.clamp(0.0, 1.0) * strip.width();
+    let t_of = |x: f32| ((x - strip.left()) / strip.width().max(1.0)).clamp(0.0, 1.0);
+
+    // `pointer_interact_pos` rather than the response's hover position: a drag
+    // routinely leaves the 11pt strip, and losing the pointer there would strand
+    // the handle (the same reason `ruler_spawn_drag` reads it this way).
+    let ctx = ui.ctx().clone();
+    let pointer_t = ctx.pointer_interact_pos().map(|p| t_of(p.x));
+
+    // Which handle a gesture owns is decided once, at the start, and held for the
+    // rest of it — otherwise dragging one past the other would silently hand the
+    // gesture to its neighbour halfway through.
+    if resp.drag_started() || resp.clicked() {
+        if let Some(t) = pointer_t {
+            state.levels_drag = Some((t - white).abs() < (t - black).abs());
+        }
+    }
+    if let (Some(is_white), Some(t)) = (state.levels_drag, pointer_t) {
+        // `drag_stopped` included so the release frame's final position lands —
+        // without it the last few pixels of a fast drag are dropped.
+        if resp.dragged() || resp.drag_stopped() || resp.clicked() {
+            let (black, white) = if is_white { (black, t) } else { (t, white) };
+            actions.push(UiAction::SetLevels { black, white });
+        }
+        ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    if !resp.dragged() && !resp.is_pointer_button_down_on() {
+        state.levels_drag = None;
+    }
+    // Double-click anywhere on the strip clears the adjustment. Queued after the
+    // click's own move, and actions apply in order, so the reset wins.
+    if resp.double_clicked() {
+        actions.push(UiAction::SetLevels {
+            black: 0.0,
+            white: 1.0,
+        });
+    }
+
+    let hovered = resp.contains_pointer();
+    let painter = ui.painter();
+    // The track: the slice of the range that survives, drawn between the handles.
+    painter.line_segment(
+        [
+            egui::pos2(x_of(black), strip.top() + 1.0),
+            egui::pos2(x_of(white), strip.top() + 1.0),
+        ],
+        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70)),
+    );
+    for (t, fill) in [
+        (black, egui::Color32::from_gray(40)),
+        (white, egui::Color32::from_gray(225)),
+    ] {
+        let x = x_of(t);
+        let top = strip.top() + 1.0;
+        let bottom = strip.bottom() - 1.0;
+        let half = 4.0;
+        let tri = vec![
+            egui::pos2(x, top),
+            egui::pos2(x - half, bottom),
+            egui::pos2(x + half, bottom),
+        ];
+        let stroke = if hovered || state.levels_drag.is_some() {
+            egui::Stroke::new(1.0, ACCENT)
+        } else {
+            egui::Stroke::new(1.0, egui::Color32::from_gray(120))
+        };
+        painter.add(egui::Shape::convex_polygon(tri, fill, stroke));
+    }
+    if hovered {
+        resp.on_hover_text("Drag to set the display black / white point (double-click resets)");
+    }
 }
 
 /// Emit one column of the area chart: the covered channels split the column into
@@ -2501,6 +2622,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("Right-click + hold-drag", "Pick pixel colour values"),
                 ("Channel boxes (F2)", "Isolate R/G/B/A"),
                 ("Histogram (F2)", "Displayed levels; L/Sq/Log scale"),
+                ("Levels handles (F2)", "Drag to set black / white point"),
             ],
         ),
         (

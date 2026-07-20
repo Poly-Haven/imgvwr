@@ -16,7 +16,7 @@
 //! Interactive input cannot be exercised headlessly (the dev window is invisible
 //! to the input tool), so a set of `IMGVWR_DEBUG_*` env overrides apply a camera
 //! / exposure state right after load so the visual outcome can be captured:
-//!   * `IMGVWR_DEBUG_EXPOSURE` / `_GAMMA`
+//!   * `IMGVWR_DEBUG_EXPOSURE` / `_GAMMA` / `_LEVELS` (`black,white`)
 //!   * `IMGVWR_DEBUG_YAW` / `_PITCH` / `_FOV` (panorama, degrees)
 //!   * `IMGVWR_DEBUG_ZOOM` (2D)
 //!   * `IMGVWR_DEBUG_PROJECTION` = `pano` | `flat`
@@ -292,6 +292,10 @@ enum RenderOutcome {
 /// Max entries kept on the undo (and redo) stack.
 const UNDO_LIMIT: usize = 256;
 
+/// Closest the display black and white points may get. Small enough to allow a
+/// hard threshold, large enough that the shader's contrast stretch stays finite.
+const LEVELS_MIN_GAP: f32 = 0.005;
+
 /// A snapshot of the undoable editing state: guides, image adjustments and toggle
 /// modes. Navigation / positioning (pan, zoom, look, projection) and the per-image
 /// rotation are deliberately excluded.
@@ -310,6 +314,7 @@ struct UndoState {
     nearest_filter: bool,
     nearest_auto: bool,
     image_stretch: Vec2,
+    levels: (f32, f32),
 }
 
 impl UndoState {
@@ -329,6 +334,7 @@ impl UndoState {
             nearest_filter: false,
             nearest_auto: true,
             image_stretch: Vec2::ONE,
+            levels: (0.0, 1.0),
         }
     }
 }
@@ -392,6 +398,13 @@ pub struct App {
     /// image magnified past 200% samples nearest (crisp pixels), everything else
     /// bilinear. The I key turns this off and pins `nearest_filter`.
     nearest_auto: bool,
+    /// Display black/white points, dragged with the handles under the F2
+    /// histogram. Both live in *display* space (0..1) — the same space the graph
+    /// is measured in — and the shader stretches `[black, white]` back out to the
+    /// full range. `0.0` / `1.0` is no adjustment. Not eased: the handles are
+    /// dragged, so the value is already continuous.
+    levels_black: f32,
+    levels_white: f32,
     /// Isolated channel shown as greyscale (0=R 1=G 2=B 3=A); `None` = all.
     isolate_channel: Option<u8>,
     /// Clarity (local-contrast) strength (0 = off) and blur radius (viewport px).
@@ -713,6 +726,8 @@ impl App {
             gamma: 1.0,
             exposure_target: 0.0,
             gamma_target: 1.0,
+            levels_black: 0.0,
+            levels_white: 1.0,
             wrap_2d: false,
             nearest_filter: false,
             nearest_auto: true,
@@ -1765,6 +1780,10 @@ impl App {
             self.camera = CameraController::for_image(want_pano);
             self.exposure = 0.0;
             self.gamma = 1.0;
+            // Levels are tuned against one image's histogram, so they reset with
+            // the rest of the tone state — but ride along under the L lock, which
+            // is exactly the "carry my grade to the next shot" case.
+            self.set_levels(0.0, 1.0);
             self.wrap_2d = false;
             // Auto-expose: pick the starting exposure so the average linear value
             // lands on AUTO_EXPOSURE_TARGET. (No-op for 8-bit images, where
@@ -2333,11 +2352,24 @@ impl App {
         self.show_toast(text);
     }
 
-    /// Reset all image-processing adjustments (Ctrl+R): exposure, gamma, clarity,
-    /// channel isolation. (Geometric squash/stretch resets with R/Home instead.)
+    /// Set the display black/white points, keeping them inside 0..1 and at least
+    /// [`LEVELS_MIN_GAP`] apart. Both handles live on the histogram's own x axis,
+    /// so the 0..1 bound is what keeps them addressable by the graph they sit
+    /// under; the gap stops the two crossing into a divide-by-nothing.
+    fn set_levels(&mut self, black: f32, white: f32) {
+        let black = black.clamp(0.0, 1.0 - LEVELS_MIN_GAP);
+        let white = white.clamp(black + LEVELS_MIN_GAP, 1.0);
+        self.levels_black = black;
+        self.levels_white = white;
+    }
+
+    /// Reset all image-processing adjustments (Ctrl+R): exposure, gamma, levels,
+    /// clarity, channel isolation. (Geometric squash/stretch resets with R/Home
+    /// instead.)
     fn reset_image_processing(&mut self) {
         self.exposure_target = 0.0;
         self.gamma_target = 1.0;
+        self.set_levels(0.0, 1.0);
         self.clarity_amount = 0.0;
         self.clarity_radius = 64.0;
         self.isolate_channel = None;
@@ -2375,6 +2407,7 @@ impl App {
             nearest_filter: self.nearest_filter,
             nearest_auto: self.nearest_auto,
             image_stretch: self.image_stretch,
+            levels: (self.levels_black, self.levels_white),
         }
     }
 
@@ -2432,6 +2465,7 @@ impl App {
         self.nearest_filter = s.nearest_filter;
         self.nearest_auto = s.nearest_auto;
         self.image_stretch = s.image_stretch;
+        self.set_levels(s.levels.0, s.levels.1);
         // Cancel any in-flight guide gesture (grab or ruler-spawn) so its release
         // can't move/keep/delete a guide against the just-replaced vector, and clear
         // the hover highlight.
@@ -3407,6 +3441,7 @@ impl App {
             || self.guide_drag.is_some()
             || self.minimap_drag
             || self.ui_state.guide_spawn.is_some()
+            || self.ui_state.levels_drag.is_some()
     }
 
     fn update_cursor_idle_hide(&mut self) {
@@ -4431,6 +4466,13 @@ impl App {
             self.exposure = v;
             self.exposure_target = v;
         }
+        // `IMGVWR_DEBUG_LEVELS=black,white` — the F2 handles, headlessly.
+        if let Some((b, w)) = std::env::var("IMGVWR_DEBUG_LEVELS").ok().and_then(|s| {
+            let (b, w) = s.split_once(',')?;
+            Some((b.trim().parse::<f32>().ok()?, w.trim().parse::<f32>().ok()?))
+        }) {
+            self.set_levels(b, w);
+        }
         if let Some(v) = f("IMGVWR_DEBUG_GAMMA") {
             self.gamma = v;
             self.gamma_target = v;
@@ -4672,6 +4714,7 @@ impl App {
             // like the colour-pick readback.
             histogram: self.histogram.clone(),
             histogram_scale: self.prefs.histogram_scale,
+            levels: (self.levels_black, self.levels_white),
             show_help: self.ui_state.show_help || forced == Some("help"),
             toast: self.toast_render(),
             slot_labels: self.slot_labels(),
@@ -5027,6 +5070,13 @@ impl App {
             }
             UiAction::SetChannelIsolate(channel) => {
                 self.isolate_channel = channel;
+                self.request_redraw();
+            }
+            UiAction::SetLevels { black, white } => {
+                // The graph deliberately does not re-measure here: it describes
+                // the values entering the adjustment, which is what makes the
+                // handles meaningful (see `update_histogram`).
+                self.set_levels(black, white);
                 self.request_redraw();
             }
             UiAction::SetHistogramScale(scale) => {
@@ -5386,6 +5436,7 @@ impl App {
             viewport: (1, 1),
             exposure: self.exposure,
             gamma: self.gamma,
+            levels: [self.levels_black, self.levels_white],
             projection_mode: cam.projection_mode(),
             yaw: cam.yaw(),
             pitch: cam.pitch(),

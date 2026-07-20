@@ -50,6 +50,12 @@ pub struct RenderParams {
     pub viewport: (i32, i32),
     pub exposure: f32,
     pub gamma: f32,
+    /// Display black/white points as `[black, white]`, applied after the view
+    /// transform and gamma — the same place the histogram is measured, so the
+    /// F2 handles line up with the graph. `[0.0, 1.0]` is a no-op; the histogram
+    /// pass always passes that identity so the graph can't move under its own
+    /// handles.
+    pub levels: [f32; 2],
     /// 0 = equirectangular panorama, 1 = 2D pan/zoom.
     pub projection_mode: i32,
     pub yaw: f32,
@@ -121,6 +127,7 @@ impl Default for RenderParams {
             viewport: (1, 1),
             exposure: 0.0,
             gamma: 1.0,
+            levels: [0.0, 1.0],
             projection_mode: 1,
             yaw: 0.0,
             pitch: 0.0,
@@ -160,6 +167,7 @@ struct Uniforms {
     aspect: Option<glow::UniformLocation>,
     exposure: Option<glow::UniformLocation>,
     gamma: Option<glow::UniformLocation>,
+    levels: Option<glow::UniformLocation>,
     projection_mode: Option<glow::UniformLocation>,
     image_aspect: Option<glow::UniformLocation>,
     input_is_encoded_srgb: Option<glow::UniformLocation>,
@@ -206,6 +214,7 @@ impl Uniforms {
             aspect: u("u_aspect"),
             exposure: u("u_exposure"),
             gamma: u("u_gamma"),
+            levels: u("u_levels"),
             projection_mode: u("u_projection_mode"),
             image_aspect: u("u_image_aspect"),
             input_is_encoded_srgb: u("u_input_is_encoded_srgb"),
@@ -678,6 +687,7 @@ impl Renderer {
             gl.uniform_1_f32(u.aspect.as_ref(), aspect);
             gl.uniform_1_f32(u.exposure.as_ref(), params.exposure);
             gl.uniform_1_f32(u.gamma.as_ref(), params.gamma);
+            gl.uniform_2_f32(u.levels.as_ref(), params.levels[0], params.levels[1]);
             gl.uniform_1_f32(u.global_alpha.as_ref(), params.global_alpha);
             gl.uniform_1_i32(u.projection_mode.as_ref(), params.projection_mode);
             gl.uniform_1_i32(u.rotation.as_ref(), params.rotation);
@@ -888,6 +898,10 @@ impl Renderer {
         }
         let hist_params = RenderParams {
             viewport: (gw, gh),
+            // Identity levels. The graph is what the levels handles are aimed at,
+            // so it must describe the image *entering* the adjustment — measuring
+            // the levelled result would make the histogram chase its own handles.
+            levels: [0.0, 1.0],
             // A fit-the-whole-image 2D view: pan 0 and tan_half_fov 1 make the
             // quad map exactly onto image uv 0..1 (the same framing convention
             // `render_minimap` documents).

@@ -25,6 +25,8 @@
 //!   * `IMGVWR_DEBUG_CURSOR` = `x,y` (physical px; also needed by `_COLOR_PICK`)
 //!   * `IMGVWR_DEBUG_COLOR_PICK` = `1` (force the colour-pick tooltip on, as if
 //!     right-drag-held at `_CURSOR`)
+//!   * `IMGVWR_DEBUG_GUIDE_CMD` = comma-separated `g`|`shift`|`ctrl` (replays a
+//!     sequence of G / Shift+G / Ctrl+G presses; applied after `_PROJECTION`)
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -292,6 +294,7 @@ const UNDO_LIMIT: usize = 256;
 #[derive(Clone, PartialEq)]
 struct UndoState {
     guides: Vec<[f32; 2]>,
+    guides_visible: bool,
     exposure_target: f32,
     gamma_target: f32,
     clarity_amount: f32,
@@ -310,6 +313,7 @@ impl UndoState {
     fn fresh() -> Self {
         Self {
             guides: Vec::new(),
+            guides_visible: true,
             exposure_target: 0.0,
             gamma_target: 1.0,
             clarity_amount: 0.0,
@@ -400,6 +404,10 @@ pub struct App {
     /// Guide lines: `[image_coord (0..1), 0=vertical / 1=horizontal]`
     /// (max [`crate::renderer::MAX_GUIDES`]).
     guides: Vec<[f32; 2]>,
+    /// Whether existing guides are shown/hittable (G toggles this; adding one
+    /// always turns it back on). The guides themselves are untouched — this only
+    /// gates rendering, the F2 list, and hit-testing (see `guide_at_cursor`).
+    guides_visible: bool,
     show_metadata: bool,
     /// Display rotation of the current 2D image in 90° clockwise quarter-turns
     /// (0–3), applied in the shader. Persisted per image path for the session in
@@ -687,6 +695,7 @@ impl App {
             settings_was_open: false,
             settings_restore_size: None,
             guides: Vec::new(),
+            guides_visible: true,
             show_metadata: false,
             rotation: 0,
             image_rotations: HashMap::new(),
@@ -1738,6 +1747,7 @@ impl App {
             self.isolate_channel = None;
             self.image_stretch = Vec2::ONE;
             self.guides.clear();
+            self.guides_visible = true;
             self.ui_state.guide_spawn = None;
         }
         self.load_state = LoadState::Loaded;
@@ -2244,6 +2254,7 @@ impl App {
         self.sharpness = false;
         self.clip_overlay = false;
         self.guides.clear();
+        self.guides_visible = true;
         // Drop any in-flight guide gesture so its release can't touch a
         // since-cleared guide (the gesture's release, if any, becomes a no-op).
         self.guide_drag = None;
@@ -2262,6 +2273,7 @@ impl App {
     fn undo_snapshot(&self) -> UndoState {
         UndoState {
             guides: self.guides.clone(),
+            guides_visible: self.guides_visible,
             exposure_target: self.exposure_target,
             gamma_target: self.gamma_target,
             clarity_amount: self.clarity_amount,
@@ -2316,6 +2328,7 @@ impl App {
     /// Apply a snapshot to the live state (instant — tone is snapped, not eased).
     fn restore_undo_state(&mut self, s: UndoState) {
         self.guides = s.guides;
+        self.guides_visible = s.guides_visible;
         self.exposure_target = s.exposure_target;
         self.exposure = s.exposure_target;
         self.gamma_target = s.gamma_target;
@@ -2369,6 +2382,7 @@ impl App {
         if self.guides.len() < crate::renderer::MAX_GUIDES {
             self.guides
                 .push([coord.clamp(0.0, 1.0), if horizontal { 1.0 } else { 0.0 }]);
+            self.guides_visible = true;
             self.show_toast("Guide added".to_string());
             self.request_redraw();
         }
@@ -2400,33 +2414,46 @@ impl App {
             .any(|g| (g[0] - pos).abs() < 1e-3 && (g[1] - orient).abs() < 0.5)
     }
 
-    /// The G key subdivides ONE axis per press so the grid converges toward
-    /// square cells. The very first guide is always horizontal; after that it
-    /// subdivides whichever axis brings the cell aspect closest to 1:1 — i.e. the
-    /// longer cell edge first. For a 32:1 image that means splitting the width
-    /// (vertical guides) down to 1/32 before the 2nd horizontal guide; for a 2:1
-    /// HDRI it's H, V, V (→ 8 squares), then alternating H/V. Each press adds every
-    /// odd-numerator position at that axis's coarsest not-yet-complete level (½, ¼
-    /// … 1/32), capped at [`crate::renderer::MAX_GUIDES`].
-    fn add_next_guide(&mut self) {
-        // Completed subdivision levels (denoms 2,4,8,16,32 → max 5) for one axis.
-        let completed = |this: &Self, horizontal: bool| -> u32 {
-            let mut levels = 0u32;
-            let mut denom = 2u32;
-            while denom <= 32 {
-                let full = (1..denom)
-                    .step_by(2)
-                    .all(|n| this.has_guide(n as f32 / denom as f32, horizontal));
-                if full {
-                    levels += 1;
-                    denom *= 2;
-                } else {
-                    break;
-                }
+    /// Completed subdivision levels (denoms 2,4,8,16,32 → max 5) on one axis: the
+    /// largest N such that every odd-numerator position at denom 2,4,…,2^N is
+    /// present. Ignores anything else on the axis (a manually-added guide off the
+    /// grid, or a level left incomplete by a manual removal) — those just don't
+    /// count toward a level, so `add_next_guide` / `remove_guides_step` only ever
+    /// act on a level they can positively identify as complete.
+    fn completed_guide_levels(&self, horizontal: bool) -> u32 {
+        let mut levels = 0u32;
+        let mut denom = 2u32;
+        while denom <= 32 {
+            let full = (1..denom)
+                .step_by(2)
+                .all(|n| self.has_guide(n as f32 / denom as f32, horizontal));
+            if full {
+                levels += 1;
+                denom *= 2;
+            } else {
+                break;
             }
-            levels
-        };
-        let (h, v) = (completed(self, true), completed(self, false));
+        }
+        levels
+    }
+
+    /// Shift+G subdivides ONE axis per press so the grid converges toward square
+    /// cells. The very first guide is always horizontal; after that it subdivides
+    /// whichever axis brings the cell aspect closest to 1:1 — i.e. the longer cell
+    /// edge first. For a 32:1 image that means splitting the width (vertical
+    /// guides) down to 1/32 before the 2nd horizontal guide; for a 2:1 HDRI it's
+    /// H, V, V (→ 8 squares), then alternating H/V. Each press adds every
+    /// odd-numerator position at that axis's coarsest not-yet-complete level (½, ¼
+    /// … 1/32), capped at [`crate::renderer::MAX_GUIDES`]. In panorama mode,
+    /// completing the first vertical level (the 180° guide) also drops its
+    /// antipodal partner at 0° — a lone guide only draws a half-meridian on the
+    /// unwrapped image, so bisecting the sphere with a full great circle needs
+    /// both.
+    fn add_next_guide(&mut self) {
+        let (h, v) = (
+            self.completed_guide_levels(true),
+            self.completed_guide_levels(false),
+        );
         let aspect = self.display_aspect();
         let Some(horizontal) = next_guide_horizontal(h, v, self.guides.is_empty(), aspect) else {
             return; // both axes full
@@ -2444,12 +2471,136 @@ impl App {
                 added += 1;
             }
         }
+        if !horizontal
+            && levels == 0
+            && self.camera.is_panorama()
+            && self.guides.len() < crate::renderer::MAX_GUIDES
+            && !self.has_guide(0.0, false)
+        {
+            self.guides.push([0.0, 0.0]);
+            added += 1;
+        }
         if added > 0 {
+            self.guides_visible = true;
             let axis = if horizontal { "horizontal" } else { "vertical" };
             let s = if added == 1 { "" } else { "s" };
             self.show_toast(format!("Added {added} {axis} guide{s}"));
             self.request_redraw();
         }
+    }
+
+    /// Ctrl+G undoes one `add_next_guide` step: removes the finest completed
+    /// level from whichever axis is currently more subdivided (peeling from the
+    /// top, so repeated presses walk back the same progression `add_next_guide`
+    /// would have walked forward). Robust to guides having been added, moved, or
+    /// removed by hand in between — it only ever acts on a level it can positively
+    /// identify as complete (see `completed_guide_levels`); once no such level
+    /// remains, it falls back to clearing whatever's left in one press.
+    fn remove_guides_step(&mut self) {
+        if self.guides.is_empty() {
+            return;
+        }
+        let (h, v) = (
+            self.completed_guide_levels(true),
+            self.completed_guide_levels(false),
+        );
+        if h == 0 && v == 0 {
+            let n = self.guides.len();
+            self.guides.clear();
+            self.guide_drag = None;
+            self.ui_state.guide_spawn = None;
+            self.ui_state.hovered_guide = None;
+            let s = if n == 1 { "" } else { "s" };
+            self.show_toast(format!("Cleared {n} guide{s}"));
+            self.request_redraw();
+            return;
+        }
+        // Peel the more-subdivided axis first; a tie favours whichever axis
+        // currently holds more guides overall (the more heavily hand-extended one).
+        let horizontal = match h.cmp(&v) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => {
+                let count = |horiz: bool| {
+                    self.guides
+                        .iter()
+                        .filter(|g| (g[1] >= 0.5) == horiz)
+                        .count()
+                };
+                count(true) >= count(false)
+            }
+        };
+        let levels = if horizontal { h } else { v };
+        let denom = 2u32 << (levels - 1); // the finest completed level's denom
+        let before = self.guides.len();
+        self.guides.retain(|g| {
+            if (g[1] >= 0.5) != horizontal {
+                return true;
+            }
+            !(1..denom)
+                .step_by(2)
+                .any(|n| (g[0] - n as f32 / denom as f32).abs() < 1e-3)
+        });
+        // The 180°/0° bisector pair (see `add_next_guide`) was added together;
+        // remove it together too.
+        if !horizontal && denom == 2 && self.camera.is_panorama() {
+            self.guides.retain(|g| !(g[1] < 0.5 && g[0].abs() < 1e-3));
+        }
+        let removed = before - self.guides.len();
+        if removed > 0 {
+            self.guide_drag = None;
+            self.ui_state.guide_spawn = None;
+            self.ui_state.hovered_guide = None;
+            let axis = if horizontal { "horizontal" } else { "vertical" };
+            let s = if removed == 1 { "" } else { "s" };
+            self.show_toast(format!("Removed {removed} {axis} guide{s}"));
+            self.request_redraw();
+        }
+    }
+
+    /// G (no modifiers): show/hide the existing guides without touching them —
+    /// unless there are none yet, in which case it behaves like the first
+    /// Shift+G press and adds the first one.
+    fn toggle_guides_visibility(&mut self) {
+        if self.guides.is_empty() {
+            self.add_next_guide();
+            return;
+        }
+        self.guides_visible = !self.guides_visible;
+        self.ui_state.hovered_guide = None;
+        self.show_toast(
+            if self.guides_visible {
+                "Guides shown"
+            } else {
+                "Guides hidden"
+            }
+            .to_string(),
+        );
+        self.request_redraw();
+    }
+
+    /// Ctrl+drag guide-coordinate snapping: nearest whole degree in panorama,
+    /// nearest 10 displayed px in 2D. `coord` is the guide's stored uv fraction
+    /// along its constant axis (`horizontal` selects which). Mirrors
+    /// `ui::overlay`'s ruler-spawn version (same formulas, App-side data instead
+    /// of `RulerInfo`).
+    fn snap_guide_coord(&self, coord: f32, horizontal: bool) -> f32 {
+        if self.camera.is_panorama() {
+            if horizontal {
+                let lat = (0.5 - coord) * 180.0;
+                0.5 - lat.round() / 180.0
+            } else {
+                (coord * 360.0).round() / 360.0
+            }
+        } else {
+            let (dw, dh) = self.display_dims();
+            let dim = if horizontal { dh } else { dw } as f32;
+            if dim <= 0.0 {
+                return coord;
+            }
+            (coord * dim / 10.0).round() * 10.0 / dim
+        }
+        .clamp(0.0, 1.0)
     }
 
     /// Adjust the Clarity strength (0 = off). Chunky steps; the range goes well
@@ -2963,8 +3114,15 @@ impl App {
                 );
                 self.request_redraw();
             }
-            // G: add a horizontal guide at 50% image height (pano horizon).
-            (_, Some("g")) | (_, Some("G")) => self.add_next_guide(),
+            // Ctrl+G: remove one guide subdivision level (undoes a Shift+G step).
+            (_, Some("g")) | (_, Some("G")) if ctrl => self.remove_guides_step(),
+            // Shift+G: add the next guide subdivision level (old plain-G behaviour).
+            (_, Some("g")) | (_, Some("G")) if self.modifiers.shift_key() => {
+                self.add_next_guide()
+            }
+            // G: show/hide the existing guides (adds the first one if there are
+            // none yet).
+            (_, Some("g")) | (_, Some("G")) => self.toggle_guides_visibility(),
             // M: toggle the navigation minimap (only visible while zoomed in past
             // fit; it also auto-appears on 2D pan/zoom).
             (_, Some("m")) | (_, Some("M")) => {
@@ -3257,7 +3415,7 @@ impl App {
     /// distance is circular in pano). Drives grab/delete and the hover highlight.
     fn guide_at_cursor(&self) -> Option<usize> {
         const GRAB_PX: f32 = 3.0;
-        if self.guides.is_empty() || !self.cursor_in_window {
+        if self.guides.is_empty() || !self.cursor_in_window || !self.guides_visible {
             return None;
         }
         let (cx, cy) = (self.cursor_pos.x, self.cursor_pos.y);
@@ -4235,6 +4393,16 @@ impl App {
         if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
             self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
         }
+        if let Ok(spec) = std::env::var("IMGVWR_DEBUG_GUIDE_CMD") {
+            for cmd in spec.split(',') {
+                match cmd.trim() {
+                    "g" => self.toggle_guides_visibility(),
+                    "shift" => self.add_next_guide(),
+                    "ctrl" => self.remove_guides_step(),
+                    _ => {}
+                }
+            }
+        }
         if std::env::var("IMGVWR_DEBUG_WRAP").is_ok() {
             self.wrap_2d = true;
         }
@@ -4353,7 +4521,13 @@ impl App {
             clarity_radius: self.clarity_radius,
             ruler: self.ruler_info(),
             left_ruler_slide: self.left_ruler_slide,
-            guides: self.guides.clone(),
+            // Hidden guides (G) vanish from the F2 list and the tooltip along with
+            // the render + hit-testing (`guide_at_cursor`) — one flag, one behaviour.
+            guides: if self.guides_visible {
+                self.guides.clone()
+            } else {
+                Vec::new()
+            },
             // Displayed (rotation-aware) dims: guides are in displayed uv, so the
             // meta-box pixel readout (`V 425px`) reports displayed pixels.
             image_size: self.display_dims(),
@@ -5033,7 +5207,12 @@ impl App {
         let inputs = self.ui_inputs();
         let cam = self.camera.camera;
         let mut guide_arr = [[0.0f32; 2]; crate::renderer::MAX_GUIDES];
-        let guide_n = self.guides.len().min(crate::renderer::MAX_GUIDES);
+        // Hidden guides (G) don't draw at all.
+        let guide_n = if self.guides_visible {
+            self.guides.len().min(crate::renderer::MAX_GUIDES)
+        } else {
+            0
+        };
         guide_arr[..guide_n].copy_from_slice(&self.guides[..guide_n]);
         let (bg_color, bg_checker) = self.bg_preset.resolve(self.prefs.background_color);
         let base = RenderParams {
@@ -5416,10 +5595,20 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // Move a grabbed guide to follow the cursor along its constant-uv
                 // axis (clamped on-image; the release decides keep vs discard).
+                // Ctrl snaps it to 10 displayed px (2D) or a whole degree (pano).
                 if let Some(idx) = self.guide_drag {
                     if let Some((u, v)) = self.viewport_uv(position.x, position.y) {
-                        if let Some(g) = self.guides.get_mut(idx) {
-                            g[0] = if g[1] >= 0.5 { v } else { u }.clamp(0.0, 1.0);
+                        if let Some(&g) = self.guides.get(idx) {
+                            let horizontal = g[1] >= 0.5;
+                            let raw = if horizontal { v } else { u };
+                            let coord = if self.modifiers.control_key() {
+                                self.snap_guide_coord(raw, horizontal)
+                            } else {
+                                raw
+                            };
+                            if let Some(g) = self.guides.get_mut(idx) {
+                                g[0] = coord.clamp(0.0, 1.0);
+                            }
                         }
                     }
                 }

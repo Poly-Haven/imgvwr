@@ -244,6 +244,27 @@ fn pano_screen_uv(p: &PanoProj, screen: egui::Rect, pt: egui::Pos2) -> (f32, f32
     (1.0 - (lon / TAU + 0.5), 0.5 - lat / PI)
 }
 
+/// Ctrl+drag guide-coordinate snapping for a NEW guide spawned out of a ruler:
+/// nearest whole degree in panorama, nearest 10 displayed px in 2D. Mirrors
+/// `App::snap_guide_coord` (same formulas, `RulerInfo` instead of App fields).
+fn snap_guide_coord(coord: f32, horizontal: bool, r: &RulerInfo) -> f32 {
+    if r.pano.is_some() {
+        if horizontal {
+            let lat = (0.5 - coord) * 180.0;
+            0.5 - lat.round() / 180.0
+        } else {
+            (coord * 360.0).round() / 360.0
+        }
+    } else {
+        let dim = if horizontal { r.img_h } else { r.img_w };
+        if dim <= 0.0 {
+            return coord;
+        }
+        (coord * dim / 10.0).round() * 10.0 / dim
+    }
+    .clamp(0.0, 1.0)
+}
+
 /// Spawn-and-drag a NEW guide pulled out of a ruler, shared by both rulers.
 /// `horizontal` is the new guide's orientation; `guides_len` is the current guide
 /// count (the index the spawned guide will occupy). The spawned index is captured
@@ -265,7 +286,7 @@ fn ruler_spawn_drag(
     let coord_at = |pt: egui::Pos2| {
         // Pano: the spawned coord is the cursor's latitude (horizontal guide) or
         // longitude (vertical guide); 2D: the linear uv mapping.
-        if let Some(p) = r.pano {
+        let raw = if let Some(p) = r.pano {
             let (u, v) = pano_screen_uv(&p, screen, pt);
             if horizontal {
                 v
@@ -276,6 +297,13 @@ fn ruler_spawn_drag(
             y_to_guide_v(r, screen, pt.y)
         } else {
             x_to_guide_u(r, screen, pt.x)
+        };
+        // Ctrl snaps a NEW guide the same way a drag on an existing one does (10
+        // displayed px in 2D, a whole degree in pano) — see `App::snap_guide_coord`.
+        if ctx.input(|i| i.modifiers.ctrl) {
+            snap_guide_coord(raw, horizontal, r)
+        } else {
+            raw
         }
     };
     if resp.drag_started() {
@@ -2122,9 +2150,12 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("S", "Sharpness (original res)"),
                 ("C", "Clipping overlay (per channel)"),
                 ("Alt + middle-drag", "Squash / stretch image"),
-                ("G", "Add guide level (½, ¼ … 1/32)"),
+                ("G", "Show / hide guides (adds the first one)"),
+                ("Shift + G", "Add guide level (½, ¼ … 1/32)"),
+                ("Ctrl + G", "Remove guide level"),
                 ("Pull from a ruler", "Drag out a guide"),
                 ("Drag / right-click guide", "Move / delete it"),
+                ("Ctrl + drag guide", "Snap to 10px / 1°"),
                 ("Right-click + hold-drag", "Pick pixel colour values"),
                 ("Channel boxes (F2)", "Isolate R/G/B/A"),
             ],

@@ -107,9 +107,12 @@ This is the standard in VFX and digital content creation. Using the same system 
 |---|---|
 | `S` | Sharpness checker — `\|original − blurred\|`, amplifiable by exposure |
 | `C` | Clipping overlay — animated diagonal stripes over regions at/near the format max, judged on the **original** data (pre-adjustment); per channel (red stripes = red clipped, white = all three), margin configurable in Settings |
-| `G` | Add the next guide *level* — density doubles each press (½, then ¼, ⅛ … down to 1/32 on each axis) |
+| `G` | Show / hide the existing guides without touching them; adds the first one if there are none yet |
+| `Shift+G` | Add the next guide *level* — density doubles each press (½, then ¼, ⅛ … down to 1/32 on each axis). In panorama, completing the first vertical level (180°) also drops its 0° partner so the pair bisects the sphere |
+| `Ctrl+G` | Remove one guide level (undoes a `Shift+G` step) — aware of guides added/moved/removed by hand; falls back to clearing everything once no clean level remains |
 | Pull from a ruler | Drag a guide out of a ruler — left ruler → vertical, bottom ruler → horizontal (2D pixels or panorama degrees) |
 | Drag / right-click a guide | Grab a guide to move it, or delete it (drag off the image, or right-click) — 2D and panorama |
+| `Ctrl` + drag a guide | Snap it to 10px increments (2D) or whole degrees (panorama), whether moving an existing guide or pulling a new one out of a ruler |
 | `Alt` + middle-drag | Squash / stretch the image non-uniformly, unbounded (line straightness) |
 | Channel boxes (`F2`) | Click to isolate R / G / B / A as greyscale |
 | Guides list (`F2`) | Shows each guide (`V 425px` / `H 312px`, plus degrees in panorama); × removes; `Ctrl+R` resets all |

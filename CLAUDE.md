@@ -85,6 +85,18 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   1×1 `glReadPixels`, and why the F2 histogram renders the image flat into an offscreen target
   through the same fragment program and bins it with a GL 4.3 compute shader. Don't reach for a
   `cpu_processor` — there isn't one.
+- **Bar charts narrower than a pixel drop bars.** The F2 histogram has 256 bins in ~205 points, so
+  a per-bin quad is ~0.8px wide; `Shape::mesh` goes straight to the GPU with no anti-aliasing, and
+  a quad containing no pixel *centre* rasterises to nothing. Contiguous columns still leave no
+  blank pixels, which is why a smooth distribution looks fine — but an isolated spike silently
+  vanishes (a flat-colour test image lost exactly one of its three channel spikes). Draw one column
+  per device pixel taking the **max** of the bins that map to it, and snap any lone 1px bar (the
+  over-range spike) to a whole pixel.
+- **Don't use `ui.available_width()` inside the metadata box.** It's an auto-sizing `egui::Area`,
+  so available width reflects how wide the box already is; padding it out feeds straight back into
+  the box's width and balloons it every frame (the histogram header did this — a 208pt graph in a
+  600pt box). Lay out against a width you computed yourself, e.g.
+  `allocate_ui_with_layout(vec2(known_w, h), Layout::right_to_left(..))`.
 - **The histogram pass must point-sample, and must see identity levels.** It sets
   `RenderParams::point_sample` (plain `GL_NEAREST`, *not* the I key's `NEAREST_MIPMAP_NEAREST`,
   which still picks a pre-averaged mip and would smooth away the clipped highlights the graph

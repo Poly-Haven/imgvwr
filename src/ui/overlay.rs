@@ -2064,6 +2064,12 @@ const LEVELS_STRIP_H: f32 = 11.0;
 /// handles beneath it. Drawn full width under the metadata grid; `width` is the
 /// grid's measured width so the two line up. Greyscale images draw a single
 /// neutral curve, matching how [`channel_boxes`] collapses L / LA.
+///
+/// The plate and the handles are drawn whether or not a measurement has landed
+/// yet. A measurement takes a frame or two to come back (and never arrives at
+/// all on a driver without compute support), and letting the widget vanish in
+/// the meantime would both pop the box's height on every image change and take
+/// the levels control away with it — the handles are useful regardless.
 fn histogram_plot(
     ui: &mut egui::Ui,
     inputs: &UiInputs,
@@ -2071,30 +2077,31 @@ fn histogram_plot(
     actions: &mut Vec<UiAction>,
     width: f32,
 ) {
-    let Some(hist) = &inputs.histogram else {
-        return;
-    };
+    let plot_w = width.max(HIST_MIN_W);
 
-    // Header: label on the left, the three scale selectors pushed right.
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new("Histogram").color(egui::Color32::from_gray(150)),
-            )
-            .selectable(false),
-        );
-        // Push the selectors to the right edge of the row. Clamped because a
-        // narrow box can leave less room than the buttons need.
-        ui.add_space((ui.available_width() - hist_scale_row_width(ui)).max(0.0));
-        for scale in crate::prefs::HistogramScale::ALL {
-            hist_scale_button(ui, inputs, actions, scale);
-        }
-    });
-
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width.max(HIST_MIN_W), HIST_H),
-        egui::Sense::hover(),
+    // Header: label on the left, the three scale selectors against the right
+    // edge of the plot. Laid out right-to-left inside a rect of exactly the
+    // plot's width — NOT by padding out `available_width`, which inside an
+    // auto-sizing Area is however wide the box already is and so feeds straight
+    // back into the box's width, ballooning it a little further every frame.
+    ui.allocate_ui_with_layout(
+        egui::vec2(plot_w, 16.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            // Reversed, because right-to-left places the first item rightmost.
+            for scale in crate::prefs::HistogramScale::ALL.iter().rev() {
+                hist_scale_button(ui, inputs, actions, *scale);
+            }
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("Histogram").color(egui::Color32::from_gray(150)),
+                )
+                .selectable(false),
+            );
+        },
     );
+
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(plot_w, HIST_H), egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, egui::CornerRadius::same(3), hist_plate());
 
@@ -2102,7 +2109,6 @@ fn histogram_plot(
     // samples the screen can only show as full white. Dropping exposure pulls
     // them back into range and the spike shrinks away.
     let bins = crate::renderer::HISTOGRAM_BINS;
-    let peak = hist.peak();
     let greyscale = inputs.channel_count <= 2;
     let palette: [egui::Color32; 3] = if greyscale {
         [egui::Color32::from_gray(190); 3]
@@ -2121,30 +2127,50 @@ fn histogram_plot(
         rect.min + egui::vec2(1.0, 1.0),
         rect.max - egui::vec2(spike_w + 2.0, 1.0),
     );
-    let col_w = plot.width() / bins as f32;
+    // One column per *device pixel*, not per bin. The plot is normally narrower
+    // than 256 points, and a quad thinner than a pixel that happens to fall
+    // between two pixel centres rasterises to nothing at all — silently dropping
+    // whole bins. A broad distribution hides that (its neighbours fill in), but
+    // an isolated spike just vanishes, and isolated spikes are exactly what this
+    // graph is worth reading for. Each pixel takes the *tallest* bin that lands
+    // on it, so a lone spike survives rather than being averaged into invisibility.
+    let cols = (plot.width().round() as usize).max(1);
+    let col_w = plot.width() / cols as f32;
 
-    let mut mesh = egui::Mesh::default();
-    for i in 0..bins {
-        let x0 = plot.left() + i as f32 * col_w;
-        let heights: Vec<f32> = (0..active)
-            .map(|c| inputs.histogram_scale.normalise(hist.bins[c][i], peak))
+    if let Some(hist) = &inputs.histogram {
+        let peak = hist.peak();
+        let mut mesh = egui::Mesh::default();
+        for p in 0..cols {
+            let lo = p * bins / cols;
+            let hi = ((p + 1) * bins / cols).max(lo + 1).min(bins);
+            let x0 = plot.left() + p as f32 * col_w;
+            let heights: Vec<f32> = (0..active)
+                .map(|c| {
+                    let tallest = hist.bins[c][lo..hi].iter().copied().max().unwrap_or(0);
+                    inputs.histogram_scale.normalise(tallest, peak)
+                })
+                .collect();
+            hist_column(&mut mesh, x0, x0 + col_w, plot, &heights, &palette);
+        }
+        // The spike shares the bins' normalisation, so it reads on the same
+        // scale; an over-range population larger than the tallest bin saturates.
+        let spike: Vec<f32> = (0..active)
+            .map(|c| inputs.histogram_scale.normalise(hist.over[c], peak).min(1.0))
             .collect();
-        hist_column(&mut mesh, x0, x0 + col_w, plot, &heights, &palette);
+        // Snapped to whole pixels for the same reason as the columns above: a
+        // 1px bar straddling a pixel boundary can rasterise to nothing, and this
+        // is the one bar that has no neighbours to cover for it.
+        let spike_x = (plot.right() + 1.0).round();
+        hist_column(
+            &mut mesh,
+            spike_x,
+            spike_x + spike_w,
+            plot,
+            &spike,
+            &palette,
+        );
+        painter.add(egui::Shape::mesh(mesh));
     }
-    // The spike shares the bins' normalisation, so it reads on the same scale;
-    // an over-range population larger than the tallest bin simply saturates.
-    let spike: Vec<f32> = (0..active)
-        .map(|c| inputs.histogram_scale.normalise(hist.over[c], peak).min(1.0))
-        .collect();
-    hist_column(
-        &mut mesh,
-        plot.right() + 1.0,
-        plot.right() + 1.0 + spike_w,
-        plot,
-        &spike,
-        &palette,
-    );
-    painter.add(egui::Shape::mesh(mesh));
 
     // Where the two levels cuts fall on the graph, so the handles below read as
     // positions on this data rather than as an unrelated pair of sliders.
@@ -2302,16 +2328,7 @@ fn hist_column(
     }
 }
 
-/// Width the three scale selectors occupy, so the header can right-align them.
-fn hist_scale_row_width(ui: &egui::Ui) -> f32 {
-    let spacing = ui.spacing().item_spacing.x;
-    crate::prefs::HistogramScale::ALL
-        .iter()
-        .map(|s| hist_scale_button_width(ui, *s) + spacing)
-        .sum::<f32>()
-        - spacing
-}
-
+/// Allocation width of one scale selector: its label plus a little padding.
 fn hist_scale_button_width(ui: &egui::Ui, scale: crate::prefs::HistogramScale) -> f32 {
     let galley = ui.painter().layout_no_wrap(
         scale.label().to_string(),

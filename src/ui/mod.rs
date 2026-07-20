@@ -70,6 +70,9 @@ pub struct UiInputs {
     pub histogram_scale: crate::prefs::HistogramScale,
     /// How many pixels that graph samples (the Settings picker).
     pub histogram_samples: u32,
+    /// Whether the graph measures the visible region instead of the whole image
+    /// (the eye toggle).
+    pub histogram_viewport: bool,
     /// Display black/white points as `(black, white)` in the histogram's own
     /// 0..1 axis — the positions of the two handles under the graph.
     pub levels: (f32, f32),
@@ -432,6 +435,8 @@ pub enum UiAction {
     SetHistogramScale(crate::prefs::HistogramScale),
     /// Set how many pixels the histogram samples.
     SetHistogramSamples(u32),
+    /// Measure the histogram from the visible region instead of the whole image.
+    SetHistogramViewport(bool),
     /// Set the display black/white points (dragged on the histogram's handles).
     SetLevels {
         black: f32,

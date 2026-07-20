@@ -17,6 +17,7 @@
 //! to the input tool), so a set of `IMGVWR_DEBUG_*` env overrides apply a camera
 //! / exposure state right after load so the visual outcome can be captured:
 //!   * `IMGVWR_DEBUG_EXPOSURE` / `_GAMMA` / `_LEVELS` (`black,white`)
+//!   * `IMGVWR_DEBUG_HIST_VIEWPORT` = `1` (histogram samples the visible region)
 //!   * `IMGVWR_DEBUG_YAW` / `_PITCH` / `_FOV` (panorama, degrees)
 //!   * `IMGVWR_DEBUG_ZOOM` (2D)
 //!   * `IMGVWR_DEBUG_PROJECTION` = `pano` | `flat`
@@ -359,6 +360,21 @@ struct HistogramKey {
     /// The sample budget sizes the measurement grid, so changing it in Settings
     /// re-measures rather than waiting for the next unrelated change.
     samples: u32,
+    /// Set only in viewport-sampling mode, where the graph describes the current
+    /// framing and so has to re-measure whenever that framing moves. `None` in
+    /// whole-image mode, which is framing-independent by construction.
+    view: Option<ViewSig>,
+}
+
+/// Everything that changes which pixels the viewport shows.
+#[derive(Clone, Copy, PartialEq)]
+struct ViewSig {
+    yaw: f32,
+    pitch: f32,
+    zoom: f32,
+    projection: i32,
+    rotation: i32,
+    viewport: (i32, i32),
 }
 
 /// The navigation minimap panel rectangle in physical pixels (top-left origin),
@@ -441,6 +457,10 @@ pub struct App {
     histogram: Option<Arc<crate::renderer::Histogram>>,
     /// The display state `histogram` describes, so a change can be spotted.
     histogram_key: Option<HistogramKey>,
+    /// Measure the histogram from the visible region rather than the whole
+    /// image (the eye toggle in the F2 box) — zoom in for a focused reading.
+    /// Session-only, like the other inspection toggles.
+    histogram_viewport: bool,
     /// Bumped by anything *other than* the eased tone values that changes the
     /// displayed pixels: a new image, a new animation frame, a different OCIO
     /// view. Cheaper than re-deriving all of that into [`HistogramKey`].
@@ -750,6 +770,7 @@ impl App {
             clip_mask_dirty: true,
             histogram: None,
             histogram_key: None,
+            histogram_viewport: false,
             histogram_epoch: 0,
             adjust_repeat_until: None,
             settings_was_open: false,
@@ -4476,6 +4497,9 @@ impl App {
             self.exposure = v;
             self.exposure_target = v;
         }
+        if std::env::var_os("IMGVWR_DEBUG_HIST_VIEWPORT").is_some() {
+            self.histogram_viewport = true;
+        }
         // `IMGVWR_DEBUG_LEVELS=black,white` — the F2 handles, headlessly.
         if let Some((b, w)) = std::env::var("IMGVWR_DEBUG_LEVELS").ok().and_then(|s| {
             let (b, w) = s.split_once(',')?;
@@ -4725,6 +4749,7 @@ impl App {
             histogram: self.histogram.clone(),
             histogram_scale: self.prefs.histogram_scale,
             histogram_samples: self.prefs.histogram_samples,
+            histogram_viewport: self.histogram_viewport,
             levels: (self.levels_black, self.levels_white),
             show_help: self.ui_state.show_help || forced == Some("help"),
             toast: self.toast_render(),
@@ -5090,6 +5115,12 @@ impl App {
                 self.set_levels(black, white);
                 self.request_redraw();
             }
+            UiAction::SetHistogramViewport(on) => {
+                // Session-only: an inspection mode, not a preference. The key's
+                // `view` field flips with it, so the graph re-measures at once.
+                self.histogram_viewport = on;
+                self.request_redraw();
+            }
             UiAction::SetHistogramSamples(n) => {
                 // In the key, so the graph re-measures at the new budget instead
                 // of waiting for the next unrelated change.
@@ -5425,24 +5456,60 @@ impl App {
         // raw (unrotated) dimensions, which is what sizes the sample grid; a
         // rotation permutes pixels but cannot change their values.
         let histogram_samples = self.prefs.histogram_samples;
+        let viewport_px = self.gfx.as_ref().map(|g| {
+            let s = g.window.inner_size();
+            (s.width.max(1) as i32, s.height.max(1) as i32)
+        });
         let histogram_now = HistogramKey {
             epoch: self.histogram_epoch,
             exposure: self.exposure,
             gamma: self.gamma,
             isolate: self.isolate_channel,
             samples: histogram_samples,
+            view: (self.histogram_viewport && viewport_px.is_some()).then(|| {
+                let c = self.camera.camera;
+                ViewSig {
+                    yaw: c.yaw(),
+                    pitch: c.pitch(),
+                    zoom: c.tan_half_fov(),
+                    projection: c.projection_mode(),
+                    rotation: self.rotation as i32,
+                    viewport: viewport_px.unwrap_or((1, 1)),
+                }
+            }),
         };
         // The key a measurement is currently in flight for, kept so a result that
         // lands after the image changed can be recognised and thrown away.
         let histogram_inflight = self.histogram_key;
-        let histogram_want = if self.metadata_slide > 0.001 {
-            self.current_image
-                .as_ref()
-                .filter(|_| self.histogram_key != Some(histogram_now))
-                .map(|img| (histogram_now, img.width as i32, img.height as i32))
-        } else {
-            None
-        };
+        let histogram_want =
+            if self.metadata_slide > 0.001 && self.histogram_key != Some(histogram_now) {
+                // Viewport mode measures whatever the window is currently showing;
+                // whole-image mode measures the raw (unrotated) pixel grid, since a
+                // rotation permutes pixels but cannot change their values.
+                match (
+                    self.histogram_viewport,
+                    viewport_px,
+                    self.current_image.as_ref(),
+                ) {
+                    (true, Some((w, h)), Some(_)) => Some((
+                        histogram_now,
+                        crate::renderer::HistogramSource::Viewport {
+                            width: w,
+                            height: h,
+                        },
+                    )),
+                    (false, _, Some(img)) => Some((
+                        histogram_now,
+                        crate::renderer::HistogramSource::WholeImage {
+                            width: img.width as i32,
+                            height: img.height as i32,
+                        },
+                    )),
+                    _ => None,
+                }
+            } else {
+                None
+            };
 
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();
@@ -5560,10 +5627,10 @@ impl App {
             // has gone stale. Done before the scene draw because the pass binds
             // its own framebuffer and viewport; `render` re-binds both anyway.
             new_histogram = gfx.renderer.poll_histogram();
-            if let Some((key, iw, ih)) = histogram_want {
+            if let Some((key, source)) = histogram_want {
                 if gfx
                     .renderer
-                    .update_histogram(&base, iw, ih, histogram_samples)
+                    .update_histogram(&base, source, histogram_samples)
                 {
                     histogram_measured = Some(key);
                 }

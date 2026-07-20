@@ -53,8 +53,10 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   env vars (debug builds only) force state — e.g. `IMGVWR_DEBUG_ZOOM`, `IMGVWR_DEBUG_EXPOSURE`,
   `IMGVWR_DEBUG_PROJECTION=pano`, `IMGVWR_DEBUG_OVERLAY=settings|metadata|error|loading|hint|help`,
   `IMGVWR_DEBUG_BG=black|checker|white|user`,
-  `IMGVWR_DEBUG_LEVELS=black,white`. `RUST_LOG=debug` also dumps each landed histogram as a
-  16-bucket digest, which is the only way to check the *numbers* rather than the picture.
+  `IMGVWR_DEBUG_LEVELS=black,white`, `IMGVWR_DEBUG_HIST_VIEWPORT=1`. `RUST_LOG=debug` also dumps
+  each landed histogram as a 16-bucket digest, which is the only way to check the *numbers* rather
+  than the picture — and the digest is what proves e.g. that viewport-mode sampling really tracks
+  the zoom (`_ZOOM=4` on a full-range ramp collapses it to the middle quarter).
 - **Panorama sampling must use `sample_image_grad`, never plain `sample_image`.** The grad variant
   applies seam-corrected derivatives; plain sampling produces a mip-LOD seam at the longitude wrap.
 - **Every GL pass drawn after the scene but before `egui.paint` must set its own `blend_func`.**

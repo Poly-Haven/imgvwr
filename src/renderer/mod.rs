@@ -44,6 +44,27 @@ const CLIP_MASK_UNIT: u32 = 13;
 /// fragment shader.
 pub const MAX_GUIDES: usize = 64;
 
+/// What the display histogram measures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistogramSource {
+    /// The whole image, drawn flat — a uniform stride subsample of every pixel,
+    /// independent of where the view happens to be pointed.
+    WholeImage { width: i32, height: i32 },
+    /// Only what the current view shows, at the live camera and projection, so
+    /// zooming in gives a histogram of just that region.
+    Viewport { width: i32, height: i32 },
+}
+
+impl HistogramSource {
+    fn dims(self) -> (i32, i32) {
+        match self {
+            Self::WholeImage { width, height } | Self::Viewport { width, height } => {
+                (width, height)
+            }
+        }
+    }
+}
+
 /// Per-frame uniform values supplied by the application.
 #[derive(Clone, Copy, Debug)]
 pub struct RenderParams {
@@ -862,15 +883,17 @@ impl Renderer {
         self.histogram.as_ref().is_some_and(|p| p.is_pending())
     }
 
-    /// Re-measure the display histogram (see [`histogram`]). The whole image is
-    /// drawn flat into a small offscreen target through the live display
-    /// pipeline, then binned by a compute shader.
+    /// Re-measure the display histogram (see [`histogram`]) from `source`, drawn
+    /// into a small offscreen target through the live display pipeline and then
+    /// binned by a compute shader.
     ///
     /// `params` supplies the tone state — exposure, gamma, and whatever the OCIO
-    /// program is currently doing. Everything about the *view* (pan, zoom,
-    /// rotation, stretch, guides, overlays, clarity) is overridden here: the
-    /// graph describes the image, not how it happens to be framed right now.
-    /// `image_w`/`image_h` are the raw, unrotated pixel dimensions.
+    /// program is currently doing. What happens to the *view* depends on the
+    /// source: [`HistogramSource::WholeImage`] overrides pan, zoom, rotation and
+    /// stretch to frame the whole image flat, while
+    /// [`HistogramSource::Viewport`] keeps them exactly as drawn so the graph
+    /// covers only what's on screen. Guides, overlays and clarity are off either
+    /// way — they would all bin themselves.
     ///
     /// A no-op while an upload is in flight, while a previous measurement is
     /// still pending, or when there is no image.
@@ -880,15 +903,15 @@ impl Renderer {
     pub fn update_histogram(
         &mut self,
         params: &RenderParams,
-        image_w: i32,
-        image_h: i32,
+        source: HistogramSource,
         samples: u32,
     ) -> bool {
         if self.image.is_none() || self.upload.is_some() {
             return false;
         }
         let gl = self.gl.clone();
-        let (gw, gh) = HistogramPass::grid_size(image_w, image_h, samples, self.max_texture_size);
+        let (sw, sh) = source.dims();
+        let (gw, gh) = HistogramPass::grid_size(sw, sh, samples, self.max_texture_size);
         match &mut self.histogram {
             Some(pass) if !pass.is_pending() => {
                 if unsafe { pass.begin(&gl, gw, gh) }.is_none() {
@@ -903,21 +926,6 @@ impl Renderer {
             // so it must describe the image *entering* the adjustment — measuring
             // the levelled result would make the histogram chase its own handles.
             levels: [0.0, 1.0],
-            // A fit-the-whole-image 2D view: pan 0 and tan_half_fov 1 make the
-            // quad map exactly onto image uv 0..1 (the same framing convention
-            // `render_minimap` documents).
-            projection_mode: 1,
-            yaw: 0.0,
-            pitch: 0.0,
-            tan_half_fov: 1.0,
-            rotation: 0,
-            stretch: [1.0, 1.0],
-            // An integer grid can only approximate the image's aspect ratio,
-            // which leaves the outermost samples a fraction of a texel outside
-            // 0..1. `wrap_2d` takes the shader's transparent-black out-of-bounds
-            // branch off the table, so that rounding cannot fabricate a spike of
-            // black pixels in bin 0.
-            wrap_2d: true,
             point_sample: true,
             // Channel isolation is deliberately *kept*: when a single channel is
             // on screen as greyscale, that is what the graph should describe. The
@@ -935,6 +943,31 @@ impl Renderer {
             clarity_amount: 0.0,
             global_alpha: 1.0,
             ..*params
+        };
+        let hist_params = match source {
+            // Fit the whole image flat: pan 0 and tan_half_fov 1 map the quad
+            // exactly onto image uv 0..1 (the framing convention
+            // `render_minimap` documents).
+            HistogramSource::WholeImage { .. } => RenderParams {
+                projection_mode: 1,
+                yaw: 0.0,
+                pitch: 0.0,
+                tan_half_fov: 1.0,
+                rotation: 0,
+                stretch: [1.0, 1.0],
+                // An integer grid can only approximate the image's aspect ratio,
+                // leaving the outermost samples a fraction of a texel outside
+                // 0..1. `wrap_2d` takes the shader's transparent-black
+                // out-of-bounds branch off the table, so that rounding cannot
+                // fabricate a spike of black pixels in bin 0.
+                wrap_2d: true,
+                ..hist_params
+            },
+            // Keep the camera, projection, rotation, stretch and wrap exactly as
+            // drawn, so the graph covers what is actually on screen. The shader's
+            // out-of-bounds branch returns transparent and the compute pass skips
+            // transparent texels, so letterboxing excludes itself for free.
+            HistogramSource::Viewport { .. } => hist_params,
         };
         self.draw_quad(&hist_params, 0, 0, gw, gh);
         match &mut self.histogram {

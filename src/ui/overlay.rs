@@ -2113,7 +2113,14 @@ fn histogram_plot(
         egui::vec2(plot_w, 16.0),
         egui::Layout::right_to_left(egui::Align::Center),
         |ui| {
-            // Reversed, because right-to-left places the first item rightmost.
+            // Right-to-left, so the first item added is the rightmost: the eye
+            // toggle sits alone on the right, then a gap, then the three scale
+            // selectors grouped tightly together (they're one control; the eye
+            // is a different one and shouldn't read as a fourth option).
+            hist_viewport_button(ui, inputs, actions);
+            ui.add_space(6.0);
+            ui.spacing_mut().item_spacing.x = 2.0;
+            // Reversed, so they read L / Sq / Log left-to-right.
             for scale in crate::prefs::HistogramScale::ALL.iter().rev() {
                 hist_scale_button(ui, inputs, actions, *scale);
             }
@@ -2424,6 +2431,39 @@ fn hist_column(
             mesh.add_triangle(idx, idx + 2, idx + 3);
         }
         low = high;
+    }
+}
+
+/// The viewport-sampling toggle: measure only the visible region instead of the
+/// whole image, so zooming in gives a reading of just that area.
+fn hist_viewport_button(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
+    let on = inputs.histogram_viewport;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 14.0), egui::Sense::click());
+    let radius = egui::CornerRadius::same(2);
+    if on {
+        ui.painter().rect_filled(rect, radius, ACCENT);
+    } else if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, radius, egui::Color32::from_white_alpha(24));
+    }
+    // Square, so the 16×16 glyph isn't stretched by the wider button.
+    let icon = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(11.0));
+    egui::Image::new(egui::include_image!("../../resources/icons/ui/eye.svg"))
+        .tint(if on {
+            egui::Color32::from_gray(20)
+        } else {
+            egui::Color32::from_gray(170)
+        })
+        .paint_at(ui, icon);
+    if clickable(resp)
+        .on_hover_text(if on {
+            "Sampling the visible region — click for the whole image"
+        } else {
+            "Sample only the visible region (zoom in for a focused histogram)"
+        })
+        .clicked()
+    {
+        actions.push(UiAction::SetHistogramViewport(!on));
     }
 }
 
@@ -2755,7 +2795,10 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("Ctrl + drag guide", "Snap to 10px / 1°"),
                 ("Right-click + hold-drag", "Pick pixel colour values"),
                 ("Channel boxes (F2)", "Isolate R/G/B/A"),
-                ("Histogram (F2)", "Displayed levels; L/Sq/Log scale"),
+                (
+                    "Histogram (F2)",
+                    "L/Sq/Log scale; eye = visible region only",
+                ),
                 ("Levels handles (F2)", "Drag to set black / white point"),
             ],
         ),

@@ -2092,12 +2092,18 @@ fn histogram_plot(
             for scale in crate::prefs::HistogramScale::ALL.iter().rev() {
                 hist_scale_button(ui, inputs, actions, *scale);
             }
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new("Histogram").color(egui::Color32::from_gray(150)),
-                )
-                .selectable(false),
-            );
+            // The label goes in whatever space is left, laid out left-to-right so
+            // it sits at the plot's left edge like the grid labels above it —
+            // adding it directly to the right-to-left layout would park it right
+            // next to the buttons instead.
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Histogram").color(egui::Color32::from_gray(150)),
+                    )
+                    .selectable(false),
+                );
+            });
         },
     );
 
@@ -2237,7 +2243,11 @@ fn levels_handles(
     // Which handle a gesture owns is decided once, at the start, and held for the
     // rest of it — otherwise dragging one past the other would silently hand the
     // gesture to its neighbour halfway through.
-    if resp.drag_started() || resp.clicked() {
+    //
+    // Drag only: a bare click deliberately does nothing. Jumping the nearest
+    // handle on click would make two deliberate positioning clicks in quick
+    // succession read as a double-click and wipe the adjustment instead.
+    if resp.drag_started() {
         if let Some(t) = pointer_t {
             state.levels_drag = Some((t - white).abs() < (t - black).abs());
         }
@@ -2245,8 +2255,17 @@ fn levels_handles(
     if let (Some(is_white), Some(t)) = (state.levels_drag, pointer_t) {
         // `drag_stopped` included so the release frame's final position lands —
         // without it the last few pixels of a fast drag are dropped.
-        if resp.dragged() || resp.drag_stopped() || resp.clicked() {
-            let (black, white) = if is_white { (black, t) } else { (t, white) };
+        if resp.dragged() || resp.drag_stopped() {
+            // The handle being dragged stops against its neighbour rather than
+            // shoving it along: pushing black through white would otherwise
+            // carry the white point with it, and dragging back would leave it
+            // where it was shoved to, silently destroying a value the user set.
+            let gap = crate::app::LEVELS_MIN_GAP;
+            let (black, white) = if is_white {
+                (black, t.max(black + gap))
+            } else {
+                (t.min(white - gap), white)
+            };
             actions.push(UiAction::SetLevels { black, white });
         }
         ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
@@ -2254,8 +2273,7 @@ fn levels_handles(
     if !resp.dragged() && !resp.is_pointer_button_down_on() {
         state.levels_drag = None;
     }
-    // Double-click anywhere on the strip clears the adjustment. Queued after the
-    // click's own move, and actions apply in order, so the reset wins.
+    // Double-click anywhere on the strip clears the adjustment.
     if resp.double_clicked() {
         actions.push(UiAction::SetLevels {
             black: 0.0,

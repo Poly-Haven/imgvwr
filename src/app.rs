@@ -294,7 +294,9 @@ const UNDO_LIMIT: usize = 256;
 
 /// Closest the display black and white points may get. Small enough to allow a
 /// hard threshold, large enough that the shader's contrast stretch stays finite.
-const LEVELS_MIN_GAP: f32 = 0.005;
+/// The histogram's handles clamp the handle being dragged against this too, so
+/// pushing one into the other stops it instead of shoving its neighbour along.
+pub(crate) const LEVELS_MIN_GAP: f32 = 0.005;
 
 /// A snapshot of the undoable editing state: guides, image adjustments and toggle
 /// modes. Navigation / positioning (pan, zoom, look, projection) and the per-image
@@ -2356,6 +2358,10 @@ impl App {
     /// [`LEVELS_MIN_GAP`] apart. Both handles live on the histogram's own x axis,
     /// so the 0..1 bound is what keeps them addressable by the graph they sit
     /// under; the gap stops the two crossing into a divide-by-nothing.
+    ///
+    /// This is the backstop for every caller (undo, debug override, reset). The
+    /// drag handles clamp the moving end themselves so a live drag stops against
+    /// its neighbour rather than pushing it, which is what this would do.
     fn set_levels(&mut self, black: f32, white: f32) {
         let black = black.clamp(0.0, 1.0 - LEVELS_MIN_GAP);
         let white = white.clamp(black + LEVELS_MIN_GAP, 1.0);

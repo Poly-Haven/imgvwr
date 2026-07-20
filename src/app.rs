@@ -1090,9 +1090,6 @@ impl App {
         // restore (winit keeps WS_CAPTION for Aero-snap and repaints it via
         // DefWindowProc on WM_NCACTIVATE — the old-style titlebar flash).
         suppress_nonclient_frame(&window);
-        // Restore the standard Aero drop shadow (+ Windows 10/11's thin 1px
-        // border) that a borderless window otherwise loses.
-        extend_dwm_shadow(&window);
 
         Ok(Gfx {
             gl,
@@ -6755,44 +6752,6 @@ fn disable_dwm_decorations(window: &Window) {
 
 #[cfg(not(windows))]
 fn disable_dwm_decorations(_window: &Window) {}
-
-/// Restore the native Aero drop shadow (and, on Windows 10/11, the thin 1px
-/// accent border) around the borderless window. A window with no non-client
-/// area — which is exactly what `WM_NCCALCSIZE` makes this one, to erase the
-/// legacy caption/border — loses DWM's shadow calculation along with it;
-/// extending a sliver of "frame" back into the client area is the standard
-/// trick (used by most custom-chrome apps) that gets it back without
-/// reintroducing any visible border of our own. Independent of
-/// `disable_dwm_decorations`'s `DWMWA_NCRENDERING_POLICY` call and the
-/// `WM_NCACTIVATE`/`WM_NCPAINT` suppression in `suppress_nonclient_frame` — this
-/// only feeds DWM's shadow geometry, it doesn't touch non-client painting.
-#[cfg(windows)]
-fn extend_dwm_shadow(window: &Window) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
-    use windows_sys::Win32::UI::Controls::MARGINS;
-
-    let Ok(handle) = window.window_handle() else {
-        return;
-    };
-    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-        return;
-    };
-    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
-    let margins = MARGINS {
-        cxLeftWidth: 1,
-        cxRightWidth: 1,
-        cyTopHeight: 1,
-        cyBottomHeight: 1,
-    };
-    // SAFETY: `hwnd` is a live top-level window; `margins` is a valid MARGINS.
-    unsafe {
-        DwmExtendFrameIntoClientArea(hwnd, &margins);
-    }
-}
-
-#[cfg(not(windows))]
-fn extend_dwm_shadow(_window: &Window) {}
 
 /// Subclass the window proc to stop the classic GDI non-client frame from being
 /// painted on focus change and restore-from-minimize.

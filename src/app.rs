@@ -28,6 +28,7 @@
 //!   * `IMGVWR_DEBUG_GUIDE_CMD` = comma-separated `g`|`shift`|`ctrl` (replays a
 //!     sequence of G / Shift+G / Ctrl+G presses; applied after `_PROJECTION`)
 //!   * `IMGVWR_DEBUG_CLIPBOARD_COPY` = `1` (as if Ctrl+C were pressed)
+//!   * `IMGVWR_DEBUG_DELETE_CONFIRM` = `1` (show the Delete-key confirm dialog)
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -2109,6 +2110,43 @@ impl App {
         self.load_path(target);
     }
 
+    /// Delete-key confirmed: remove the current file from disk and step to the
+    /// next image in the folder. The sibling is looked up *before* deleting —
+    /// `sibling_path` scans the live directory listing, which won't contain the
+    /// current file any more once it's gone, so computing it after would always
+    /// report "no more images". Bypasses `navigate()`'s own lookup for the same
+    /// reason; the nav-preload bookkeeping it also does is a minor optimisation
+    /// not worth replicating for a one-shot delete.
+    fn delete_current_file(&mut self) {
+        let Some(path) = self.loaded_path.clone() else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let next = sibling_path(&path, 1);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                log::info!("deleted {}", path.display());
+                match next {
+                    Some(target) => {
+                        self.show_toast(format!("Deleted {name}"));
+                        self.load_path(target);
+                    }
+                    None => {
+                        self.show_toast(format!("Deleted {name} (no more images in folder)"));
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("failed to delete {}: {e}", path.display());
+                self.show_toast(format!("Could not delete {name}: {e}"));
+            }
+        }
+        self.request_redraw();
+    }
+
     /// Cancel an in-flight folder-navigation load and stay on the current image.
     /// Handles both phases: an in-progress GPU upload is abandoned (keeping the
     /// current texture), and a background decode is discarded by bumping the load
@@ -3156,6 +3194,12 @@ impl App {
                 log::info!("metadata overlay -> {}", self.show_metadata);
             }
             (Key::Named(NamedKey::Home), _) => self.reset_view_full(),
+            // Delete: prompt to remove the current file from disk.
+            (Key::Named(NamedKey::Delete), _) => {
+                if self.loaded_path.is_some() {
+                    self.ui_state.confirm_delete = true;
+                }
+            }
             // Backspace: centre + fit the window at the current zoom (keeps scale).
             (Key::Named(NamedKey::Backspace), _) => self.center_and_fit_window(),
             (Key::Named(NamedKey::F11), _) => self.toggle_fullscreen(),
@@ -3167,7 +3211,9 @@ impl App {
             // Space pauses / resumes GIF playback (no-op for static images).
             (Key::Named(NamedKey::Space), _) => self.toggle_animation_pause(),
             (Key::Named(NamedKey::Escape), _) => {
-                if self.ui_state.show_help {
+                if self.ui_state.confirm_delete {
+                    self.ui_state.confirm_delete = false;
+                } else if self.ui_state.show_help {
                     self.ui_state.show_help = false;
                 } else {
                     self.escape_or_exit(event_loop);
@@ -4407,6 +4453,9 @@ impl App {
         if std::env::var_os("IMGVWR_DEBUG_CLIPBOARD_COPY").is_some() {
             self.clipboard_copy_pending = true;
         }
+        if std::env::var_os("IMGVWR_DEBUG_DELETE_CONFIRM").is_some() {
+            self.ui_state.confirm_delete = true;
+        }
         if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
             self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
         }
@@ -4871,6 +4920,7 @@ impl App {
                 self.ui_state.show_help = false;
                 self.request_redraw();
             }
+            UiAction::DeleteCurrentFile => self.delete_current_file(),
             // A flag click keeps the window size so the flags don't reflow.
             UiAction::RecallSlot(i) => self.recall_slot(i + 1, false),
             UiAction::SetDefaultApp => match register_default_app() {

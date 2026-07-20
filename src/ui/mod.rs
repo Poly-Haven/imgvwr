@@ -234,6 +234,8 @@ pub struct UiState {
     pub show_settings: bool,
     /// Whether the "set as default viewer" confirmation is showing.
     pub confirm_default: bool,
+    /// Whether the Delete-key "delete this file?" confirmation is showing.
+    pub confirm_delete: bool,
 }
 
 /// Actions emitted by the UI, processed by `App` after the egui pass.
@@ -247,6 +249,8 @@ pub enum UiAction {
     SetDefaultView(String),
     DismissError,
     CloseHelp,
+    /// Confirmed on the Delete-key dialog: delete the current image file.
+    DeleteCurrentFile,
     /// Recall the comparator slot at this index (0..=8).
     RecallSlot(usize),
     /// Register imgvwr as the default app for supported file types.

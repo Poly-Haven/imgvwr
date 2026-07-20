@@ -56,6 +56,10 @@ pub fn build_overlays(
         help_dialog(ctx, inputs, actions);
     }
 
+    if state.confirm_delete {
+        delete_confirm_dialog(ctx, inputs, state, actions);
+    }
+
     settings_dialog(ctx, inputs, state, actions);
 
     // Bottom-right navigation minimap (border + view box over the GL thumbnail).
@@ -1533,6 +1537,62 @@ fn error_panel(ctx: &egui::Context, inputs: &UiInputs, error: &str, actions: &mu
         });
 }
 
+/// The Delete-key "delete this file?" confirmation — same centred-panel shape as
+/// [`error_panel`], with an explicit Delete / Cancel pair rather than a single
+/// dismiss (a destructive action shouldn't be a single accidental keystroke away).
+fn delete_confirm_dialog(
+    ctx: &egui::Context,
+    inputs: &UiInputs,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+) {
+    egui::Area::new(egui::Id::new("imgvwr_delete_confirm"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            let frame = egui::Frame {
+                fill: egui::Color32::from_rgba_unmultiplied(60, 20, 20, 235),
+                inner_margin: egui::Margin::same(16),
+                corner_radius: egui::CornerRadius::same(8),
+                ..Default::default()
+            };
+            frame.show(ui, |ui| {
+                ui.set_max_width(420.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Delete this file?")
+                            .strong()
+                            .color(egui::Color32::from_rgb(255, 180, 180)),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(&inputs.title).color(egui::Color32::from_gray(220)),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("This permanently removes it from disk.")
+                            .size(12.0)
+                            .color(egui::Color32::from_gray(160)),
+                    );
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        // `horizontal` reports its available (not shrunk-to-content)
+                        // width to the enclosing `vertical_centered`, so without an
+                        // explicit nudge the pair hugs the left edge instead of
+                        // sitting under the centred text above it.
+                        ui.add_space(((ui.available_width() - 130.0) / 2.0).max(0.0));
+                        if clickable(ui.button("Delete")).clicked() {
+                            actions.push(UiAction::DeleteCurrentFile);
+                            state.confirm_delete = false;
+                        }
+                        if clickable(ui.button("Cancel")).clicked() {
+                            state.confirm_delete = false;
+                        }
+                    });
+                });
+            });
+        });
+}
+
 fn hint(ctx: &egui::Context) {
     egui::Area::new(egui::Id::new("imgvwr_hint"))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -2128,6 +2188,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("T", "Standard / last view transform"),
                 ("O", "Open file…"),
                 ("Ctrl + C", "Copy the window to the clipboard"),
+                ("Delete", "Delete the file (confirms first)"),
                 ("← / →", "Previous / next image"),
                 ("Space", "Pause / play animation (GIF/WebP/APNG)"),
                 ("F2", "Metadata overlay"),

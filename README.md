@@ -98,6 +98,7 @@ This is the standard in VFX and digital content creation. Using the same system 
 | `T` | Toggle Standard ↔ the Default View Transform (set in Settings; defaults to Filmic) |
 | `O` | Open file… |
 | `Ctrl + C` | Copy the current window render to the clipboard — the displayed region at the current window size, adjustments and view transform baked in, guides/minimap/other UI included |
+| `Delete` | Prompts, then permanently deletes the current file from disk and steps to the next image in the folder |
 | `←` / `→` | Previous / next image in the folder (alphabetical) |
 | `Space` | Pause / play an animation (GIF / animated WebP / APNG) |
 | `F2` | Toggle metadata overlay (also appears on top-right hover) |

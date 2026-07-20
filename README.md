@@ -135,6 +135,11 @@ This is the standard in VFX and digital content creation. Using the same system 
 | Move cursor to top edge | Show the titlebar (Open, Settings, window controls) — also in fullscreen; dragging it there exits fullscreen and moves the window |
 | Move cursor to bottom edge | Show the adjustment sliders panel (Exposure, Gamma) |
 
+*Settings → Appearance → Titlebar → "Always show"* keeps the titlebar permanently
+revealed instead of auto-hiding. The window also has a native drop shadow and a
+subtle 1px border, restored via the standard `DwmExtendFrameIntoClientArea` trick
+custom-chrome apps use (a borderless window otherwise loses both).
+
 ### Comparator & help
 
 | Input | Action |

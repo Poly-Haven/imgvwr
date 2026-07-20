@@ -66,6 +66,10 @@ pub struct AppPreferences {
     /// VRAM use (a small precision trade-off). Off by default; see Settings.
     #[serde(default)]
     pub half_float_textures: bool,
+    /// Keep the titlebar permanently revealed instead of auto-hiding. Off by
+    /// default; see Settings.
+    #[serde(default)]
+    pub pin_titlebar: bool,
     /// Internal (not user-facing): unix-seconds of the last successful update
     /// check, so the daily check throttles. `0` = never checked.
     #[serde(default)]
@@ -117,6 +121,7 @@ impl Default for AppPreferences {
             guide_color: default_guide_color(),
             clip_margin: default_clip_margin(),
             half_float_textures: false,
+            pin_titlebar: false,
             last_update_check: 0,
             latest_known_version: String::new(),
         }

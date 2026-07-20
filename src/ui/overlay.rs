@@ -912,6 +912,20 @@ fn settings_dialog(
                                     actions.push(UiAction::SetGuideColor(gc));
                                 }
                                 ui.end_row();
+
+                                ui.label("Titlebar");
+                                let mut pin = inputs.pin_titlebar;
+                                if ui
+                                    .checkbox(&mut pin, "Always show")
+                                    .on_hover_text(
+                                        "Keep the titlebar permanently revealed instead of \
+                                         auto-hiding at the top edge.",
+                                    )
+                                    .changed()
+                                {
+                                    actions.push(UiAction::SetPinTitlebar(pin));
+                                }
+                                ui.end_row();
                             });
 
                         // ── On open (per-image-type exposure) ───────────────

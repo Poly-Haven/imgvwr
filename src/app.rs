@@ -29,6 +29,8 @@
 //!     sequence of G / Shift+G / Ctrl+G presses; applied after `_PROJECTION`)
 //!   * `IMGVWR_DEBUG_CLIPBOARD_COPY` = `1` (as if Ctrl+C were pressed)
 //!   * `IMGVWR_DEBUG_DELETE_CONFIRM` = `1` (show the Delete-key confirm dialog)
+//!   * `IMGVWR_DEBUG_PIN_TITLEBAR` = `1` (force the titlebar permanently shown,
+//!     in-memory only — never writes the real preferences file)
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -1088,6 +1090,9 @@ impl App {
         // restore (winit keeps WS_CAPTION for Aero-snap and repaints it via
         // DefWindowProc on WM_NCACTIVATE — the old-style titlebar flash).
         suppress_nonclient_frame(&window);
+        // Restore the standard Aero drop shadow (+ Windows 10/11's thin 1px
+        // border) that a borderless window otherwise loses.
+        extend_dwm_shadow(&window);
 
         Ok(Gfx {
             gl,
@@ -3952,6 +3957,10 @@ impl App {
         if cfg!(debug_assertions) && self.force_overlay.as_deref() == Some("titlebar") {
             return true;
         }
+        // An explicit, persistent user preference: always shown, nothing suppresses it.
+        if self.prefs.pin_titlebar {
+            return true;
+        }
         // While colour-picking, no auto-hiding chrome may reveal — it would cover
         // the pixel the user is trying to inspect.
         if self.color_picking {
@@ -4456,6 +4465,10 @@ impl App {
         if std::env::var_os("IMGVWR_DEBUG_DELETE_CONFIRM").is_some() {
             self.ui_state.confirm_delete = true;
         }
+        if std::env::var_os("IMGVWR_DEBUG_PIN_TITLEBAR").is_some() {
+            // In-memory only (no `save()`), so this never touches the real prefs file.
+            self.prefs.pin_titlebar = true;
+        }
         if let Ok(p) = std::env::var("IMGVWR_DEBUG_PROJECTION") {
             self.camera.set_mode(p.eq_ignore_ascii_case("pano"));
         }
@@ -4632,6 +4645,7 @@ impl App {
             raw_auto_exposure: self.prefs.raw_auto_exposure,
             clip_margin: self.prefs.clip_margin,
             half_float_textures: self.prefs.half_float_textures,
+            pin_titlebar: self.prefs.pin_titlebar,
             available_update: self.available_update.clone(),
             default_view_transform: self.prefs.default_view_transform.clone(),
             guide_color: self.prefs.guide_color,
@@ -5041,6 +5055,11 @@ impl App {
                     }
                     .to_string(),
                 );
+            }
+            UiAction::SetPinTitlebar(on) => {
+                self.prefs.pin_titlebar = on;
+                self.prefs.save();
+                self.request_redraw();
             }
             UiAction::OpenSettings => {
                 self.ui_state.show_settings = true;
@@ -6736,6 +6755,44 @@ fn disable_dwm_decorations(window: &Window) {
 
 #[cfg(not(windows))]
 fn disable_dwm_decorations(_window: &Window) {}
+
+/// Restore the native Aero drop shadow (and, on Windows 10/11, the thin 1px
+/// accent border) around the borderless window. A window with no non-client
+/// area — which is exactly what `WM_NCCALCSIZE` makes this one, to erase the
+/// legacy caption/border — loses DWM's shadow calculation along with it;
+/// extending a sliver of "frame" back into the client area is the standard
+/// trick (used by most custom-chrome apps) that gets it back without
+/// reintroducing any visible border of our own. Independent of
+/// `disable_dwm_decorations`'s `DWMWA_NCRENDERING_POLICY` call and the
+/// `WM_NCACTIVATE`/`WM_NCPAINT` suppression in `suppress_nonclient_frame` — this
+/// only feeds DWM's shadow geometry, it doesn't touch non-client painting.
+#[cfg(windows)]
+fn extend_dwm_shadow(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
+    use windows_sys::Win32::UI::Controls::MARGINS;
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
+    let margins = MARGINS {
+        cxLeftWidth: 1,
+        cxRightWidth: 1,
+        cyTopHeight: 1,
+        cyBottomHeight: 1,
+    };
+    // SAFETY: `hwnd` is a live top-level window; `margins` is a valid MARGINS.
+    unsafe {
+        DwmExtendFrameIntoClientArea(hwnd, &margins);
+    }
+}
+
+#[cfg(not(windows))]
+fn extend_dwm_shadow(_window: &Window) {}
 
 /// Subclass the window proc to stop the classic GDI non-client frame from being
 /// painted on focus change and restore-from-minimize.

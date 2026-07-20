@@ -62,6 +62,12 @@ pub struct UiInputs {
     pub channel_count: u8,
     /// Currently isolated channel (0=R 1=G 2=B 3=A), `None` = all.
     pub isolate_channel: Option<u8>,
+    /// Histogram of the displayed image (after exposure and the view transform),
+    /// measured on the GPU. `None` until the first measurement lands, or when the
+    /// driver has no compute support — the graph is then simply omitted.
+    pub histogram: Option<std::sync::Arc<crate::renderer::Histogram>>,
+    /// Vertical scale for that graph (the L / Sq / Log selector).
+    pub histogram_scale: crate::prefs::HistogramScale,
     /// Active guides as `[coord (0..1), orientation]` (orientation ≥ 0.5 =
     /// horizontal). Listed in the metadata box with a remove button each.
     pub guides: Vec<[f32; 2]>,
@@ -277,6 +283,8 @@ pub enum UiAction {
     SetGuideColor([u8; 3]),
     /// Isolate a single channel as greyscale (`None` = show all channels).
     SetChannelIsolate(Option<u8>),
+    /// Set the histogram's vertical scale (the L / Sq / Log selector).
+    SetHistogramScale(crate::prefs::HistogramScale),
     /// Set the exposure target (EV) from the bottom-panel slider / buttons.
     SetExposure(f32),
     /// Set the gamma target from the bottom-panel slider / buttons.

@@ -60,6 +60,7 @@ One of my roles at Poly Haven is QC, I spend a lot of time inspecting pixels and
 - **Clipping overlay:** Press `C` to highlight pixels that are near to the limit of what the image format can store (RGB~=256 for 8-bit images and RAW photos, 65536 for 16-bit float, etc). Note that this can't tell you if an HDRI has clipped lighting, but it can tell you if the source images you start with are clipped.
 - **Guides:** Vertical and horizontal guides can be added for straight edge references. Helps you check your HDRIs are level. Press `G` to add them in automatic subdivided increments.
 - **Metadata:** Hover near the top right or press `F2` to show the file metadata (bit depth, resolution, etc). Inspect channels individually.
+- **Histogram:** The `F2` box also plots the tonal distribution of what's actually on screen — measured *after* exposure and the view transform, so it follows every adjustment you make. R/G/B are drawn as additive translucent areas (red + green reads yellow, all three read white), and a 1px spike on the right counts everything past the top of the displayable range. Lower the exposure and you'll watch that spike drain back into the graph. Pick a Linear, square-root or logarithmic vertical scale with the `L` / `Sq` / `Log` buttons.
 
 ## OCIO Color Management
 
@@ -117,6 +118,7 @@ This is the standard in VFX and digital content creation. Using the same system 
 | `Ctrl` + drag a guide | Snap it to 10px increments (2D) or whole degrees (panorama), whether moving an existing guide or pulling a new one out of a ruler |
 | `Alt` + middle-drag | Squash / stretch the image non-uniformly, unbounded (line straightness) |
 | Channel boxes (`F2`) | Click to isolate R / G / B / A as greyscale |
+| Histogram (`F2`) | Distribution of the *displayed* values (after exposure / view transform), as additive R/G/B areas. The 1px spike at the right edge counts samples past the displayable maximum — drop the exposure to bring them back into range. `L` / `Sq` / `Log` pick the vertical scale |
 | Guides list (`F2`) | Shows each guide (`V 425px` / `H 312px`, plus degrees in panorama); × removes; `Ctrl+R` resets all |
 | Hover / drag a guide | Shows a colour-coded tooltip near the cursor with its coordinate — blue while hovering or grabbing, green while dragging a new one out of a ruler |
 | Right-click + hold-drag | Colour-pick tooltip: swatch, pixel (and panorama degree) coordinates, and Linear / Display values under the cursor — R/G/B(/A) or L(/A) depending on the image's channels, coloured like the F2 box's channel swatches. Suppresses the other auto-hiding toolbars while active; a plain right-click still deletes a guide |

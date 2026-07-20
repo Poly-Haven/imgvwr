@@ -333,6 +333,20 @@ impl UndoState {
     }
 }
 
+/// Everything that changes the *displayed* pixel values, and so the histogram.
+/// Compared verbatim each frame to decide whether to re-measure.
+///
+/// The levels adjustment is deliberately absent: the graph is what the levels
+/// handles are aimed at, so it must not shift underneath them as they move.
+/// Clarity is absent too — it is a screen-space pass whose result depends on the
+/// viewport, not on the image (the histogram pass skips it, as the minimap does).
+#[derive(Clone, Copy, PartialEq)]
+struct HistogramKey {
+    epoch: u64,
+    exposure: f32,
+    gamma: f32,
+}
+
 /// The navigation minimap panel rectangle in physical pixels (top-left origin),
 /// plus the window scale factor so the same rect can be expressed in egui points.
 #[derive(Clone, Copy)]
@@ -399,6 +413,17 @@ pub struct App {
     /// The clipping overlay's max-mip mask needs (re)building — set when the image
     /// or the clip margin changes, consumed in `render` while the overlay is on.
     clip_mask_dirty: bool,
+    /// Latest display histogram for the F2 box, measured on the GPU off the live
+    /// display pipeline (there is no CPU-side display transform to reproduce it
+    /// with). `None` until the first measurement lands, or on a driver with no
+    /// compute support.
+    histogram: Option<Arc<crate::renderer::Histogram>>,
+    /// The display state `histogram` describes, so a change can be spotted.
+    histogram_key: Option<HistogramKey>,
+    /// Bumped by anything *other than* the eased tone values that changes the
+    /// displayed pixels: a new image, a new animation frame, a different OCIO
+    /// view. Cheaper than re-deriving all of that into [`HistogramKey`].
+    histogram_epoch: u64,
     /// While a held adjustment key (exposure / gamma / clarity) is auto-repeating,
     /// this is pushed a little past each repeat. `undo_gesture_active` treats the
     /// window as a gesture so the whole ramp coalesces into ONE undo entry instead
@@ -700,6 +725,9 @@ impl App {
             clip_overlay: false,
             app_epoch: Instant::now(),
             clip_mask_dirty: true,
+            histogram: None,
+            histogram_key: None,
+            histogram_epoch: 0,
             adjust_repeat_until: None,
             settings_was_open: false,
             settings_restore_size: None,
@@ -810,7 +838,18 @@ impl App {
         if let Some(gfx) = &mut self.gfx {
             gfx.renderer.set_ocio_shader(&shader);
         }
+        // A different view transform maps the same pixels to different display
+        // values, so whatever the histogram last measured no longer applies.
+        self.invalidate_histogram();
         self.request_redraw();
+    }
+
+    /// Mark the display histogram stale, so the next frame re-measures it (only
+    /// if the F2 box is actually on screen — nothing is computed while it is
+    /// hidden). The previous graph stays visible until the new one lands, which
+    /// keeps it from flickering during an exposure ramp.
+    fn invalidate_histogram(&mut self) {
+        self.histogram_epoch = self.histogram_epoch.wrapping_add(1);
     }
 
     /// T: toggle between the active view and the display's Standard/Raw view.
@@ -1794,6 +1833,11 @@ impl App {
         // The clip-overlay mask is tied to this image; rebuild it lazily if/when
         // the overlay is on.
         self.clip_mask_dirty = true;
+        // Same for the display histogram — but drop the old one outright rather
+        // than leaving it up, so the F2 box never shows the previous image's
+        // graph beside the new image's metadata.
+        self.invalidate_histogram();
+        self.histogram = None;
         // Animated GIF: begin playback from frame 0 (already uploaded as the
         // static image). Frame 0 shows for its own delay before frame 1. A static
         // image / single-frame GIF clears any prior playback.
@@ -4624,6 +4668,10 @@ impl App {
             metadata: self.metadata_lines(),
             channel_count: self.file_info.channels,
             isolate_channel: self.isolate_channel,
+            // One frame behind (measured inside the gfx borrow, below), exactly
+            // like the colour-pick readback.
+            histogram: self.histogram.clone(),
+            histogram_scale: self.prefs.histogram_scale,
             show_help: self.ui_state.show_help || forced == Some("help"),
             toast: self.toast_render(),
             slot_labels: self.slot_labels(),
@@ -4981,6 +5029,12 @@ impl App {
                 self.isolate_channel = channel;
                 self.request_redraw();
             }
+            UiAction::SetHistogramScale(scale) => {
+                // Purely how the same counts are drawn — no re-measurement.
+                self.prefs.histogram_scale = scale;
+                self.prefs.save();
+                self.request_redraw();
+            }
             UiAction::SetExposure(v) => {
                 self.exposure_target = v.clamp(-16.0, 16.0);
                 self.request_redraw();
@@ -5209,6 +5263,9 @@ impl App {
                 &frames[idx].pixels,
             );
         }
+        // Different pixels are on screen now, so the histogram describes the
+        // previous frame.
+        self.invalidate_histogram();
     }
 
     fn render(&mut self) -> RenderOutcome {
@@ -5294,6 +5351,25 @@ impl App {
             self.clip_mask_dirty = false;
         }
 
+        // Display histogram (F2 box): re-measure when the graph no longer matches
+        // the tone state, and only while the box is actually on screen — exactly
+        // the same laziness as the clip mask above. `wanted` carries the image's
+        // raw (unrotated) dimensions, which is what sizes the sample grid; a
+        // rotation permutes pixels but cannot change their values.
+        let histogram_want = if self.metadata_slide > 0.001 {
+            let key = HistogramKey {
+                epoch: self.histogram_epoch,
+                exposure: self.exposure,
+                gamma: self.gamma,
+            };
+            self.current_image
+                .as_ref()
+                .filter(|_| self.histogram_key != Some(key))
+                .map(|img| (key, img.width as i32, img.height as i32))
+        } else {
+            None
+        };
+
         // Gather everything the frame needs before the mutable gfx/ui borrows.
         let inputs = self.ui_inputs();
         let cam = self.camera.camera;
@@ -5352,6 +5428,8 @@ impl App {
             rotation: self.rotation as i32,
             // Debug A/B only: force Lanczos off to compare against bilinear.
             lanczos_off: self.debug_no_lanczos,
+            // Only the histogram pass point-samples (see `update_histogram`).
+            point_sample: false,
             // Clipping overlay (C): animated stripes over near-/at-max regions,
             // judged on the original (pre-adjustment) per-channel values.
             clip_overlay: self.clip_overlay,
@@ -5378,6 +5456,14 @@ impl App {
         let mut grabbed: Option<(i32, i32, Vec<u8>)> = None;
         let mut clipboard_grab: Option<(i32, i32, Vec<u8>)> = None;
         let mut new_color_pick: Option<crate::ui::ColorPickInfo> = None;
+        // Histogram results, applied after the gfx borrow ends. The initial
+        // values only matter on the early-return paths inside that block, hence
+        // the allow (same shape as `egui_busy` above).
+        #[allow(unused_assignments)]
+        let mut new_histogram: Option<crate::renderer::Histogram> = None;
+        let mut histogram_measured: Option<HistogramKey> = None;
+        #[allow(unused_assignments)]
+        let mut histogram_pending = false;
         // egui "is dragging a widget" this frame — coalesces slider drags into one
         // undo entry (set inside the gfx borrow below; only read on the path that
         // sets it, hence the allow for the otherwise-overwritten initial value).
@@ -5394,6 +5480,17 @@ impl App {
                 return RenderOutcome::Idle;
             }
             let (w, h) = (size.width as i32, size.height as i32);
+
+            // Land a finished measurement, then start the next one if the graph
+            // has gone stale. Done before the scene draw because the pass binds
+            // its own framebuffer and viewport; `render` re-binds both anyway.
+            new_histogram = gfx.renderer.poll_histogram();
+            if let Some((key, iw, ih)) = histogram_want {
+                if gfx.renderer.update_histogram(&base, iw, ih) {
+                    histogram_measured = Some(key);
+                }
+            }
+            histogram_pending = gfx.renderer.histogram_pending();
 
             let params = RenderParams {
                 viewport: (w, h),
@@ -5523,6 +5620,20 @@ impl App {
             }
         }
         self.color_pick_last = new_color_pick;
+        if let Some(key) = histogram_measured {
+            self.histogram_key = Some(key);
+        }
+        if let Some(h) = new_histogram {
+            if log::log_enabled!(log::Level::Debug) {
+                log_histogram(&h);
+            }
+            self.histogram = Some(Arc::new(h));
+        }
+        // `about_to_wait` would otherwise park on `Wait` and the finished
+        // measurement would sit in its buffer until the next unrelated event.
+        if histogram_pending {
+            self.request_redraw();
+        }
 
         for action in actions {
             self.handle_ui_action(action);
@@ -6420,6 +6531,37 @@ fn sibling_path(current: &Path, dir: i32) -> Option<PathBuf> {
     let n = files.len() as i32;
     let next = (idx as i32 + dir).rem_euclid(n) as usize;
     Some(files[next].clone())
+}
+
+/// Debug-log a landed display histogram as a coarse 16-bucket digest (percent of
+/// samples per bucket) plus the over-range counts. The graph is a GPU
+/// measurement of a GPU-only transform, so this is the only way to check the
+/// numbers rather than the picture — same role the `equirect_content_scores`
+/// debug line plays for panorama detection.
+fn log_histogram(h: &crate::renderer::Histogram) {
+    let bins = crate::renderer::HISTOGRAM_BINS;
+    let per = bins / 16;
+    for (ch, name) in ["R", "G", "B"].iter().enumerate() {
+        let total: u64 = h.bins[ch].iter().map(|&n| n as u64).sum::<u64>() + h.over[ch] as u64;
+        if total == 0 {
+            continue;
+        }
+        let digest: Vec<String> = (0..16)
+            .map(|b| {
+                let sum: u64 = h.bins[ch][b * per..(b + 1) * per]
+                    .iter()
+                    .map(|&n| n as u64)
+                    .sum();
+                format!("{:.1}", sum as f64 * 100.0 / total as f64)
+            })
+            .collect();
+        log::debug!(
+            "histogram {name}: total {total}, over {} ({:.2}%), 16ths [{}]",
+            h.over[ch],
+            h.over[ch] as f64 * 100.0 / total as f64,
+            digest.join(" ")
+        );
+    }
 }
 
 /// Format an exposure value as e.g. "+3 EV" or "+0.05 EV".

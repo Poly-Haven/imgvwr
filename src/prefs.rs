@@ -16,6 +16,49 @@ pub struct PreferredView {
     pub view: String,
 }
 
+/// How the F2 histogram's vertical axis maps counts to height. All three
+/// normalise against the tallest bin; they differ in how hard they compress.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HistogramScale {
+    /// Straight proportion, as most photo apps draw it. A large flat region —
+    /// a night sky, a blown background — can flatten everything else.
+    #[default]
+    Linear,
+    /// Square root of the counts: keeps the overall shape readable while
+    /// letting small populations (speculars, shadow detail) stay visible.
+    Sqrt,
+    /// `log(1 + n)`: maximum visibility for tiny populations, e.g. a handful
+    /// of nearly-clipped pixels.
+    Log,
+}
+
+impl HistogramScale {
+    /// Bar height 0..1 for `count` against the tallest bin.
+    pub fn normalise(self, count: u32, peak: u32) -> f32 {
+        if peak == 0 {
+            return 0.0;
+        }
+        let (n, p) = (count as f32, peak as f32);
+        match self {
+            Self::Linear => n / p,
+            Self::Sqrt => (n / p).sqrt(),
+            Self::Log => (1.0 + n).ln() / (1.0 + p).ln(),
+        }
+    }
+
+    /// Short label for the selector in the histogram's header row.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "L",
+            Self::Sqrt => "Sq",
+            Self::Log => "Log",
+        }
+    }
+
+    /// The three modes in selector order.
+    pub const ALL: [Self; 3] = [Self::Linear, Self::Sqrt, Self::Log];
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppPreferences {
     /// Schema version, for forward-compatible migrations.
@@ -70,6 +113,9 @@ pub struct AppPreferences {
     /// default; see Settings.
     #[serde(default)]
     pub pin_titlebar: bool,
+    /// Vertical scale of the F2 box's histogram (the L / Sq / Log selector).
+    #[serde(default)]
+    pub histogram_scale: HistogramScale,
     /// Internal (not user-facing): unix-seconds of the last successful update
     /// check, so the daily check throttles. `0` = never checked.
     #[serde(default)]
@@ -122,6 +168,7 @@ impl Default for AppPreferences {
             clip_margin: default_clip_margin(),
             half_float_textures: false,
             pin_titlebar: false,
+            histogram_scale: HistogramScale::default(),
             last_update_check: 0,
             latest_known_version: String::new(),
         }

@@ -2,6 +2,7 @@
 //! texture (single or tiled), the OCIO LUTs, and the per-frame uniforms. The
 //! only module that calls `glow` directly (besides `texture`).
 
+mod histogram;
 mod post;
 mod texture;
 
@@ -12,7 +13,10 @@ use glow::HasContext as _;
 
 use crate::image_loader::ImageData;
 use crate::ocio::{OcioLut, OcioShader};
+use histogram::HistogramPass;
 use texture::{ImageTexture, ImageTextureKind, SamplerKind, SINGLE_TEXTURE_SAMPLER, TILED_SAMPLER};
+
+pub use histogram::{Histogram, BINS as HISTOGRAM_BINS};
 
 const VERTEX_SRC: &str = include_str!("../../resources/shaders/vertex.glsl");
 const FRAGMENT_TEMPLATE: &str = include_str!("../../resources/shaders/fragment_template.glsl");
@@ -92,6 +96,12 @@ pub struct RenderParams {
     pub rotation: i32,
     /// Force-disable Lanczos minification (debug A/B only); normally false.
     pub lanczos_off: bool,
+    /// Sample one source texel per output pixel — a plain `GL_NEAREST` min
+    /// filter with no mip chain. Only the histogram pass sets this: it renders
+    /// the image far smaller than its native size, and mip-averaged texels would
+    /// blend neighbours together and erase exactly the clipped highlights and
+    /// crushed blacks the graph is meant to report.
+    pub point_sample: bool,
     /// Clipping overlay (C): animated diagonal stripes over regions whose
     /// *original* (pre-adjustment) per-channel value is within [`clip_margin`]
     /// of the format max (normalised to 1.0). Per-channel: each clipped channel
@@ -134,6 +144,7 @@ impl Default for RenderParams {
             global_alpha: 1.0,
             rotation: 0,
             lanczos_off: false,
+            point_sample: false,
             clip_overlay: false,
             clip_margin: 0.005,
             clip_time: 0.0,
@@ -283,6 +294,9 @@ pub struct Renderer {
     clip_mask_texture: Option<glow::Texture>,
     /// Reusable offscreen post-process chain (Clarity, and future review tools).
     post: post::PostChain,
+    /// Display-histogram measurement (F2 box). `None` when the driver has no
+    /// compute support, in which case the graph is simply never shown.
+    histogram: Option<HistogramPass>,
 }
 
 impl Renderer {
@@ -302,6 +316,7 @@ impl Renderer {
 
             let post = post::PostChain::new(&gl)
                 .map_err(|e| anyhow!("failed to build post-process chain: {e}"))?;
+            let histogram = HistogramPass::new(&gl);
 
             Ok(Self {
                 gl,
@@ -322,6 +337,7 @@ impl Renderer {
                 diff_texture: None,
                 clip_mask_texture: None,
                 post,
+                histogram,
             })
         }
     }
@@ -668,7 +684,8 @@ impl Renderer {
             // Lanczos-3 minification for 8-bit images only, and only when not in
             // nearest-neighbour mode (the I toggle keeps its hard pixels). The
             // lanczos_off flag is a debug A/B override (always false in normal use).
-            let lanczos = image.is_u8 && !params.nearest && !params.lanczos_off;
+            let lanczos =
+                image.is_u8 && !params.nearest && !params.lanczos_off && !params.point_sample;
             gl.uniform_1_i32(u.lanczos.as_ref(), lanczos as i32);
             // A 90°/270° display rotation swaps the displayed aspect; the shader's
             // 2D mapping fits the image against this rotated aspect.
@@ -727,8 +744,13 @@ impl Renderer {
                 );
             }
 
-            // Min/mag filters for the active interpolation mode (I key).
-            let (min_f, mag_f) = if params.nearest {
+            // Min/mag filters for the active interpolation mode (I key). The
+            // histogram's `point_sample` is deliberately *not* the I key's
+            // NEAREST_MIPMAP_NEAREST: that still picks a (pre-averaged) mip
+            // level, which is exactly what the histogram must avoid.
+            let (min_f, mag_f) = if params.point_sample {
+                (glow::NEAREST, glow::NEAREST)
+            } else if params.nearest {
                 (glow::NEAREST_MIPMAP_NEAREST, glow::NEAREST)
             } else {
                 (glow::LINEAR_MIPMAP_LINEAR, glow::LINEAR)
@@ -818,6 +840,98 @@ impl Renderer {
             gl.disable(glow::SCISSOR_TEST);
         }
     }
+
+    /// Whether a display histogram can be measured at all on this driver.
+    pub fn has_histogram(&self) -> bool {
+        self.histogram.is_some()
+    }
+
+    /// True while a measurement is awaiting its fence: the caller should keep
+    /// requesting frames so [`poll_histogram`](Self::poll_histogram) can land it.
+    pub fn histogram_pending(&self) -> bool {
+        self.histogram.as_ref().is_some_and(|p| p.is_pending())
+    }
+
+    /// Re-measure the display histogram (see [`histogram`]). The whole image is
+    /// drawn flat into a small offscreen target through the live display
+    /// pipeline, then binned by a compute shader.
+    ///
+    /// `params` supplies the tone state — exposure, gamma, and whatever the OCIO
+    /// program is currently doing. Everything about the *view* (pan, zoom,
+    /// rotation, stretch, guides, overlays, clarity) is overridden here: the
+    /// graph describes the image, not how it happens to be framed right now.
+    /// `image_w`/`image_h` are the raw, unrotated pixel dimensions.
+    ///
+    /// A no-op while an upload is in flight, while a previous measurement is
+    /// still pending, or when there is no image.
+    ///
+    /// Returns whether a measurement is now in flight — so the caller only
+    /// records the state it was measured from once the work really started.
+    pub fn update_histogram(
+        &mut self,
+        params: &RenderParams,
+        image_w: i32,
+        image_h: i32,
+    ) -> bool {
+        if self.image.is_none() || self.upload.is_some() {
+            return false;
+        }
+        let gl = self.gl.clone();
+        let (gw, gh) = HistogramPass::grid_size(image_w, image_h);
+        match &mut self.histogram {
+            Some(pass) if !pass.is_pending() => {
+                if unsafe { pass.begin(&gl, gw, gh) }.is_none() {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        let hist_params = RenderParams {
+            viewport: (gw, gh),
+            // A fit-the-whole-image 2D view: pan 0 and tan_half_fov 1 make the
+            // quad map exactly onto image uv 0..1 (the same framing convention
+            // `render_minimap` documents).
+            projection_mode: 1,
+            yaw: 0.0,
+            pitch: 0.0,
+            tan_half_fov: 1.0,
+            rotation: 0,
+            stretch: [1.0, 1.0],
+            // An integer grid can only approximate the image's aspect ratio,
+            // which leaves the outermost samples a fraction of a texel outside
+            // 0..1. `wrap_2d` takes the shader's transparent-black out-of-bounds
+            // branch off the table, so that rounding cannot fabricate a spike of
+            // black pixels in bin 0.
+            wrap_2d: true,
+            point_sample: true,
+            // Every review overlay off: they would all bin themselves.
+            isolate_channel: -1,
+            sharpness: false,
+            diff: false,
+            clip_overlay: false,
+            guide_count: 0,
+            // Clarity is a screen-space pass over the final viewport, so it has
+            // no meaning at this resolution and is skipped (as the minimap does).
+            clarity_amount: 0.0,
+            global_alpha: 1.0,
+            ..*params
+        };
+        self.draw_quad(&hist_params, 0, 0, gw, gh);
+        match &mut self.histogram {
+            Some(pass) => {
+                unsafe { pass.dispatch(&gl) };
+                pass.is_pending()
+            }
+            None => false,
+        }
+    }
+
+    /// Collect a finished measurement, or `None` if the GPU is still working.
+    /// Never blocks.
+    pub fn poll_histogram(&mut self) -> Option<Histogram> {
+        let gl = self.gl.clone();
+        self.histogram.as_mut().and_then(|p| unsafe { p.poll(&gl) })
+    }
 }
 
 impl Drop for Renderer {
@@ -832,6 +946,9 @@ impl Drop for Renderer {
             }
             for t in self.ocio.textures.drain(..) {
                 gl.delete_texture(t.texture);
+            }
+            if let Some(mut h) = self.histogram.take() {
+                h.delete(gl);
             }
             gl.delete_vertex_array(self.vao);
             gl.delete_buffer(self.vbo);

@@ -1652,7 +1652,7 @@ fn metadata_hud(
                 ..Default::default()
             };
             frame.show(ui, |ui| {
-                egui::Grid::new("imgvwr_metadata_grid")
+                let grid = egui::Grid::new("imgvwr_metadata_grid")
                     .num_columns(2)
                     .spacing([12.0, 2.0])
                     .show(ui, |ui| {
@@ -1764,6 +1764,11 @@ fn metadata_hud(
                             ui.end_row();
                         }
                     });
+                // Full width under the grid rather than inside it — a grid cell
+                // would pin the graph to the narrow value column.
+                if inputs.has_image {
+                    histogram_plot(ui, inputs, actions, grid.response.rect.width());
+                }
             });
         });
     state.view_menu_open = view_menu_open;
@@ -2011,6 +2016,227 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
                 });
             });
         });
+}
+
+/// Height of the histogram plot area, in points.
+const HIST_H: f32 = 68.0;
+/// Minimum plot width. The graph normally stretches to the metadata grid's own
+/// width so it lines up with the rows above it; this floor keeps it readable
+/// when the grid happens to be narrow (a file with very few metadata rows).
+const HIST_MIN_W: f32 = 208.0;
+/// Coverage each channel's filled area contributes. The three are composited
+/// *additively* — see [`hist_band_color`] — so red over green reads yellow and
+/// all three read white, at 30% over the plate.
+const HIST_CHANNEL_ALPHA: f32 = 0.1;
+
+/// The plot's own backing plate. Darker and more opaque than the surrounding
+/// box so the deliberately faint additive fills still read against it.
+fn hist_plate() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(8, 8, 8, 230)
+}
+
+/// The colour for a band covered by `channels`, as a *premultiplied* egui colour.
+///
+/// egui blends premultiplied, so a colour whose RGB is the sum of the covered
+/// channels' contributions and whose alpha is the sum of their coverages
+/// composites to exactly `Σ(αᵢ·cᵢ) + (1 − Σαᵢ)·backdrop`. That is additive
+/// blending: red + green land on yellow, all three on white, and no channel is
+/// privileged by draw order the way sequential alpha compositing would.
+fn hist_band_color(channels: &[egui::Color32]) -> egui::Color32 {
+    let mut rgb = [0.0f32; 3];
+    for c in channels {
+        for (dst, src) in rgb.iter_mut().zip([c.r(), c.g(), c.b()]) {
+            *dst += src as f32 / 255.0 * HIST_CHANNEL_ALPHA;
+        }
+    }
+    let a = HIST_CHANNEL_ALPHA * channels.len() as f32;
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    egui::Color32::from_rgba_premultiplied(q(rgb[0]), q(rgb[1]), q(rgb[2]), q(a))
+}
+
+/// The histogram of the displayed image, plus its scale selector. Drawn full
+/// width under the metadata grid; `width` is the grid's measured width so the
+/// two line up. Greyscale images draw a single neutral curve, matching how
+/// [`channel_boxes`] collapses L / LA.
+fn histogram_plot(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>, width: f32) {
+    let Some(hist) = &inputs.histogram else {
+        return;
+    };
+
+    // Header: label on the left, the three scale selectors pushed right.
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("Histogram").color(egui::Color32::from_gray(150)),
+            )
+            .selectable(false),
+        );
+        // Push the selectors to the right edge of the row. Clamped because a
+        // narrow box can leave less room than the buttons need.
+        ui.add_space((ui.available_width() - hist_scale_row_width(ui)).max(0.0));
+        for scale in crate::prefs::HistogramScale::ALL {
+            hist_scale_button(ui, inputs, actions, scale);
+        }
+    });
+
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(width.max(HIST_MIN_W), HIST_H),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::CornerRadius::same(3), hist_plate());
+
+    // One column per bin, plus a final 1px column for the over-range spike:
+    // samples the screen can only show as full white. Dropping exposure pulls
+    // them back into range and the spike shrinks away.
+    let bins = crate::renderer::HISTOGRAM_BINS;
+    let peak = hist.peak();
+    let greyscale = inputs.channel_count <= 2;
+    let palette: [egui::Color32; 3] = if greyscale {
+        [egui::Color32::from_gray(190); 3]
+    } else {
+        [CHANNEL_R, CHANNEL_G, CHANNEL_B]
+    };
+    // A greyscale image has three identical channels; drawing all of them would
+    // triple the coverage, so measure and draw only one.
+    let active = if greyscale { 1 } else { 3 };
+
+    // Reserve the rightmost pixel for the spike so it can never be mistaken for
+    // the top bin, and inset by a hairline so the fills don't touch the plate's
+    // rounded corners.
+    let spike_w = 1.0;
+    let plot = egui::Rect::from_min_max(
+        rect.min + egui::vec2(1.0, 1.0),
+        rect.max - egui::vec2(spike_w + 2.0, 1.0),
+    );
+    let col_w = plot.width() / bins as f32;
+
+    let mut mesh = egui::Mesh::default();
+    for i in 0..bins {
+        let x0 = plot.left() + i as f32 * col_w;
+        let heights: Vec<f32> = (0..active)
+            .map(|c| inputs.histogram_scale.normalise(hist.bins[c][i], peak))
+            .collect();
+        hist_column(&mut mesh, x0, x0 + col_w, plot, &heights, &palette);
+    }
+    // The spike shares the bins' normalisation, so it reads on the same scale;
+    // an over-range population larger than the tallest bin simply saturates.
+    let spike: Vec<f32> = (0..active)
+        .map(|c| inputs.histogram_scale.normalise(hist.over[c], peak).min(1.0))
+        .collect();
+    hist_column(
+        &mut mesh,
+        plot.right() + 1.0,
+        plot.right() + 1.0 + spike_w,
+        plot,
+        &spike,
+        &palette,
+    );
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Emit one column of the area chart: the covered channels split the column into
+/// stacked bands, each painted with the additive colour of the channels that
+/// reach it, so overlaps mix without any per-shape blend mode.
+fn hist_column(
+    mesh: &mut egui::Mesh,
+    x0: f32,
+    x1: f32,
+    plot: egui::Rect,
+    heights: &[f32],
+    palette: &[egui::Color32; 3],
+) {
+    // Walk the distinct heights bottom-up; between two consecutive ones exactly
+    // the channels that are still taller than the lower bound are covered.
+    let mut levels: Vec<f32> = heights.iter().copied().filter(|h| *h > 0.0).collect();
+    levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    levels.dedup();
+
+    let mut low = 0.0f32;
+    for &high in &levels {
+        let covered: Vec<egui::Color32> = heights
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| **h >= high)
+            .map(|(c, _)| palette[c])
+            .collect();
+        if !covered.is_empty() {
+            let band = egui::Rect::from_min_max(
+                egui::pos2(x0, plot.bottom() - high * plot.height()),
+                egui::pos2(x1, plot.bottom() - low * plot.height()),
+            );
+            let idx = mesh.vertices.len() as u32;
+            for p in [
+                band.left_top(),
+                band.right_top(),
+                band.right_bottom(),
+                band.left_bottom(),
+            ] {
+                mesh.colored_vertex(p, hist_band_color(&covered));
+            }
+            mesh.add_triangle(idx, idx + 1, idx + 2);
+            mesh.add_triangle(idx, idx + 2, idx + 3);
+        }
+        low = high;
+    }
+}
+
+/// Width the three scale selectors occupy, so the header can right-align them.
+fn hist_scale_row_width(ui: &egui::Ui) -> f32 {
+    let spacing = ui.spacing().item_spacing.x;
+    crate::prefs::HistogramScale::ALL
+        .iter()
+        .map(|s| hist_scale_button_width(ui, *s) + spacing)
+        .sum::<f32>()
+        - spacing
+}
+
+fn hist_scale_button_width(ui: &egui::Ui, scale: crate::prefs::HistogramScale) -> f32 {
+    let galley = ui.painter().layout_no_wrap(
+        scale.label().to_string(),
+        egui::FontId::proportional(10.0),
+        egui::Color32::WHITE,
+    );
+    galley.size().x + 8.0
+}
+
+/// One mini scale selector. Accent-filled when active, matching how the channel
+/// boxes mark the isolated channel.
+fn hist_scale_button(
+    ui: &mut egui::Ui,
+    inputs: &UiInputs,
+    actions: &mut Vec<UiAction>,
+    scale: crate::prefs::HistogramScale,
+) {
+    let active = inputs.histogram_scale == scale;
+    let w = hist_scale_button_width(ui, scale);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 14.0), egui::Sense::click());
+    let painter = ui.painter();
+    let radius = egui::CornerRadius::same(2);
+    if active {
+        painter.rect_filled(rect, radius, ACCENT);
+    } else if resp.hovered() {
+        painter.rect_filled(rect, radius, egui::Color32::from_white_alpha(24));
+    }
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        scale.label(),
+        egui::FontId::proportional(10.0),
+        if active {
+            egui::Color32::from_gray(20)
+        } else {
+            egui::Color32::from_gray(170)
+        },
+    );
+    let hint = match scale {
+        crate::prefs::HistogramScale::Linear => "Linear scale",
+        crate::prefs::HistogramScale::Sqrt => "Square-root scale",
+        crate::prefs::HistogramScale::Log => "Logarithmic scale",
+    };
+    if clickable(resp).on_hover_text(hint).clicked() {
+        actions.push(UiAction::SetHistogramScale(scale));
+    }
 }
 
 /// The `(label, colour, channel-index)` boxes to show for a channel count.
@@ -2274,6 +2500,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("Ctrl + drag guide", "Snap to 10px / 1°"),
                 ("Right-click + hold-drag", "Pick pixel colour values"),
                 ("Channel boxes (F2)", "Isolate R/G/B/A"),
+                ("Histogram (F2)", "Displayed levels; L/Sq/Log scale"),
             ],
         ),
         (

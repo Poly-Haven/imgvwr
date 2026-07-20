@@ -906,7 +906,7 @@ impl Renderer {
         source: HistogramSource,
         samples: u32,
     ) -> bool {
-        self.run_histogram(params, source, samples, true)
+        self.run_histogram(params, source, samples, true, None)
     }
 
     /// The offscreen grid a source is measured on. The sample budget applies to
@@ -935,12 +935,13 @@ impl Renderer {
         source: HistogramSource,
         samples: u32,
         point_sample: bool,
+        force_grid: Option<(i32, i32)>,
     ) -> bool {
         if self.image.is_none() || self.upload.is_some() {
             return false;
         }
         let gl = self.gl.clone();
-        let (gw, gh) = self.histogram_grid(source, samples);
+        let (gw, gh) = force_grid.unwrap_or_else(|| self.histogram_grid(source, samples));
         match &mut self.histogram {
             Some(pass) if !pass.is_pending() => {
                 if unsafe { pass.begin(&gl, gw, gh) }.is_none() {
@@ -1035,17 +1036,25 @@ impl Renderer {
     ///   blowout across the footprint. Faster only where both are already under
     ///   a millisecond. Hence point sampling.
     #[cfg(debug_assertions)]
+    ///
+    /// `force_grid` overrides the computed grid. Setting it to the exact
+    /// dimensions of mip level *n* with `point_sample: false` is how the
+    /// "every texel of mip n" strategy is measured: at that size the
+    /// minification ratio is exactly 2ⁿ, so the implicit LOD lands on mip n with
+    /// zero blend weight and each output texel maps 1:1 onto one mip texel.
+    #[cfg(debug_assertions)]
     pub fn benchmark_histogram(
         &mut self,
         params: &RenderParams,
         source: HistogramSource,
         samples: u32,
         point_sample: bool,
+        force_grid: Option<(i32, i32)>,
     ) -> Option<((i32, i32), f32, f32, Histogram)> {
-        let grid = self.histogram_grid(source, samples);
+        let grid = force_grid.unwrap_or_else(|| self.histogram_grid(source, samples));
         let gl = self.gl.clone();
         let start = std::time::Instant::now();
-        if !self.run_histogram(params, source, samples, point_sample) {
+        if !self.run_histogram(params, source, samples, point_sample, force_grid) {
             return None;
         }
         unsafe { gl.finish() };

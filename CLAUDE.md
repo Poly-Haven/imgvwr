@@ -110,13 +110,20 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   sweeps budgets × {point, mip} and prints GPU ms, VRAM-shaped grid dims, and how many of the 256
   bins each one resolves. On a 24k EXR (302 Mpx): cost is *flat* below ~8M (0.69 ms at 1M, 0.82 ms
   at 8M — the pass is overhead-bound down there), then 2.3 ms at 32M, 15.8 ms to read every pixel
-  (plus 2.4 GB for the target). Hence the 8M default. **Mip sampling was measured and rejected**: it
-  resolves *fewer* bins at every budget (239/256 vs 249/256 at 1M), and it can't be trusted to
-  smooth extremes down either, because the averaging happens in scene-linear space *before* the
-  tone curve — one blown texel at 1000.0 averaged with dim neighbours still lands far over the
-  display max and spreads its blowout across the footprint. It would also be inconsistent between
-  GPUs: an image past `GL_MAX_TEXTURE_SIZE` goes down the tiled path, whose mip chain is capped at
-  4 levels (`BORDER = 8`), so the same image would sample differently on a 16384-max card.
+  (plus 2.4 GB for the target). Hence the 8M default.
+- **"Every texel of mip N" was measured against the grid and rejected — but for the right reason.**
+  The bench compares them at *matched sample counts* (render at exactly `dims >> N` and the implicit
+  LOD lands on mip N with no blend, so one output texel = one mip texel). Mip has 100% spatial
+  coverage and the grid does not, so mip genuinely never misses a feature — but each sample is a box
+  average, and that *fabricates values the image doesn't contain* and inflates sparse ones. On a
+  synthetic 4096×2048 with 682 known blown pixels (0.00813%): the grid reports 0.0084% at both
+  6.25% and 1.56% coverage (unbiased), while mip reports 0.0153% and 0.0244% — 2×–3× too much,
+  because a single blown pixel becomes one whole mip texel. On the real 24k it resolves fewer
+  distinct bins at *every* matched level (247 vs 254 at 4.7M). Mip *is* 2–5× faster at low sample
+  counts (cache locality — the grid strides badly at LOD 0), which is the one thing worth
+  remembering if a cheap continuous readout is ever needed. **Detection of tiny clipped regions is
+  not the histogram's job**: the `C` overlay already does it exactly, with a *max*-mipped mask
+  (`build_clip_mask`), which never dilutes and never fabricates.
 - **The histogram pass must point-sample, and must see identity levels.** It sets
   `RenderParams::point_sample` (plain `GL_NEAREST`, *not* the I key's `NEAREST_MIPMAP_NEAREST`,
   which still picks a pre-averaged mip and would smooth away the clipped highlights the graph

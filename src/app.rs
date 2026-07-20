@@ -6760,57 +6760,75 @@ fn run_histogram_bench(
     source: crate::renderer::HistogramSource,
     image_px: u64,
 ) {
-    // Powers of two up to (and past) the full image, so the clamp shows up.
-    let mut budgets: Vec<u64> = (0..12).map(|i| 1_000_000u64 << i).collect();
-    budgets.push(image_px);
-    budgets.sort_unstable();
-    budgets.dedup();
+    let (iw, ih) = match source {
+        crate::renderer::HistogramSource::WholeImage { width, height }
+        | crate::renderer::HistogramSource::Viewport { width, height } => (width, height),
+    };
 
+    // Two strategies, compared at *matched sample counts*, so the only variable
+    // is what each sample means:
+    //
+    // * `mipN` — every texel of mip level N: 100% spatial coverage, each sample a
+    //   2^N x 2^N box average. Rendering at exactly the mip's dimensions makes
+    //   the minification ratio exactly 2^N, so the implicit LOD lands on that mip
+    //   with no blend and one output texel per mip texel.
+    // * `pt@N` — a strided grid of the same size sampled at LOD 0: every sample
+    //   is a real pixel value, but only 1 position in 4^N is looked at.
+    let mut runs: Vec<(String, (i32, i32), bool)> = Vec::new();
+    for level in 1..=7u32 {
+        let (gw, gh) = (iw >> level, ih >> level);
+        if gw < 8 || gh < 8 {
+            break;
+        }
+        runs.push((format!("mip{level} "), (gw, gh), false));
+        runs.push((format!("pt@{level} "), (gw, gh), true));
+    }
+    // The reference: every pixel, at LOD 0.
+    runs.push(("FULL  ".into(), (iw, ih), true));
+
+    log::info!("hist-bench: {source:?} = {} Mpx", image_px / 1_000_000);
     log::info!(
-        "hist-bench: source {:?}, image {} Mpx",
-        source,
-        image_px / 1_000_000
+        "hist-bench: mode    grid            samples  positions  gpu_ms  bins  clipped%     over"
     );
-    log::info!("hist-bench: mode  budget    grid          samples     gpu_ms  read_ms  nonzero_bins  over  peak");
-    for point in [true, false] {
-        let mode = if point { "point" } else { "mip  " };
-        for &b in &budgets {
-            let b32 = b.min(u32::MAX as u64) as u32;
-            // One warm-up (shader/target allocation shouldn't land in the timing),
-            // then the best of three — the minimum is the least contaminated by
-            // whatever else the desktop compositor was doing.
-            let _ = renderer.benchmark_histogram(params, source, b32, point);
-            let mut best: Option<((i32, i32), f32, f32, crate::renderer::Histogram)> = None;
-            for _ in 0..3 {
-                let Some(r) = renderer.benchmark_histogram(params, source, b32, point) else {
-                    continue;
-                };
-                if best.as_ref().is_none_or(|p| r.1 < p.1) {
-                    best = Some(r);
-                }
-            }
-            let Some((grid, gpu_ms, read_ms, hist)) = best else {
-                log::info!("hist-bench: {mode} {:>7} — unavailable", b32 / 1_000_000);
+    for (name, grid, point) in runs {
+        // One warm-up (target allocation shouldn't land in the timing), then the
+        // best of three — the minimum is least contaminated by whatever else the
+        // desktop compositor was doing.
+        let _ = renderer.benchmark_histogram(params, source, 0, point, Some(grid));
+        let mut best: Option<((i32, i32), f32, f32, crate::renderer::Histogram)> = None;
+        for _ in 0..3 {
+            let Some(r) = renderer.benchmark_histogram(params, source, 0, point, Some(grid)) else {
                 continue;
             };
-            let total: u64 =
-                hist.bins[0].iter().map(|&n| n as u64).sum::<u64>() + hist.over[0] as u64;
-            // How much of the range the graph actually resolves: a measure that
-            // drops when sampling starts missing sparse populations.
-            let nonzero = hist.bins[0].iter().filter(|&&n| n > 0).count();
-            log::info!(
-                "hist-bench: {mode} {:>5}M  {:>5}x{:<5}  {:>10}  {:>6.2}  {:>6.2}   {:>3}/256      {:>7}  {}",
-                b32 / 1_000_000,
-                grid.0,
-                grid.1,
-                total,
-                gpu_ms,
-                read_ms,
-                nonzero,
-                hist.over[0],
-                hist.peak(),
-            );
+            if best.as_ref().is_none_or(|p| r.1 < p.1) {
+                best = Some(r);
+            }
         }
+        let Some((grid, gpu_ms, _read, hist)) = best else {
+            log::info!("hist-bench: {name} — unavailable");
+            continue;
+        };
+        let total: u64 = hist.bins[0].iter().map(|&n| n as u64).sum::<u64>() + hist.over[0] as u64;
+        // How much of the range the graph resolves — drops as sampling either
+        // misses sparse populations or averages them away.
+        let nonzero = hist.bins[0].iter().filter(|&&n| n > 0).count();
+        // Fraction of the image's pixels that had any influence on the result.
+        let seen = if point {
+            grid.0 as f64 * grid.1 as f64 / image_px as f64 * 100.0
+        } else {
+            100.0
+        };
+        log::info!(
+            "hist-bench: {name} {:>5}x{:<6} {:>10}  {:>7.2}%  {:>6.2}  {:>3}  {:>8.5}  {:>7}",
+            grid.0,
+            grid.1,
+            total,
+            seen,
+            gpu_ms,
+            nonzero,
+            hist.over[0] as f64 / total.max(1) as f64 * 100.0,
+            hist.over[0],
+        );
     }
 }
 

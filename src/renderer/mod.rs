@@ -877,12 +877,7 @@ impl Renderer {
     ///
     /// Returns whether a measurement is now in flight — so the caller only
     /// records the state it was measured from once the work really started.
-    pub fn update_histogram(
-        &mut self,
-        params: &RenderParams,
-        image_w: i32,
-        image_h: i32,
-    ) -> bool {
+    pub fn update_histogram(&mut self, params: &RenderParams, image_w: i32, image_h: i32) -> bool {
         if self.image.is_none() || self.upload.is_some() {
             return false;
         }

@@ -6,7 +6,7 @@ use super::colors::{
     panel_bg, panel_bg_alpha, ACCENT, CHANNEL_B, CHANNEL_G, CHANNEL_R, GUIDE_ADD, GUIDE_HOVER,
     PANEL_ALPHA,
 };
-use super::{clickable, PanoProj, RulerInfo, UiAction, UiInputs, UiState};
+use super::{clickable, LevelsDrag, LevelsGrip, PanoProj, RulerInfo, UiAction, UiInputs, UiState};
 
 /// Height of the borderless custom titlebar; the top strip is reserved for it so
 /// the slot flags / metadata box never sit under the window controls.
@@ -1875,10 +1875,7 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
     let label_color = egui::Color32::from_gray(150);
 
     let coord_line = match cp.degrees {
-        Some((lon, lat)) => format!(
-            "X {}px {lon:.2}°   Y {}px {lat:.2}°",
-            cp.x, cp.y
-        ),
+        Some((lon, lat)) => format!("X {}px {lon:.2}°   Y {}px {lat:.2}°", cp.x, cp.y),
         None => format!("X {}px   Y {}px", cp.x, cp.y),
     };
     // Plain text for width measurement only — matches what `channel_row` (below)
@@ -1912,7 +1909,8 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
         .fold(0.0_f32, f32::max);
     let box_w = widest + PAD * 2.0;
     let row_h = ctx.fonts(|f| f.row_height(&font));
-    let box_h = SWATCH_H + PAD * 2.0 + row_h * rows.len() as f32 + ROW_GAP * (rows.len() - 1) as f32;
+    let box_h =
+        SWATCH_H + PAD * 2.0 + row_h * rows.len() as f32 + ROW_GAP * (rows.len() - 1) as f32;
 
     let screen = ctx.screen_rect();
     let left = if pos.x + MARGIN + box_w <= screen.right() {
@@ -1920,7 +1918,8 @@ fn color_pick_tooltip(ctx: &egui::Context, inputs: &UiInputs) {
     } else {
         pos.x - MARGIN - box_w
     };
-    let top = (pos.y - box_h / 2.0).clamp(screen.top(), (screen.bottom() - box_h).max(screen.top()));
+    let top =
+        (pos.y - box_h / 2.0).clamp(screen.top(), (screen.bottom() - box_h).max(screen.top()));
     let tip_pos = egui::pos2(
         left.clamp(screen.left(), (screen.right() - box_w).max(screen.left())),
         top,
@@ -2059,6 +2058,10 @@ fn hist_band_color(channels: &[egui::Color32]) -> egui::Color32 {
 
 /// Height of the levels handle strip below the plot.
 const LEVELS_STRIP_H: f32 = 11.0;
+/// How close (in points) the pointer must come to a levels handle to grab it
+/// rather than the bar between them. Wider than the 8pt triangle, since a 9pt
+/// target is a fiddly thing to hit exactly.
+const LEVELS_GRAB: f32 = 6.0;
 
 /// The histogram of the displayed image, its scale selector, and the levels
 /// handles beneath it. Drawn full width under the metadata grid; `width` is the
@@ -2244,37 +2247,62 @@ fn levels_handles(
     // routinely leaves the 11pt strip, and losing the pointer there would strand
     // the handle (the same reason `ruler_spawn_drag` reads it this way).
     let ctx = ui.ctx().clone();
-    let pointer_t = ctx.pointer_interact_pos().map(|p| t_of(p.x));
+    let pointer = ctx.pointer_interact_pos();
+    let pointer_t = pointer.map(|p| t_of(p.x));
 
-    // Which handle a gesture owns is decided once, at the start, and held for the
-    // rest of it — otherwise dragging one past the other would silently hand the
-    // gesture to its neighbour halfway through.
-    //
-    // Drag only: a bare click deliberately does nothing. Jumping the nearest
-    // handle on click would make two deliberate positioning clicks in quick
-    // succession read as a double-click and wipe the adjustment instead.
+    // Which element the pointer is over, hit-tested by hand rather than by
+    // allocating three overlapping widgets, so the priority is explicit: the
+    // handles win over the bar they sit on the ends of. Only ever `Some` when the
+    // pointer is actually within the strip, so the hover highlight can't light up
+    // from somewhere else in the box.
+    let hot = pointer
+        .filter(|p| strip.expand(2.0).contains(*p))
+        .and_then(|p| {
+            let (bx, wx) = (x_of(black), x_of(white));
+            let (db, dw) = ((p.x - bx).abs(), (p.x - wx).abs());
+            if db.min(dw) <= LEVELS_GRAB {
+                Some(if dw < db {
+                    LevelsGrip::White
+                } else {
+                    LevelsGrip::Black
+                })
+            } else if p.x > bx && p.x < wx {
+                Some(LevelsGrip::Both)
+            } else {
+                // Outside the range entirely: nothing to grab, so nothing
+                // highlights and a drag started here does nothing.
+                None
+            }
+        });
+
+    // The grip is decided once, at drag-start, and held for the rest of the
+    // gesture — otherwise dragging one handle past the other would silently hand
+    // the gesture to its neighbour halfway through.
     if resp.drag_started() {
-        if let Some(t) = pointer_t {
-            state.levels_drag = Some((t - white).abs() < (t - black).abs());
+        if let (Some(grip), Some(grab_t)) = (hot, pointer_t) {
+            state.levels_drag = Some(LevelsDrag {
+                grip,
+                grab_t,
+                start: (black, white),
+            });
         }
     }
-    if let (Some(is_white), Some(t)) = (state.levels_drag, pointer_t) {
+    if let (Some(drag), Some(t)) = (state.levels_drag, pointer_t) {
         // `drag_stopped` included so the release frame's final position lands —
         // without it the last few pixels of a fast drag are dropped.
         if resp.dragged() || resp.drag_stopped() {
-            // The handle being dragged stops against its neighbour rather than
-            // shoving it along: pushing black through white would otherwise
-            // carry the white point with it, and dragging back would leave it
-            // where it was shoved to, silently destroying a value the user set.
-            let gap = crate::app::LEVELS_MIN_GAP;
-            let (black, white) = if is_white {
-                (black, t.max(black + gap))
-            } else {
-                (t.min(white - gap), white)
-            };
+            let (black, white) = drag.resolve(t, crate::app::LEVELS_MIN_GAP);
             actions.push(UiAction::SetLevels { black, white });
         }
-        ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        ctx.set_cursor_icon(match drag.grip {
+            LevelsGrip::Both => egui::CursorIcon::Grabbing,
+            _ => egui::CursorIcon::ResizeHorizontal,
+        });
+    } else if let Some(grip) = hot {
+        ctx.set_cursor_icon(match grip {
+            LevelsGrip::Both => egui::CursorIcon::Grab,
+            _ => egui::CursorIcon::ResizeHorizontal,
+        });
     }
     if !resp.dragged() && !resp.is_pointer_button_down_on() {
         state.levels_drag = None;
@@ -2287,38 +2315,47 @@ fn levels_handles(
         });
     }
 
-    let hovered = resp.contains_pointer();
+    // Highlight only the element the gesture is on (or, when idle, the one the
+    // pointer is over) — lighting all of them says nothing about what a drag
+    // would actually move.
+    let live = state.levels_drag.map(|d| d.grip).or(hot);
     let painter = ui.painter();
-    // The track: the slice of the range that survives, drawn between the handles.
+    let bar_y = strip.top() + 1.0;
     painter.line_segment(
         [
-            egui::pos2(x_of(black), strip.top() + 1.0),
-            egui::pos2(x_of(white), strip.top() + 1.0),
+            egui::pos2(x_of(black), bar_y),
+            egui::pos2(x_of(white), bar_y),
         ],
-        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70)),
+        if live == Some(LevelsGrip::Both) {
+            egui::Stroke::new(3.0, ACCENT)
+        } else {
+            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70))
+        },
     );
-    for (t, fill) in [
-        (black, egui::Color32::from_gray(40)),
-        (white, egui::Color32::from_gray(225)),
+    for (grip, t, fill) in [
+        (LevelsGrip::Black, black, egui::Color32::from_gray(40)),
+        (LevelsGrip::White, white, egui::Color32::from_gray(225)),
     ] {
         let x = x_of(t);
-        let top = strip.top() + 1.0;
-        let bottom = strip.bottom() - 1.0;
         let half = 4.0;
         let tri = vec![
-            egui::pos2(x, top),
-            egui::pos2(x - half, bottom),
-            egui::pos2(x + half, bottom),
+            egui::pos2(x, bar_y),
+            egui::pos2(x - half, strip.bottom() - 1.0),
+            egui::pos2(x + half, strip.bottom() - 1.0),
         ];
-        let stroke = if hovered || state.levels_drag.is_some() {
-            egui::Stroke::new(1.0, ACCENT)
+        let stroke = if live == Some(grip) {
+            egui::Stroke::new(1.5, ACCENT)
         } else {
             egui::Stroke::new(1.0, egui::Color32::from_gray(120))
         };
         painter.add(egui::Shape::convex_polygon(tri, fill, stroke));
     }
-    if hovered {
-        resp.on_hover_text("Drag to set the display black / white point (double-click resets)");
+    if let Some(grip) = live {
+        resp.on_hover_text(match grip {
+            LevelsGrip::Black => "Display black point — drag (double-click resets)",
+            LevelsGrip::White => "Display white point — drag (double-click resets)",
+            LevelsGrip::Both => "Drag to slide both levels together",
+        });
     }
 }
 
@@ -2423,7 +2460,11 @@ fn channel_boxes(count: u8) -> Vec<(&'static str, egui::Color32, u8)> {
     match count {
         1 => vec![("L", a, 0)],
         2 => vec![("L", a, 0), ("A", a, 3)],
-        3 => vec![("R", CHANNEL_R, 0), ("G", CHANNEL_G, 1), ("B", CHANNEL_B, 2)],
+        3 => vec![
+            ("R", CHANNEL_R, 0),
+            ("G", CHANNEL_G, 1),
+            ("B", CHANNEL_B, 2),
+        ],
         _ => vec![
             ("R", CHANNEL_R, 0),
             ("G", CHANNEL_G, 1),

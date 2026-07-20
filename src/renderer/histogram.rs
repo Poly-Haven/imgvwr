@@ -226,7 +226,12 @@ impl HistogramPass {
     /// should draw the flat image into. `None` if it could not be allocated.
     ///
     /// # Safety: the GL context must be current.
-    pub unsafe fn begin(&mut self, gl: &glow::Context, w: i32, h: i32) -> Option<glow::Framebuffer> {
+    pub unsafe fn begin(
+        &mut self,
+        gl: &glow::Context,
+        w: i32,
+        h: i32,
+    ) -> Option<glow::Framebuffer> {
         if self.failed_size == Some((w, h)) {
             return None;
         }

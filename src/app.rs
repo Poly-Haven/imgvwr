@@ -3258,9 +3258,7 @@ impl App {
             // Ctrl+G: remove one guide subdivision level (undoes a Shift+G step).
             (_, Some("g")) | (_, Some("G")) if ctrl => self.remove_guides_step(),
             // Shift+G: add the next guide subdivision level (old plain-G behaviour).
-            (_, Some("g")) | (_, Some("G")) if self.modifiers.shift_key() => {
-                self.add_next_guide()
-            }
+            (_, Some("g")) | (_, Some("G")) if self.modifiers.shift_key() => self.add_next_guide(),
             // G: show/hide the existing guides (adds the first one if there are
             // none yet).
             (_, Some("g")) | (_, Some("G")) => self.toggle_guides_visibility(),
@@ -5735,15 +5733,13 @@ impl App {
 
         if let Some((w, h, buf)) = clipboard_grab {
             self.clipboard_copy_pending = false;
-            self.show_toast(
-                match copy_rgba_to_clipboard(w as u32, h as u32, buf) {
-                    Ok(()) => "Copied to clipboard".to_string(),
-                    Err(e) => {
-                        log::error!("clipboard copy failed: {e}");
-                        "Clipboard copy failed".to_string()
-                    }
-                },
-            );
+            self.show_toast(match copy_rgba_to_clipboard(w as u32, h as u32, buf) {
+                Ok(()) => "Copied to clipboard".to_string(),
+                Err(e) => {
+                    log::error!("clipboard copy failed: {e}");
+                    "Clipboard copy failed".to_string()
+                }
+            });
         }
 
         if let Some((w, h, buf)) = grabbed {
@@ -5780,11 +5776,13 @@ impl App {
 /// RGBA → BGRA channel swizzle (CF_DIB has no real alpha channel).
 #[cfg(windows)]
 fn copy_rgba_to_clipboard(width: u32, height: u32, mut rgba: Vec<u8>) -> Result<(), String> {
-    use windows_sys::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFOHEADER};
+    use windows_sys::Win32::Graphics::Gdi::{BITMAPINFOHEADER, BI_RGB};
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
-    use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+    use windows_sys::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+    };
     use windows_sys::Win32::System::Ole::CF_DIB;
 
     for px in rgba.chunks_exact_mut(4) {

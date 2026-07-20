@@ -192,6 +192,95 @@ impl UiInputs {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{LevelsDrag, LevelsGrip};
+
+    const GAP: f32 = 0.005;
+
+    fn drag(grip: LevelsGrip, start: (f32, f32), grab_t: f32) -> LevelsDrag {
+        LevelsDrag {
+            grip,
+            grab_t,
+            start,
+        }
+    }
+
+    /// A grab applies the pointer's movement, not its position — so grabbing a
+    /// handle anywhere within its hit area doesn't teleport it under the cursor.
+    #[test]
+    fn handle_tracks_movement_not_position() {
+        let d = drag(LevelsGrip::Black, (0.2, 0.8), 0.23);
+        assert_eq!(d.resolve(0.23, GAP).0, 0.2);
+        assert!((d.resolve(0.33, GAP).0 - 0.3).abs() < 1e-6);
+    }
+
+    /// Each handle stops against its neighbour instead of pushing it along.
+    #[test]
+    fn handles_stop_against_each_other() {
+        let b = drag(LevelsGrip::Black, (0.2, 0.6), 0.2);
+        let (black, white) = b.resolve(0.95, GAP);
+        assert!(
+            (black - (0.6 - GAP)).abs() < 1e-6,
+            "black clamped below white"
+        );
+        assert_eq!(white, 0.6, "white must not be shoved along");
+
+        let w = drag(LevelsGrip::White, (0.4, 0.6), 0.6);
+        let (black, white) = w.resolve(0.0, GAP);
+        assert_eq!(black, 0.4, "black must not be shoved along");
+        assert!(
+            (white - (0.4 + GAP)).abs() < 1e-6,
+            "white clamped above black"
+        );
+    }
+
+    /// Handles stay inside the graph's own 0..1 axis.
+    #[test]
+    fn handles_clamp_to_the_axis() {
+        assert_eq!(
+            drag(LevelsGrip::Black, (0.3, 0.9), 0.3)
+                .resolve(-5.0, GAP)
+                .0,
+            0.0
+        );
+        assert_eq!(
+            drag(LevelsGrip::White, (0.1, 0.7), 0.7).resolve(5.0, GAP).1,
+            1.0
+        );
+    }
+
+    /// The bar slides both points and keeps the range's width exactly.
+    #[test]
+    fn bar_slides_both_preserving_width() {
+        let d = drag(LevelsGrip::Both, (0.2, 0.5), 0.35);
+        let (black, white) = d.resolve(0.55, GAP);
+        assert!((black - 0.4).abs() < 1e-6);
+        assert!((white - 0.7).abs() < 1e-6);
+        assert!((white - black - 0.3).abs() < 1e-6, "width preserved");
+    }
+
+    /// Running the bar into an edge stops the pair rather than squashing it —
+    /// clamping each end independently would have collapsed the range instead.
+    #[test]
+    fn bar_stops_at_the_edges_without_squashing() {
+        let d = drag(LevelsGrip::Both, (0.2, 0.5), 0.35);
+        let (black, white) = d.resolve(-10.0, GAP);
+        assert_eq!(black, 0.0);
+        assert!(
+            (white - 0.3).abs() < 1e-6,
+            "width preserved at the left edge"
+        );
+
+        let (black, white) = d.resolve(10.0, GAP);
+        assert!(
+            (black - 0.7).abs() < 1e-6,
+            "width preserved at the right edge"
+        );
+        assert_eq!(white, 1.0);
+    }
+}
+
 /// The 2D image↔screen mapping the rulers need. Screen UV (`v_uv`, GL y-up) maps
 /// to image uv as `uv = 0.5 + pan + (v_uv - 0.5) * s` (y negated); image pixel =
 /// `uv * size`. Resolution-independent, so the UI applies it against the egui
@@ -220,6 +309,53 @@ pub struct PanoProj {
     pub aspect: f32,
 }
 
+/// What a levels gesture under the histogram is holding.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LevelsGrip {
+    Black,
+    White,
+    /// The bar between the two handles: slides the whole range, keeping the
+    /// distance between the points fixed.
+    Both,
+}
+
+/// A levels drag in progress.
+#[derive(Clone, Copy)]
+pub struct LevelsDrag {
+    pub grip: LevelsGrip,
+    /// Where on the graph's 0..1 axis the pointer went down, and what the levels
+    /// were at that moment. The gesture applies the pointer's *movement* since
+    /// then rather than snapping to its position, so nothing jumps on grab —
+    /// which matters most for `Both`, where snapping would centre the whole
+    /// range under the cursor.
+    pub grab_t: f32,
+    pub start: (f32, f32),
+}
+
+impl LevelsDrag {
+    /// The levels this drag produces with the pointer at `t` on the graph's 0..1
+    /// axis. Pure, so the interaction's arithmetic is testable without a pointer.
+    pub fn resolve(&self, t: f32, gap: f32) -> (f32, f32) {
+        let (sb, sw) = self.start;
+        let d = t - self.grab_t;
+        match self.grip {
+            // Each handle stops against its neighbour rather than shoving it
+            // along: pushing black through white would otherwise carry the white
+            // point with it, and dragging back would leave it where it was
+            // shoved to, destroying a value the user had set.
+            LevelsGrip::Black => ((sb + d).clamp(0.0, sw - gap), sw),
+            LevelsGrip::White => (sb, (sw + d).clamp(sb + gap, 1.0)),
+            // Slide the whole range, keeping its width: the *shift* is clamped
+            // rather than each end, so running into an edge stops the pair
+            // instead of squashing it against the wall.
+            LevelsGrip::Both => {
+                let d = d.clamp(-sb, 1.0 - sw);
+                (sb + d, sw + d)
+            }
+        }
+    }
+}
+
 /// Transient UI state that persists across frames.
 #[derive(Default)]
 pub struct UiState {
@@ -239,11 +375,10 @@ pub struct UiState {
     /// drag-start so the rest of the gesture targets that exact guide (robust to
     /// other guides being added/at the cap mid-drag). `None` = no ruler spawn-drag.
     pub guide_spawn: Option<usize>,
-    /// Which levels handle is being dragged under the histogram (`false` = the
-    /// black point, `true` = the white point), captured at drag-start so the rest
-    /// of the gesture stays on that handle even once the pointer passes the other
-    /// one. Also keeps the metadata box revealed for the duration of the drag.
-    pub levels_drag: Option<bool>,
+    /// The levels gesture in progress under the histogram, captured at
+    /// drag-start so the rest of it stays on that element even once the pointer
+    /// passes another. Also keeps the metadata box revealed for the duration.
+    pub levels_drag: Option<LevelsDrag>,
     /// Whether the H help dialog is open.
     pub show_help: bool,
     /// Whether the settings dialog is open.

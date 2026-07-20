@@ -583,8 +583,10 @@ mod tests {
         // HDR format + flat content but a square aspect ratio -> not a panorama.
         assert!(!make_img("p.exr", 32, 32, pole_flat(32, 32)).is_equirectangular());
         // HDR format + 2:1 aspect but ordinary 2D content -> not a panorama.
-        assert!(!make_img("p.exr", 64, 32, buf(64, 32, |x, _| ((x * 255) / 63) as u8))
-            .is_equirectangular());
+        assert!(
+            !make_img("p.exr", 64, 32, buf(64, 32, |x, _| ((x * 255) / 63) as u8))
+                .is_equirectangular()
+        );
     }
 
     #[test]

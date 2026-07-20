@@ -5406,16 +5406,19 @@ impl App {
         // the same laziness as the clip mask above. `wanted` carries the image's
         // raw (unrotated) dimensions, which is what sizes the sample grid; a
         // rotation permutes pixels but cannot change their values.
+        let histogram_now = HistogramKey {
+            epoch: self.histogram_epoch,
+            exposure: self.exposure,
+            gamma: self.gamma,
+        };
+        // The key a measurement is currently in flight for, kept so a result that
+        // lands after the image changed can be recognised and thrown away.
+        let histogram_inflight = self.histogram_key;
         let histogram_want = if self.metadata_slide > 0.001 {
-            let key = HistogramKey {
-                epoch: self.histogram_epoch,
-                exposure: self.exposure,
-                gamma: self.gamma,
-            };
             self.current_image
                 .as_ref()
-                .filter(|_| self.histogram_key != Some(key))
-                .map(|img| (key, img.width as i32, img.height as i32))
+                .filter(|_| self.histogram_key != Some(histogram_now))
+                .map(|img| (histogram_now, img.width as i32, img.height as i32))
         } else {
             None
         };
@@ -5671,14 +5674,22 @@ impl App {
             }
         }
         self.color_pick_last = new_color_pick;
+        // Generation check, in the same spirit as `poll_loads`': a measurement
+        // still in flight when the image (or the view transform, or the animation
+        // frame) changed describes what was on screen *before*, and must not be
+        // shown beside what's on screen now. Only the epoch is compared —
+        // exposure and gamma ease continuously, and a single frame of lag there
+        // is just the graph animating along with the image.
+        if let Some(h) = new_histogram {
+            if histogram_inflight.is_some_and(|k| k.epoch == histogram_now.epoch) {
+                if log::log_enabled!(log::Level::Debug) {
+                    log_histogram(&h);
+                }
+                self.histogram = Some(Arc::new(h));
+            }
+        }
         if let Some(key) = histogram_measured {
             self.histogram_key = Some(key);
-        }
-        if let Some(h) = new_histogram {
-            if log::log_enabled!(log::Level::Debug) {
-                log_histogram(&h);
-            }
-            self.histogram = Some(Arc::new(h));
         }
         // `about_to_wait` would otherwise park on `Wait` and the finished
         // measurement would sit in its buffer until the next unrelated event.

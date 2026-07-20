@@ -92,7 +92,15 @@ impl Target {
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, nearest);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, clamp);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, clamp);
-        let fbo = gl.create_framebuffer().ok()?;
+        let fbo = match gl.create_framebuffer() {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("histogram: create framebuffer failed: {e}");
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.delete_texture(tex);
+                return None;
+            }
+        };
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
         gl.framebuffer_texture_2d(
             glow::FRAMEBUFFER,
@@ -101,8 +109,18 @@ impl Target {
             Some(tex),
             0,
         );
+        // An allocation the driver refused leaves an incomplete framebuffer that
+        // silently discards every draw, which would show up as a permanently
+        // empty graph rather than as an error. Check, and tear down cleanly.
+        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         gl.bind_texture(glow::TEXTURE_2D, None);
+        if status != glow::FRAMEBUFFER_COMPLETE {
+            log::warn!("histogram: {w}x{h} target incomplete ({status:#x}); skipping");
+            gl.delete_framebuffer(fbo);
+            gl.delete_texture(tex);
+            return None;
+        }
         Some(Target {
             tex,
             fbo,
@@ -122,6 +140,9 @@ pub struct HistogramPass {
     src_loc: Option<glow::UniformLocation>,
     ssbo: glow::Buffer,
     target: Option<Target>,
+    /// A target size the driver refused. Remembered so the failure isn't retried
+    /// — and re-logged — on every single frame; a different size tries again.
+    failed_size: Option<(i32, i32)>,
     /// Set between [`dispatch`](Self::dispatch) and the fence being signalled.
     fence: Option<glow::Fence>,
     /// Staging for both the pre-dispatch zeroing and the readback, so neither
@@ -168,6 +189,7 @@ impl HistogramPass {
             src_loc,
             ssbo,
             target: None,
+            failed_size: None,
             fence: None,
             scratch: vec![0u32; BUF_U32],
         })
@@ -183,13 +205,20 @@ impl HistogramPass {
     /// The offscreen grid to render `image_w × image_h` into: the image's own
     /// size, scaled down to about [`TARGET_SAMPLES`] pixels while preserving the
     /// aspect ratio (never upscaled).
-    pub fn grid_size(image_w: i32, image_h: i32) -> (i32, i32) {
+    ///
+    /// A total-pixel budget alone doesn't bound either side — a 1×200000 strip is
+    /// well under the budget yet far past `GL_MAX_TEXTURE_SIZE`, and the
+    /// allocation would simply fail. Each axis is clamped as well; the resulting
+    /// aspect skew only re-weights which parts of such a pathological image get
+    /// sampled, which beats having no histogram at all.
+    pub fn grid_size(image_w: i32, image_h: i32, max_texture: i32) -> (i32, i32) {
         let (w, h) = (image_w.max(1), image_h.max(1));
         let px = w as f64 * h as f64;
         let scale = (TARGET_SAMPLES / px).sqrt().min(1.0);
+        let cap = max_texture.max(1);
         (
-            ((w as f64 * scale).round() as i32).max(1),
-            ((h as f64 * scale).round() as i32).max(1),
+            ((w as f64 * scale).round() as i32).clamp(1, cap),
+            ((h as f64 * scale).round() as i32).clamp(1, cap),
         )
     }
 
@@ -198,11 +227,15 @@ impl HistogramPass {
     ///
     /// # Safety: the GL context must be current.
     pub unsafe fn begin(&mut self, gl: &glow::Context, w: i32, h: i32) -> Option<glow::Framebuffer> {
+        if self.failed_size == Some((w, h)) {
+            return None;
+        }
         if self.target.as_ref().map(|t| t.size) != Some((w, h)) {
             if let Some(old) = self.target.take() {
                 old.delete(gl);
             }
             self.target = Target::new(gl, w, h);
+            self.failed_size = self.target.is_none().then_some((w, h));
         }
         let fbo = self.target.as_ref()?.fbo;
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));

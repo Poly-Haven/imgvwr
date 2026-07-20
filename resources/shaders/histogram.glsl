@@ -38,11 +38,20 @@ void main() {
     barrier();
 
     // The dispatch is rounded up to whole workgroups, so the last row/column of
-    // groups runs partly outside the target.
+    // groups runs partly outside the target. Note the guard wraps the whole
+    // accumulation rather than returning early — the barriers below must be
+    // reached by every invocation in the workgroup, divergent or not.
+    //
+    // Fully transparent texels are skipped: on screen they show nothing but the
+    // background, so their RGB (typically a black matte) describes no visible
+    // pixel, and counting it would pile a phantom spike into bin 0. Compositing
+    // them against the background instead would make the graph depend on which
+    // backdrop the B key happens to be cycled to, which is worse.
     ivec2 size = textureSize(u_src, 0);
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-    if (p.x < size.x && p.y < size.y) {
-        vec3 c = texelFetch(u_src, p, 0).rgb;
+    vec4 texel = texelFetch(u_src, clamp(p, ivec2(0), size - 1), 0);
+    if (p.x < size.x && p.y < size.y && texel.a > 0.0) {
+        vec3 c = texel.rgb;
         for (uint ch = 0u; ch < 3u; ch++) {
             float v = c[ch];
             // Spelled `!(v < 1.0)` rather than `v >= 1.0` so that NaN — which

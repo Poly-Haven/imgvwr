@@ -2154,8 +2154,24 @@ fn histogram_plot(
         }
         // The spike shares the bins' normalisation, so it reads on the same
         // scale; an over-range population larger than the tallest bin saturates.
+        //
+        // Unless *everything* is over-range — raise the exposure far enough and
+        // it will be. Then no ordinary bin holds anything, `peak` is 0, and
+        // normalising the spike against it would scale it to nothing, blanking
+        // the graph at the exact moment it has the most to say. Fall back to the
+        // spike's own height so it reads full.
+        let spike_peak = if peak == 0 {
+            hist.over.iter().copied().max().unwrap_or(0)
+        } else {
+            peak
+        };
         let spike: Vec<f32> = (0..active)
-            .map(|c| inputs.histogram_scale.normalise(hist.over[c], peak).min(1.0))
+            .map(|c| {
+                inputs
+                    .histogram_scale
+                    .normalise(hist.over[c], spike_peak)
+                    .min(1.0)
+            })
             .collect();
         // Snapped to whole pixels for the same reason as the columns above: a
         // 1px bar straddling a pixel boundary can rasterise to nothing, and this

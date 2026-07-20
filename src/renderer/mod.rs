@@ -887,7 +887,7 @@ impl Renderer {
             return false;
         }
         let gl = self.gl.clone();
-        let (gw, gh) = HistogramPass::grid_size(image_w, image_h);
+        let (gw, gh) = HistogramPass::grid_size(image_w, image_h, self.max_texture_size);
         match &mut self.histogram {
             Some(pass) if !pass.is_pending() => {
                 if unsafe { pass.begin(&gl, gw, gh) }.is_none() {

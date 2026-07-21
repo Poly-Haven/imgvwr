@@ -3,9 +3,11 @@
 //! There is no CPU-side display transform anywhere in imgvwr — OCIO is only ever
 //! built as a GPU program ([`crate::ocio::OcioManager::build_gpu_shader`]), which
 //! is why even the colour-pick tooltip reads its "Display" value back out of the
-//! framebuffer. So the histogram is measured where the transform lives: the whole
-//! image is drawn flat into a small offscreen target through the *same* fragment
-//! program the screen uses, and a compute shader bins the result.
+//! framebuffer. So the histogram is measured where the transform lives: the
+//! source is drawn into a small offscreen target through the *same* fragment
+//! program the screen uses, and a compute shader bins the result. That source is
+//! either the whole image drawn flat or exactly what the viewport shows — see
+//! [`HistogramSource`](super::HistogramSource).
 //!
 //! Two properties are load-bearing:
 //!
@@ -18,9 +20,13 @@
 //!   the fence with a zero timeout and only copies the 3 KB result back once the
 //!   GPU says it has finished. At most one dispatch is ever in flight.
 //!
-//! The cost of subsampling is that a *handful* of clipped pixels in a 24k
-//! panorama can fall between samples. Finding those is what the clipping overlay
-//! (`C`, backed by a max-mipped mask) is for; this is a tonal overview.
+//! An image too big for the target is measured a strided slice per frame, and
+//! the passes accumulate: with an integer stride the phase offsets partition the
+//! image, so once every phase has run the result is bit-identical to having read
+//! every pixel. Until it settles — and past the pass cap, which only a
+//! pathologically large image reaches — a *handful* of clipped pixels can still
+//! fall between samples. Finding those is what the clipping overlay (`C`, backed
+//! by a max-mipped mask) is for; this is a tonal overview.
 //!
 //! Compute shaders are core in GL 4.3, which is the context imgvwr asks for, but
 //! a driver that hands back something older simply leaves [`HistogramPass::new`]
@@ -159,7 +165,9 @@ pub struct HistogramPass {
 
 impl HistogramPass {
     /// Build the pass, or `None` when the driver has no compute support (the
-    /// caller then just never shows a histogram). # GL context must be current.
+    /// caller then just never shows a histogram).
+    ///
+    /// # Safety: the GL context must be current.
     pub unsafe fn new(gl: &glow::Context) -> Option<Self> {
         let v = gl.version();
         if v.is_embedded || (v.major, v.minor) < (4, 3) {
@@ -213,10 +221,11 @@ impl HistogramPass {
     /// preserving the aspect ratio and never upscaling.
     ///
     /// Because the draw then reads exactly one source texel per target texel
-    /// (`point_sample`), that factor *is* the sampling stride — a 4096×2048
-    /// image at a 1M budget becomes a 1414×707 grid, every ~3rd pixel each way,
-    /// spread evenly over the whole image. Anything already at or under the
-    /// budget is measured in full.
+    /// (`point_sample`), that factor *is* the sampling stride — a 24576×12288
+    /// EXR becomes a 4096×2048 grid, every 6th pixel each way, spread evenly
+    /// over the whole image. Anything already at or under [`SAMPLES_PER_PASS`]
+    /// (a 4096×2048 image is) comes out at stride 1 and is measured in full,
+    /// leaving the phase offsets nothing to add.
     ///
     /// A total-pixel budget alone doesn't bound either side — a 1×200000 strip is
     /// well under the budget yet far past `GL_MAX_TEXTURE_SIZE`, and the

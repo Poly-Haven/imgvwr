@@ -69,7 +69,8 @@ pub struct UiInputs {
     pub isolate_channel: Option<u8>,
     /// Histogram of the displayed image (after exposure and the view transform),
     /// measured on the GPU. `None` until the first measurement lands, or when the
-    /// driver has no compute support — the graph is then simply omitted.
+    /// driver has no compute support — the plot area and the levels handles are
+    /// drawn either way, just with no curve in them.
     pub histogram: Option<std::sync::Arc<crate::renderer::Histogram>>,
     /// Vertical scale for that graph (the L / Sq / Log selector).
     pub histogram_scale: crate::prefs::HistogramScale,

@@ -886,7 +886,7 @@ impl Renderer {
         self.histogram.as_ref().is_some_and(|p| p.is_pending())
     }
 
-    /// Re-measure the display histogram (see [`histogram`]) from `source`, drawn
+    /// Re-measure the display histogram (see [`Histogram`]) from `source`, drawn
     /// into a small offscreen target through the live display pipeline and then
     /// binned by a compute shader.
     ///

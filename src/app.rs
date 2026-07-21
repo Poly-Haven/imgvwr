@@ -5462,9 +5462,9 @@ impl App {
 
         // Display histogram (F2 box): re-measure when the graph no longer matches
         // the tone state, and only while the box is actually on screen — exactly
-        // the same laziness as the clip mask above. `wanted` carries the image's
-        // raw (unrotated) dimensions, which is what sizes the sample grid; a
-        // rotation permutes pixels but cannot change their values.
+        // the same laziness as the clip mask above. `histogram_want` carries the
+        // image's raw (unrotated) dimensions, which is what sizes the sample
+        // grid; a rotation permutes pixels but cannot change their values.
         let viewport_px = self.gfx.as_ref().map(|g| {
             let s = g.window.inner_size();
             (s.width.max(1) as i32, s.height.max(1) as i32)

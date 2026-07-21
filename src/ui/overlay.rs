@@ -1784,7 +1784,7 @@ fn metadata_hud(
             });
         });
     state.view_menu_open = view_menu_open;
-    // A levels drag routinely wanders off the 11pt handle strip and out of the
+    // A levels drag routinely wanders off the handle strip and out of the
     // box; without this the box would slide away mid-gesture, taking the graph
     // being aimed at with it.
     resp.response.contains_pointer() || view_menu_open || state.levels_drag.is_some()

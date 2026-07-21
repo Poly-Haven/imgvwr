@@ -37,7 +37,10 @@ if (-not $dlls) {
 $dlls | ForEach-Object { Copy-Item $_.FullName $stage }
 
 # 3. MSVC runtime (redistributable) for clean machines without the VC++ redist.
-foreach ($rt in 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll') {
+#    vcomp140 is the OpenMP runtime: LibRaw is built with OpenMP (see vcpkg.json)
+#    and the RAW shim compiles with /openmp, so both import it — without it the
+#    zip fails to start on a machine that has no VC++ redist.
+foreach ($rt in 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'vcomp140.dll') {
     $sys = Join-Path $env:SystemRoot "System32\$rt"
     if ((Test-Path $sys) -and -not (Test-Path (Join-Path $stage $rt))) {
         Copy-Item $sys $stage

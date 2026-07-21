@@ -6936,10 +6936,6 @@ fn fmt_ev(ev: f32) -> String {
     }
 }
 
-/// Normalise an sRGB 0–255 colour to the 0–1 floats written as the framebuffer
-/// clear colour. The default framebuffer isn't sRGB, and the image shader writes
-/// display-encoded output, so the picked sRGB value is used directly (no
-/// linearisation) and appears as chosen.
 /// Per-pixel absolute difference of `a` and `b`, at `a`'s resolution (nearest-
 /// sampling `b` when sizes differ). Precomputed so the GPU mip chain of the diff
 /// shows the *average of the per-pixel differences* — identical regions stay 0 at
@@ -7010,6 +7006,10 @@ fn pano_rotate(yaw: f32, pitch: f32, rx: f32, ry: f32, rz: f32) -> (f32, f32, f3
     (cy * rx - sy * pz, py, sy * rx + cy * pz) // … then yaw about Y
 }
 
+/// Normalise an sRGB 0–255 colour to the 0–1 floats written as the framebuffer
+/// clear colour. The default framebuffer isn't sRGB, and the image shader writes
+/// display-encoded output, so the picked sRGB value is used directly (no
+/// linearisation) and appears as chosen.
 fn srgb_u8_to_f32(c: [u8; 3]) -> [f32; 3] {
     [
         c[0] as f32 / 255.0,

@@ -880,11 +880,6 @@ impl Renderer {
         }
     }
 
-    /// Whether a display histogram can be measured at all on this driver.
-    pub fn has_histogram(&self) -> bool {
-        self.histogram.is_some()
-    }
-
     /// True while a measurement is awaiting its fence: the caller should keep
     /// requesting frames so [`poll_histogram`](Self::poll_histogram) can land it.
     pub fn histogram_pending(&self) -> bool {
@@ -1083,7 +1078,6 @@ impl Renderer {
     ///   neighbours still lands far above the display maximum and spreads its
     ///   blowout across the footprint. Faster only where both are already under
     ///   a millisecond. Hence point sampling.
-    #[cfg(debug_assertions)]
     ///
     /// `force_grid` overrides the computed grid. Setting it to the exact
     /// dimensions of mip level *n* with `point_sample: false` is how the

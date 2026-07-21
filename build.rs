@@ -100,6 +100,10 @@ fn main() {
         .include(&include_dir)
         .std("c++17")
         .flag_if_supported("/EHsc")
+        // Parallelise the 16-bit -> float RGBA expansion (~1 GB of traffic on a
+        // 45 Mpx frame). LibRaw itself must also be built with OpenMP (see
+        // vcpkg.json's `libraw[openmp]`) or its demosaic runs single-threaded.
+        .flag_if_supported("/openmp")
         .compile("raw_shim");
     let raw_bindings = bindgen::Builder::default()
         .header("src/raw_native/shim.h")

@@ -18,6 +18,7 @@
 #include <libraw/libraw.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 
@@ -34,13 +35,38 @@ void copy_field(char (&dst)[N], const char *src) {
     dst[N - 1] = '\0';
 }
 
+// Live state between begin() and finish(): the LibRaw instance owning the
+// developed image, LibRaw's 16-bit output bitmap, and the scale that maps it to
+// scene-linear float.
+struct RawHandle {
+    LibRaw *rp = nullptr;
+    libraw_processed_image_t *img = nullptr;
+    float scale = 1.0f;
+};
+
+void destroy_handle(RawHandle *hn) {
+    if (!hn) {
+        return;
+    }
+    if (hn->img) {
+        LibRaw::dcraw_clear_mem(hn->img);
+    }
+    if (hn->rp) {
+        hn->rp->recycle();
+        delete hn->rp;
+    }
+    delete hn;
+}
+
 } // namespace
 
-extern "C" float *raw_native_load(const char *path, RawNativeInfo *info) {
+extern "C" void *raw_native_begin(const char *path, RawNativeInfo *info) {
     if (!path || !info) {
         return nullptr;
     }
-    LibRaw rp;
+    RawHandle *hn = new RawHandle();
+    hn->rp = new LibRaw();
+    LibRaw &rp = *hn->rp;
 
     // --- View-faithful linear development parameters -----------------------
     rp.imgdata.params.use_camera_wb = 1;   // factual, camera-recorded WB
@@ -56,9 +82,11 @@ extern "C" float *raw_native_load(const char *path, RawNativeInfo *info) {
     // orientation so portrait shots come out upright (output dims reflect it).
 
     if (rp.open_file(path) != LIBRAW_SUCCESS) {
+        destroy_handle(hn);
         return nullptr;
     }
     if (rp.unpack() != LIBRAW_SUCCESS) {
+        destroy_handle(hn);
         return nullptr;
     }
 
@@ -77,7 +105,7 @@ extern "C" float *raw_native_load(const char *path, RawNativeInfo *info) {
     info->focal_len = rp.imgdata.other.focal_len;
 
     if (rp.dcraw_process() != LIBRAW_SUCCESS) {
-        rp.recycle();
+        destroy_handle(hn);
         return nullptr;
     }
 
@@ -94,35 +122,47 @@ extern "C" float *raw_native_load(const char *path, RawNativeInfo *info) {
     }
     double headroom = (mn < 1e29 && mn > 1e-6) ? 1.0 / mn : 1.0;
     headroom = std::min(std::max(headroom, 1.0), 16.0);
-    const float scale = static_cast<float>(headroom / 65535.0);
+    hn->scale = static_cast<float>(headroom / 65535.0);
 
     int errc = 0;
-    libraw_processed_image_t *img = rp.dcraw_make_mem_image(&errc);
-    if (!img) {
-        rp.recycle();
+    hn->img = rp.dcraw_make_mem_image(&errc);
+    if (!hn->img) {
+        destroy_handle(hn);
         return nullptr;
     }
     // Expect a 16-bit bitmap; bail on anything unexpected.
+    const libraw_processed_image_t *img = hn->img;
     if (img->type != LIBRAW_IMAGE_BITMAP || img->bits != 16 || img->colors < 1 ||
         img->colors > 4 || img->width == 0 || img->height == 0) {
-        LibRaw::dcraw_clear_mem(img);
-        rp.recycle();
+        destroy_handle(hn);
         return nullptr;
     }
 
-    const size_t w = img->width;
-    const size_t h = img->height;
+    info->width = static_cast<int>(img->width);
+    info->height = static_cast<int>(img->height);
+    info->colors = img->colors;
+    return hn;
+}
+
+extern "C" int raw_native_finish(void *handle, float *dst) {
+    RawHandle *hn = static_cast<RawHandle *>(handle);
+    if (!hn || !hn->img || !dst) {
+        destroy_handle(hn);
+        return -1;
+    }
+    const libraw_processed_image_t *img = hn->img;
+    const ptrdiff_t n =
+        static_cast<ptrdiff_t>(img->width) * static_cast<ptrdiff_t>(img->height);
     const int colors = img->colors;
-    const size_t n = w * h;
-    float *rgba = static_cast<float *>(std::malloc(n * 4 * sizeof(float)));
-    if (!rgba) {
-        LibRaw::dcraw_clear_mem(img);
-        rp.recycle();
-        return nullptr;
-    }
-
+    const float scale = hn->scale;
     const unsigned short *src = reinterpret_cast<const unsigned short *>(img->data);
-    for (size_t i = 0; i < n; ++i) {
+
+    // Expand LibRaw's tightly-packed 16-bit output to interleaved float RGBA,
+    // writing straight into the caller's buffer. Parallel because this touches
+    // ~1 GB for a 45 Mpx frame and is purely element-wise (OpenMP 2.0 via MSVC
+    // needs a signed loop counter).
+#pragma omp parallel for schedule(static)
+    for (ptrdiff_t i = 0; i < n; ++i) {
         const unsigned short *p = src + i * colors;
         float r, g, b;
         if (colors == 1) {
@@ -132,19 +172,16 @@ extern "C" float *raw_native_load(const char *path, RawNativeInfo *info) {
             g = p[1] * scale;
             b = p[2] * scale; // colors==4 (rare): ignore the 4th component
         }
-        rgba[i * 4 + 0] = r;
-        rgba[i * 4 + 1] = g;
-        rgba[i * 4 + 2] = b;
-        rgba[i * 4 + 3] = 1.0f;
+        dst[i * 4 + 0] = r;
+        dst[i * 4 + 1] = g;
+        dst[i * 4 + 2] = b;
+        dst[i * 4 + 3] = 1.0f;
     }
 
-    info->width = static_cast<int>(w);
-    info->height = static_cast<int>(h);
-    info->colors = colors;
-
-    LibRaw::dcraw_clear_mem(img);
-    rp.recycle();
-    return rgba;
+    destroy_handle(hn);
+    return 0;
 }
 
-extern "C" void raw_native_free(float *data) { std::free(data); }
+extern "C" void raw_native_abort(void *handle) {
+    destroy_handle(static_cast<RawHandle *>(handle));
+}

@@ -77,6 +77,19 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   Stripping them breaks snap/resize. The GDI frame flash on focus-change is suppressed by
   `suppress_nonclient_frame` (swallows `WM_NCPAINT`, forwards `WM_NCACTIVATE` with `lParam = -1`);
   `DWMWA_NCRENDERING_POLICY` is the DWM frame, not the GDI one — wrong lever.
+- **LibRaw must be built with OpenMP, or RAW loads are ~2.6× slower.** vcpkg's `libraw` port
+  defaults to *no* OpenMP, and nothing warns you — the demosaic just runs single-threaded.
+  `vcpkg.json` pins `libraw[openmp]`; classic-mode installs need `libraw[openmp]` explicitly.
+  Verify with `strings raw_r.dll | grep -i vcomp` (case-**insensitive** — MSVC writes
+  `VCOMP140.DLL`; a case-sensitive grep gives a false negative). Measured on a 45 Mpx NEF,
+  32 cores: decode 4.24 s → 1.83 s from OpenMP alone, then → 1.62 s after the shim stopped
+  handing a malloc'd buffer across the FFI for Rust to copy (`begin`/`finish` now expand
+  straight into a Rust-owned `Vec`, which also halves peak memory: no 727 MB duplicate).
+  Stage breakdown at that point: unpack 0.57 s (LibRaw, serial — not parallelised upstream),
+  dcraw_process 0.74 s, make_mem_image 0.26 s. Don't "fix" the remaining time by changing
+  `user_qual` (AHD) — that changes the pixels. OpenMP does not: serial vs 32 threads renders
+  bit-identical. The packaged zip must bundle **vcomp140.dll** (`package.ps1`) or a machine
+  without the VC++ redist can't start it.
 - **RAW develops to scene-linear float with highlight headroom above 1.0.** The shim rescales by
   `1/min(nonzero pre_mul)` so the green channel saturates at 1.0 and other channels can exceed 1.0 —
   lowering exposure / applying Filmic recovers blown regions. Don't change `highlight=1` (unclip)

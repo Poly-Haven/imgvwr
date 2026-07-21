@@ -33,14 +33,28 @@ pub fn load_raw_native(path: &Path) -> Result<ImageData> {
         focal_len: 0.0,
     };
 
-    let ptr = unsafe { ffi::raw_native_load(c_path.as_ptr(), &mut info) };
-    if ptr.is_null() || info.width <= 0 || info.height <= 0 {
+    // Two-phase so the shim expands straight into a buffer we own: `begin`
+    // develops the frame and reports its size, then `finish` writes the float
+    // RGBA into our allocation. (Previously the shim malloc'd its own buffer and
+    // we copied it out — an extra ~700 MB memcpy and double the peak memory on a
+    // 45 Mpx RAW.)
+    let handle = unsafe { ffi::raw_native_begin(c_path.as_ptr(), &mut info) };
+    if handle.is_null() || info.width <= 0 || info.height <= 0 {
+        if !handle.is_null() {
+            unsafe { ffi::raw_native_abort(handle) };
+        }
         return Err(anyhow!("LibRaw failed to decode {}", path.display()));
     }
 
     let len = info.width as usize * info.height as usize * 4;
-    let data = unsafe { std::slice::from_raw_parts(ptr, len).to_vec() };
-    unsafe { ffi::raw_native_free(ptr) };
+    let mut data = Vec::<f32>::with_capacity(len);
+    // SAFETY: `data` has `len` floats of spare capacity; the shim fills exactly
+    // that many, and we only publish them via set_len once it reports success.
+    let rc = unsafe { ffi::raw_native_finish(handle, data.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(anyhow!("LibRaw failed to develop {}", path.display()));
+    }
+    unsafe { data.set_len(len) };
 
     Ok(ImageData {
         path: path.to_path_buf(),

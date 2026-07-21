@@ -29,12 +29,25 @@ typedef struct {
     float focal_len;  /* focal length, mm */
 } RawNativeInfo;
 
-/* Decode `path` to interleaved RGBA float (width*height*4), scene-linear with a
- * linear camera response (no tone curve), demosaiced, camera-white-balanced and
- * converted to sRGB primaries. Returns NULL on failure. On success fills `*info`
- * and returns a buffer the caller must release with raw_native_free. */
-float *raw_native_load(const char *path, RawNativeInfo *info);
-void raw_native_free(float *data);
+/* Two-phase decode, so the float conversion can write straight into a buffer the
+ * caller owns: no intermediate allocation is handed across the FFI boundary and
+ * copied (which for a 45 Mpx RAW meant an extra ~700 MB memcpy and double peak
+ * memory).
+ *
+ * `raw_native_begin` opens, unpacks and develops `path`, filling `*info` (dims +
+ * camera metadata). Returns an opaque handle, or NULL on failure.
+ *
+ * `raw_native_finish` converts the developed image into `dst`, which the caller
+ * must have sized `info.width * info.height * 4` floats: interleaved RGBA,
+ * scene-linear with a linear camera response (no tone curve), demosaiced,
+ * camera-white-balanced and converted to sRGB primaries. It consumes the handle
+ * (valid or not afterwards) and returns 0 on success.
+ *
+ * `raw_native_abort` releases a handle without converting. Every successful
+ * `begin` must be paired with exactly one `finish` or `abort`. */
+void *raw_native_begin(const char *path, RawNativeInfo *info);
+int raw_native_finish(void *handle, float *dst);
+void raw_native_abort(void *handle);
 
 #ifdef __cplusplus
 }

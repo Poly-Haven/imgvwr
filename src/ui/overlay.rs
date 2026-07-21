@@ -2165,15 +2165,15 @@ fn histogram_plot(
         rect.min + egui::vec2(1.0, 1.0),
         rect.max - egui::vec2(spike_w + 2.0, 1.0),
     );
-    // One column per *device pixel*, not per bin. The plot is normally narrower
-    // than 256 points, and a quad thinner than a pixel that happens to fall
-    // between two pixel centres rasterises to nothing at all — silently dropping
-    // whole bins. A broad distribution hides that (its neighbours fill in), but
-    // an isolated spike just vanishes, and isolated spikes are exactly what this
-    // graph is worth reading for. Each pixel takes the *tallest* bin that lands
-    // on it, so a lone spike survives rather than being averaged into invisibility.
-    let cols = (plot.width().round() as usize).max(1);
-    let col_w = plot.width() / cols as f32;
+    // One column per bin, one point wide: the plot is exactly [`HIST_PLOT_W`] =
+    // `BINS` points across, which is the entire reason that constant is what it
+    // is. Keeping a column at least a whole device pixel is load-bearing, not
+    // tidiness — `Shape::mesh` goes straight to the GPU with no anti-aliasing,
+    // and a quad narrower than a pixel that falls between two pixel centres
+    // rasterises to nothing at all. A broad distribution hides that (its
+    // neighbours fill in), but an isolated spike just vanishes, and isolated
+    // spikes are exactly what this graph is worth reading for.
+    let col_w = plot.width() / bins as f32;
 
     // The strip shares the plot's x axis; the interaction spans both, so the
     // graph's own vertical edges are the handles' grab zones.
@@ -2189,15 +2189,10 @@ fn histogram_plot(
     if let Some(hist) = &inputs.histogram {
         let peak = hist.peak();
         let mut mesh = egui::Mesh::default();
-        for p in 0..cols {
-            let lo = p * bins / cols;
-            let hi = ((p + 1) * bins / cols).max(lo + 1).min(bins);
-            let x0 = plot.left() + p as f32 * col_w;
+        for b in 0..bins {
+            let x0 = plot.left() + b as f32 * col_w;
             let heights: Vec<f32> = (0..active)
-                .map(|c| {
-                    let tallest = hist.bins[c][lo..hi].iter().copied().max().unwrap_or(0);
-                    inputs.histogram_scale.normalise(tallest, peak)
-                })
+                .map(|c| inputs.histogram_scale.normalise(hist.bins[c][b], peak))
                 .collect();
             hist_column(&mut mesh, x0, x0 + col_w, plot, &heights, &palette);
         }

@@ -9,6 +9,7 @@ pub mod exr_native;
 pub mod image_loader;
 pub mod logging;
 pub mod ocio;
+pub mod playback;
 pub mod prefs;
 #[cfg(feature = "ocio")]
 pub mod raw_native;

@@ -2301,10 +2301,20 @@ fn levels_interaction(
     // Which element a given x belongs to. Hit-tested by hand rather than with
     // overlapping widgets, so the priority is explicit — and deliberately
     // *exhaustive*: every point in the zone belongs to something.
-    let grip_at = |x: f32| LevelsGrip::at(x, x_of(black), x_of(white), LEVELS_GRAB);
+    //
+    // Except when the range already spans everything, where "slide both" has
+    // nowhere to go. It then grabs nothing and shows nothing, rather than giving
+    // most of the graph a grab cursor that leads to a drag doing precisely
+    // nothing. Only the full span counts: with one handle pulled in there is
+    // room to slide toward the other side, so it stays live.
+    let both_inert = black <= 0.0 && white >= 1.0;
+    let grip_at = |x: f32| {
+        let grip = LevelsGrip::at(x, x_of(black), x_of(white), LEVELS_GRAB);
+        (!(both_inert && grip == LevelsGrip::Both)).then_some(grip)
+    };
     let hot = resp
         .contains_pointer()
-        .then(|| pointer.map(|p| grip_at(p.x)))
+        .then(|| pointer.and_then(|p| grip_at(p.x)))
         .flatten();
 
     // The grip is decided once, from where the pointer went *down*, and held for
@@ -2319,9 +2329,12 @@ fn levels_interaction(
     // dragging inward silently took the bar instead. `press_origin` is the one
     // that actually means "where did this drag start".
     if resp.drag_started() {
-        if let Some(press) = ctx.input(|i| i.pointer.press_origin()) {
+        if let Some((press, grip)) = ctx
+            .input(|i| i.pointer.press_origin())
+            .and_then(|p| grip_at(p.x).map(|g| (p, g)))
+        {
             state.levels_drag = Some(LevelsDrag {
-                grip: grip_at(press.x),
+                grip,
                 grab_t: t_of(press.x),
                 start: (black, white),
             });
@@ -2347,7 +2360,7 @@ fn levels_interaction(
         .is_pointer_button_down_on()
         .then(|| ctx.input(|i| i.pointer.press_origin()))
         .flatten()
-        .map(|p| grip_at(p.x));
+        .and_then(|p| grip_at(p.x));
     let live = state.levels_drag.map(|d| d.grip).or(pressed_grip).or(hot);
     if let Some(grip) = live {
         let dragging = state.levels_drag.is_some();
@@ -2363,8 +2376,8 @@ fn levels_interaction(
     // Double-click resets whatever was under the pointer: a handle goes back to
     // its own end of the range, the bar between them clears both.
     if resp.double_clicked() {
-        if let Some(press) = resp.interact_pointer_pos() {
-            let (black, white) = match grip_at(press.x) {
+        if let Some(grip) = resp.interact_pointer_pos().and_then(|p| grip_at(p.x)) {
+            let (black, white) = match grip {
                 LevelsGrip::Black => (0.0, white),
                 LevelsGrip::White => (black, 1.0),
                 LevelsGrip::Both => (0.0, 1.0),
@@ -3456,6 +3469,42 @@ mod tests {
         assert!(
             ((nw - nb) - (white - black)).abs() < 1e-4,
             "the range width must be preserved, got {}",
+            nw - nb
+        );
+    }
+
+    /// With the range spanning everything, "slide both" has nowhere to go, so it
+    /// must not advertise itself: no grab cursor, no highlight, no drag. That
+    /// would otherwise be most of the graph offering an interaction that then
+    /// does nothing at all.
+    #[test]
+    fn slide_both_is_inert_at_the_default_range() {
+        let mid = ORIGIN.x + 0.5 * HIST_PLOT_W;
+        let acts = drag_levels((0.0, 1.0), mid, mid + 40.0);
+        assert_eq!(
+            final_levels(&acts),
+            None,
+            "a drag across the full-range graph should do nothing"
+        );
+        let cursors = cursors_during_pre_drag_creep((0.0, 1.0), mid);
+        assert!(
+            cursors.iter().all(|c| *c != egui::CursorIcon::Grab),
+            "the grab cursor was offered with nothing to slide: {cursors:?}"
+        );
+    }
+
+    /// …but it comes back the moment either handle is pulled in, since there is
+    /// then room to slide toward the other side.
+    #[test]
+    fn slide_both_wakes_up_once_a_handle_moves() {
+        let mid = ORIGIN.x + 0.5 * HIST_PLOT_W;
+        // Only the white point pulled in: sliding right is still possible.
+        let acts = drag_levels((0.0, 0.8), mid, mid + 30.0);
+        let (nb, nw) = final_levels(&acts).expect("the pair should still be slidable");
+        assert!(nb > 0.0, "black should have slid in, got {nb}");
+        assert!(
+            ((nw - nb) - 0.8).abs() < 1e-4,
+            "width preserved, got {}",
             nw - nb
         );
     }

@@ -81,9 +81,10 @@ alongside it at `resources/fonts/OFL.txt`.
 Copyright (c) 2019–2024 The Bootstrap Authors
 (<https://github.com/twbs/icons>).
 
-A handful of Bootstrap Icons SVGs (gear, folder, window controls, chevron) are
-bundled and rasterised at runtime for the titlebar / menu controls. Bootstrap
-Icons is released under the MIT License.
+A handful of Bootstrap Icons SVGs (gear, folder, window controls, chevron, and
+the play / pause / stop transport controls) are bundled and rasterised at
+runtime for the titlebar, menus and the playback timeline. Bootstrap Icons is
+released under the MIT License.
 
 ---
 

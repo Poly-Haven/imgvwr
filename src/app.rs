@@ -715,6 +715,11 @@ pub struct App {
     /// screen, so a capture can verify the ring teardown.
     #[cfg(debug_assertions)]
     debug_stop_after: Option<i64>,
+    /// The cache bar's slot states, refreshed in `render` before the immutable
+    /// UI snapshot is taken (`ui_inputs` is `&self`, and rebuilding this needs
+    /// `&mut`). Shared by `Arc`, so a frame on which nothing changed costs a
+    /// refcount bump.
+    playback_states: Option<Arc<Vec<crate::playback::SlotState>>>,
     /// Comparator slots (Ctrl+1..=9 → index 0..=8); each pins a decoded image.
     slots: [Option<Arc<ImageData>>; 9],
     /// The image shown before the last slot recall, for the A/B toggle-back.
@@ -886,6 +891,7 @@ impl App {
             playback: None,
             #[cfg(debug_assertions)]
             debug_stop_after: None,
+            playback_states: None,
             slots: std::array::from_fn(|_| None),
             compare_prev: None,
             active_slot: None,
@@ -4786,6 +4792,24 @@ impl App {
         }
     }
 
+    /// The transport row's inputs. `None` — and so no row at all — unless the
+    /// viewer is a frame player. The slot states are shared, not copied: the
+    /// snapshot is refreshed in `render` (before the immutable `ui_inputs`
+    /// snapshot) and only when a slot state has actually changed.
+    fn playback_info(&self) -> Option<crate::ui::PlaybackInfo> {
+        let pb = self.playback.as_ref()?;
+        Some(crate::ui::PlaybackInfo {
+            first: pb.seq.first(),
+            last: pb.seq.last(),
+            frame: pb.frame(),
+            playing: pb.playing(),
+            target_fps: pb.target_fps(),
+            achieved_fps: pb.achieved_fps(),
+            behind: pb.behind(),
+            states: self.playback_states.clone().unwrap_or_default(),
+        })
+    }
+
     fn ui_inputs(&self) -> UiInputs {
         let display_views = self
             .ocio
@@ -4930,6 +4954,7 @@ impl App {
             },
             minimap: self.minimap_info(),
             color_pick: self.color_pick_last,
+            playback: self.playback_info(),
         }
     }
 
@@ -5050,7 +5075,12 @@ impl App {
                 )
             })
             .unwrap_or((1.0, 0.0));
-        let near_bottom = self.cursor_in_window && self.cursor_pos.y >= vh - (44.0 * scale) as f64;
+        // The reveal zone has to cover the panel's height, or the cursor would
+        // be over the panel before it appears. The transport row makes it
+        // taller, so the zone grows with it.
+        let reveal_h = if self.playback_active() { 100.0 } else { 44.0 };
+        let near_bottom =
+            self.cursor_in_window && self.cursor_pos.y >= vh - (reveal_h * scale) as f64;
         // The near-edge reveal only fires on a real mouse move (or to keep an
         // already-shown panel up); a window-follow resize sliding the bottom edge
         // under a stationary cursor must not pop it. Hovering the panel itself
@@ -5269,6 +5299,14 @@ impl App {
             }
             UiAction::RemoveGuide(i) => self.remove_guide(i),
             UiAction::ResetAdjustments => self.reset_image_processing(),
+            UiAction::PlaybackToggle => self.toggle_playback(),
+            UiAction::PlaybackStop => self.exit_playback(),
+            UiAction::PlaybackSeek(frame) => {
+                if let Some(pb) = self.playback.as_mut() {
+                    pb.seek(frame);
+                    self.request_redraw();
+                }
+            }
             UiAction::SetAutoExposure(on) => {
                 self.prefs.auto_exposure = on;
                 self.prefs.save();
@@ -5671,6 +5709,7 @@ impl App {
             self.show_playback_frame(frame);
         }
         self.upload_frame_lookahead();
+        self.refresh_playback_states();
         self.log_playback_stats(now);
         // Dev-only: leave playback once the pinned frame is on screen, so a
         // capture can verify the ring teardown re-installed it correctly.
@@ -5681,6 +5720,11 @@ impl App {
             self.debug_stop_after = None;
             self.exit_playback();
         }
+    }
+
+    /// Refresh the cache bar's slot states ahead of the immutable UI snapshot.
+    fn refresh_playback_states(&mut self) {
+        self.playback_states = self.playback.as_mut().map(|pb| pb.state_snapshot());
     }
 
     /// Diagnostic heartbeat: the rate actually achieved and how the cache window

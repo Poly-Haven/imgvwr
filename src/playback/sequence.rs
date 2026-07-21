@@ -179,6 +179,10 @@ pub struct Sequence {
     /// Frame number of `slots[0]`.
     first: i64,
     slots: Vec<Slot>,
+    /// Bumped whenever a slot's state actually changes. Lets the timeline's
+    /// cache bar be rebuilt only when it would differ, instead of rescanning
+    /// every slot on every rendered frame.
+    state_epoch: u64,
 }
 
 impl Sequence {
@@ -227,6 +231,7 @@ impl Sequence {
             }
             self.slots = slots;
             self.first = new_first;
+            self.state_epoch += 1;
             out.changed = true;
         }
 
@@ -241,18 +246,22 @@ impl Sequence {
                 slot.name = Some(name.into());
                 slot.len = len;
                 slot.state = SlotState::Unknown;
+                self.state_epoch += 1;
                 out.refreshed.push(frame);
                 out.changed = true;
             }
         }
         // Files that disappeared become holes.
+        let (first, mut epoch) = (self.first, self.state_epoch);
         for (i, slot) in self.slots.iter_mut().enumerate() {
-            let frame = self.first + i as i64;
+            let frame = first + i as i64;
             if slot.name.is_some() && !found.contains_key(&frame) {
                 *slot = Slot::default();
+                epoch += 1;
                 out.changed = true;
             }
         }
+        self.state_epoch = epoch;
         out
     }
 
@@ -272,6 +281,7 @@ impl Sequence {
             pad: detect_pad(opened, entries),
             first: opened.number,
             slots: Vec::new(),
+            state_epoch: 0,
         };
         let found = seq.match_entries(entries);
         // `match_entries` always accepts the opened file (it is canonical under
@@ -407,10 +417,16 @@ impl Sequence {
     /// hole — a slot with no file can only be `Missing`.
     pub fn set_state(&mut self, frame: i64, state: SlotState) {
         if let Some(i) = self.index_of(frame) {
-            if self.slots[i].name.is_some() {
+            if self.slots[i].name.is_some() && self.slots[i].state != state {
                 self.slots[i].state = state;
+                self.state_epoch += 1;
             }
         }
+    }
+
+    /// A counter that changes exactly when some slot's state does.
+    pub fn state_epoch(&self) -> u64 {
+        self.state_epoch
     }
 
     /// Full path of the file backing `frame`, or `None` for a hole.
@@ -478,6 +494,7 @@ impl Sequence {
                     },
                 })
                 .collect(),
+            state_epoch: 0,
         }
     }
 

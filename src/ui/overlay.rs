@@ -542,9 +542,15 @@ fn bottom_ruler_strip(
     resp.dragged()
 }
 
-/// Auto-hiding bottom panel of image-adjustment sliders (revealed by the cursor
-/// near the bottom edge). Sets `state.pointer_over_panel` so the app keeps it up
-/// while hovered. Currently holds the Exposure and Gamma sliders.
+/// How far below the window edge the bottom panel parks when hidden (points).
+/// Must exceed the panel's tallest form — ruler + transport row + two slider
+/// rows — or a sliver of it stays on screen when it should be gone.
+const BOTTOM_PARK: f32 = 160.0;
+
+/// Auto-hiding bottom panel (revealed by the cursor near the bottom edge). Sets
+/// `state.pointer_over_panel` so the app keeps it up while hovered. Holds the
+/// bottom pixel ruler, the playback transport row (only while playing back a
+/// sequence), and the image-adjustment sliders.
 fn bottom_panel(
     ctx: &egui::Context,
     inputs: &UiInputs,
@@ -565,7 +571,7 @@ fn bottom_panel(
     let resp = egui::Area::new(egui::Id::new("imgvwr_bottom"))
         .anchor(
             egui::Align2::LEFT_BOTTOM,
-            egui::vec2(0.0, (1.0 - slide) * 96.0),
+            egui::vec2(0.0, (1.0 - slide) * BOTTOM_PARK),
         )
         .constrain(false)
         .show(ctx, |ui| {
@@ -582,6 +588,13 @@ fn bottom_panel(
                     bottom_ruler_strip(ui, r, screen, guides_len, state, actions)
                 } else {
                     false
+                };
+                // Playback transport, between the ruler (which stays flush
+                // against the image it measures) and the adjustment sliders.
+                // Only present while playing back a sequence.
+                let transport_hot = match &inputs.playback {
+                    Some(pb) => super::timeline::transport_row(ui, pb, actions, screen.width()),
+                    None => false,
                 };
                 let sliders = egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(12, 7))
@@ -653,7 +666,7 @@ fn bottom_panel(
                             }
                         });
                     });
-                (strip_dragged, sliders.response.rect)
+                (strip_dragged || transport_hot, sliders.response.rect)
             });
             let content_rect = content.response.rect;
             let (strip_dragged, slider_rect) = content.inner;
@@ -2196,7 +2209,14 @@ fn histogram_plot(
             for (c, h) in heights[..active].iter_mut().enumerate() {
                 *h = inputs.histogram_scale.normalise(hist.bins[c][b], peak);
             }
-            hist_column(&mut mesh, x0, x0 + col_w, plot, &heights[..active], &palette);
+            hist_column(
+                &mut mesh,
+                x0,
+                x0 + col_w,
+                plot,
+                &heights[..active],
+                &palette,
+            );
         }
         // The spike shares the bins' normalisation, so it reads on the same
         // scale; an over-range population larger than the tallest bin saturates.

@@ -3,6 +3,7 @@
 
 mod colors;
 mod overlay;
+mod timeline;
 
 /// Give a clickable widget's response the pointing-hand cursor on hover (egui
 /// only does this for hyperlinks by default).
@@ -145,6 +146,30 @@ pub struct UiInputs {
     /// Right-drag colour-pick tooltip data, one frame behind the cursor. `None`
     /// when not colour-picking or the cursor is off the image.
     pub color_pick: Option<ColorPickInfo>,
+    /// Image-sequence playback: the transport row and timeline. `None` — and so
+    /// the whole row is absent — unless the viewer is a frame player.
+    pub playback: Option<PlaybackInfo>,
+}
+
+/// Everything the transport row and timeline need for one frame.
+pub struct PlaybackInfo {
+    /// Frame-number range of the timeline. Real frame numbers, not 0..N: VFX
+    /// users read these off and type them into other tools.
+    pub first: i64,
+    pub last: i64,
+    /// The playhead.
+    pub frame: i64,
+    pub playing: bool,
+    pub target_fps: f32,
+    /// Rolling average of recent frame advances; `None` before there is enough
+    /// history to mean anything.
+    pub achieved_fps: Option<f32>,
+    /// Whether the achieved rate is meaningfully short of the target — the
+    /// readout turns red.
+    pub behind: bool,
+    /// One entry per slot, in frame order, for the cache bar. Shared rather than
+    /// copied, and rebuilt only when a slot state actually changes.
+    pub states: std::sync::Arc<Vec<crate::playback::SlotState>>,
 }
 
 /// Live pixel-inspection readout for the right-drag colour-pick tooltip:
@@ -549,6 +574,12 @@ pub enum UiAction {
     RemoveGuide(usize),
     /// Reset all image adjustments (the bottom-panel Reset button = Ctrl+R).
     ResetAdjustments,
+    /// Play / pause sequence playback (the transport button, = Space).
+    PlaybackToggle,
+    /// Leave playback, staying on the current frame (the Stop button, = Esc).
+    PlaybackStop,
+    /// Move the playhead to this frame (a click or drag on the timeline).
+    PlaybackSeek(i64),
     /// Open the settings dialog (titlebar gear button).
     OpenSettings,
     // Borderless titlebar controls.

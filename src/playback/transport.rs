@@ -2,10 +2,11 @@
 //! frame-rate measurement. See plans/image_sequence_playback.md §7.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::playback::cache::FrameCache;
-use crate::playback::sequence::Sequence;
+use crate::playback::sequence::{Sequence, SlotState};
 
 /// How often the directory is re-scanned while in playback mode, so a render
 /// writing frames beside you extends the timeline live. One `read_dir`.
@@ -72,6 +73,10 @@ pub struct Playback {
     /// on a frame that has not decoded yet — the screen holds the old frame, and
     /// catches up the moment the new one arrives.
     pub shown: Option<i64>,
+    /// Slot states as the timeline's cache bar wants them, rebuilt only when
+    /// some slot state has actually changed. Shared with the UI rather than
+    /// copied per frame.
+    states: Option<(u64, Arc<Vec<SlotState>>)>,
 }
 
 impl Playback {
@@ -91,6 +96,22 @@ impl Playback {
             next_log: now + LOG_INTERVAL,
             ringed: false,
             shown: None,
+            states: None,
+        }
+    }
+
+    /// Slot states for the timeline's cache bar. Rebuilt only when a slot state
+    /// has actually changed, so the common case — a rendered frame on which
+    /// nothing moved — is an `Arc` clone rather than a scan of every slot.
+    pub fn state_snapshot(&mut self) -> Arc<Vec<SlotState>> {
+        let epoch = self.seq.state_epoch();
+        match &self.states {
+            Some((e, states)) if *e == epoch => states.clone(),
+            _ => {
+                let states: Arc<Vec<SlotState>> = Arc::new(self.seq.states().collect());
+                self.states = Some((epoch, states.clone()));
+                states
+            }
         }
     }
 
@@ -329,7 +350,6 @@ fn is_pal_region(region: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     /// A player over `present` (one flag per slot, frame numbers from 1) with
     /// every present frame already cached, running at 10 fps for round numbers.

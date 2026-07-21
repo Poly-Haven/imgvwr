@@ -372,6 +372,13 @@ struct ViewSig {
     projection: i32,
     rotation: i32,
     viewport: (i32, i32),
+    /// 2D wrap: with it on, tiled copies of the image fill what would otherwise
+    /// be empty viewport, and the pass counts those pixels too. Same framing,
+    /// different sample set — so it has to be part of the signature.
+    wrap: bool,
+    /// Squash/stretch (Alt+middle-drag): changes how much of the image fits the
+    /// viewport at a given zoom, and so which pixels the pass sees.
+    stretch: (f32, f32),
 }
 
 /// The navigation minimap panel rectangle in physical pixels (top-left origin),
@@ -5476,6 +5483,8 @@ impl App {
                     projection: c.projection_mode(),
                     rotation: self.rotation as i32,
                     viewport: viewport_px.unwrap_or((1, 1)),
+                    wrap: self.wrap_2d,
+                    stretch: (self.image_stretch.x, self.image_stretch.y),
                 }
             }),
         };

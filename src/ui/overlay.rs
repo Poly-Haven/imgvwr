@@ -2075,9 +2075,9 @@ fn hist_band_color(channels: &[egui::Color32]) -> egui::Color32 {
 /// Height of the levels handle strip below the plot.
 const LEVELS_STRIP_H: f32 = 13.0;
 /// How far (in points) either side of a levels handle still grabs the handle
-/// rather than the bar between them. Wider than the 8pt triangle, since an 8pt
-/// target is a fiddly thing to hit exactly; everything beyond the outermost
-/// handle belongs to it too, so there is no dead zone at either end.
+/// rather than sliding the pair. Wider than the 8pt triangle, since an 8pt
+/// target is a fiddly thing to hit exactly; past that band — *including* the
+/// space outside the pair — a drag slides both (see [`LevelsGrip::at`]).
 const LEVELS_GRAB: f32 = 7.0;
 
 /// The histogram of the displayed image, its scale selector, and the levels
@@ -2165,7 +2165,7 @@ fn histogram_plot(
         rect.min + egui::vec2(1.0, 1.0),
         rect.max - egui::vec2(spike_w + 2.0, 1.0),
     );
-    // One column per bin, one point wide: the plot is exactly [`HIST_PLOT_W`] =
+    // One column per bin, one point wide: the plot is exactly `HIST_PLOT_W` =
     // `BINS` points across, which is the entire reason that constant is what it
     // is. Keeping a column at least a whole device pixel is load-bearing, not
     // tidiness — `Shape::mesh` goes straight to the GPU with no anti-aliasing,

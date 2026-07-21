@@ -229,9 +229,10 @@ impl HistogramPass {
     ///
     /// A total-pixel budget alone doesn't bound either side — a 1×200000 strip is
     /// well under the budget yet far past `GL_MAX_TEXTURE_SIZE`, and the
-    /// allocation would simply fail. Each axis is clamped as well; the resulting
-    /// aspect skew only re-weights which parts of such a pathological image get
-    /// sampled, which beats having no histogram at all.
+    /// allocation would simply fail. [`stride`](Self::stride) therefore also
+    /// raises the stride until the *longer* side fits, which keeps the grid
+    /// uniform: such an image is sampled more sparsely than the budget alone
+    /// would ask for, but still evenly and still at its true aspect.
     pub fn grid_size(image_w: i32, image_h: i32, max_texture: i32) -> (i32, i32) {
         let (w, h) = (image_w.max(1), image_h.max(1));
         let s = Self::stride(w, h, max_texture);

@@ -3475,11 +3475,6 @@ impl App {
         }
     }
 
-    /// Fullscreen only: hide the cursor after `CURSOR_IDLE_HIDE` of no real motion,
-    /// show it otherwise. Idempotent (only touches the OS state on a change). Driven
-    /// from `about_to_wait` (per loop iteration, scheduled to wake at the deadline)
-    /// and from the motion handler (instant show). Navigation emits no motion, so a
-    /// hidden cursor stays hidden across image changes until the user moves it.
     /// Any in-progress pointer gesture (pan/look, squash-stretch, alt-resize,
     /// guide or minimap drag). The cursor must stay visible through these even if
     /// the user pauses mid-gesture, so they suppress the fullscreen idle-hide.
@@ -3493,6 +3488,11 @@ impl App {
             || self.ui_state.levels_drag.is_some()
     }
 
+    /// Fullscreen only: hide the cursor after `CURSOR_IDLE_HIDE` of no real motion,
+    /// show it otherwise. Idempotent (only touches the OS state on a change). Driven
+    /// from `about_to_wait` (per loop iteration, scheduled to wake at the deadline)
+    /// and from the motion handler (instant show). Navigation emits no motion, so a
+    /// hidden cursor stays hidden across image changes until the user moves it.
     fn update_cursor_idle_hide(&mut self) {
         let idle = self.fullscreen
             && self.cursor_in_window

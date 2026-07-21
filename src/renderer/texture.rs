@@ -9,6 +9,8 @@
 //! `sampler2DArray` (one texture unit) holds every tile, sidestepping the
 //! bound-sampler-count limit regardless of tile count.
 
+use std::collections::VecDeque;
+
 use glow::HasContext as _;
 
 use crate::image_loader::{ImageData, PixelBuffer};
@@ -190,6 +192,12 @@ pub struct TiledTexture {
 pub enum ImageTextureKind {
     Single(glow::Texture),
     Tiled(TiledTexture),
+    /// One frame of the sequence-playback ring. Every frame of a sequence shares
+    /// dimensions, pixel type, sRGB flag and clip point, so only the texture
+    /// *name* varies — which is why displaying a different frame needs no shader
+    /// change and no new sampler variant. The ring owns the texture; this is a
+    /// borrowed name and must never be deleted from here.
+    RingFrame(glow::Texture),
 }
 
 pub struct ImageTexture {
@@ -205,7 +213,8 @@ pub struct ImageTexture {
 impl ImageTexture {
     pub fn sampler_kind(&self) -> SamplerKind {
         match self.kind {
-            ImageTextureKind::Single(_) => SamplerKind::Single,
+            // A ring frame is an ordinary 2D texture: same sampler, same shader.
+            ImageTextureKind::Single(_) | ImageTextureKind::RingFrame(_) => SamplerKind::Single,
             ImageTextureKind::Tiled(_) => SamplerKind::Tiled,
         }
     }
@@ -215,6 +224,244 @@ impl ImageTexture {
         match self.kind {
             ImageTextureKind::Single(t) => gl.delete_texture(t),
             ImageTextureKind::Tiled(t) => gl.delete_texture(t.array),
+            // Owned by the ring, which deletes it in `FrameRing::delete`.
+            ImageTextureKind::RingFrame(_) => {}
+        }
+    }
+}
+
+/// Total VRAM the playback ring may take. There is no portable way to ask a
+/// GL 4.3 core context how much video memory exists, so this is a budget rather
+/// than a measurement — and allocation failure is caught anyway, so a card with
+/// less than this still gets as deep a ring as it can hold.
+const RING_BYTES_BUDGET: u64 = 1024 * 1024 * 1024;
+/// Ring depth bounds. Two is the floor for a ring to mean anything (the
+/// displayed frame plus one being uploaded ahead of it); past a few hundred the
+/// per-frame upload has long since stopped being the cost.
+const MIN_RING_DEPTH: usize = 2;
+const MAX_RING_DEPTH: usize = 512;
+
+/// How deep a ring to build for `frame_bytes`-sized frames of a `frame_count`
+/// sequence. When the whole sequence fits, the ring becomes the whole sequence
+/// and per-frame upload disappears after the first pass; when it does not, it
+/// collapses to a handful of frames uploaded a little ahead of the playhead.
+/// Same code either way — no cliff.
+pub fn ring_depth(frame_bytes: u64, frame_count: usize) -> usize {
+    let budget = std::env::var("IMGVWR_PLAYBACK_RING_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(RING_BYTES_BUDGET);
+    let by_budget = (budget / frame_bytes.max(1)) as usize;
+    by_budget
+        .clamp(MIN_RING_DEPTH, MAX_RING_DEPTH)
+        .min(frame_count.max(MIN_RING_DEPTH))
+}
+
+/// A ring of identically-formatted textures, one per resident sequence frame.
+///
+/// The metadata is uniform across the sequence, so it lives here once and only
+/// the GL texture name varies per frame — see [`ImageTextureKind::RingFrame`].
+pub struct FrameRing {
+    slots: Vec<glow::Texture>,
+    /// Which frame each slot holds (`None` = never written).
+    slot_frame: Vec<Option<i64>>,
+    /// Slot indices in upload order, oldest first, for reuse.
+    order: VecDeque<usize>,
+    width: i32,
+    height: i32,
+    format: u32,
+    ty: u32,
+    /// The metadata every frame of this sequence shares.
+    pub aspect: f32,
+    pub is_encoded_srgb: bool,
+    pub is_u8: bool,
+    pub clip_max: [f32; 4],
+}
+
+impl FrameRing {
+    /// Allocate a ring sized for `data`'s dimensions and pixel type. Stops early
+    /// (keeping what it got) if the GPU runs out, so a card smaller than the
+    /// budget still plays. `None` when fewer than two slots could be allocated,
+    /// or when the frames would need tiling — a sequence of 24k panoramas is not
+    /// a real workload, and the caller falls back to replacing one texture.
+    ///
+    /// # Safety: the GL context must be current.
+    pub unsafe fn new(
+        gl: &glow::Context,
+        data: &ImageData,
+        depth: usize,
+        threshold: i32,
+        half_float: bool,
+    ) -> Option<Self> {
+        let (w, h) = (data.width as i32, data.height as i32);
+        if w <= 0 || h <= 0 || tile_grid(w, h, threshold).is_some() {
+            return None;
+        }
+        let (mut internal, format, ty, _, _) = pixel_format(data);
+        if half_float && matches!(data.pixels, PixelBuffer::F32(_)) {
+            internal = glow::RGBA16F;
+        }
+        let levels = (w.max(h) as f32).log2().floor() as i32 + 1;
+
+        let mut slots = Vec::with_capacity(depth);
+        for i in 0..depth {
+            let Ok(tex) = gl.create_texture() else { break };
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            drain_gl_errors(gl);
+            gl.tex_storage_2d(glow::TEXTURE_2D, levels, internal, w, h);
+            if took_oom(gl, &format!("{w}x{h} ring slot {i}")) {
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.delete_texture(tex);
+                break;
+            }
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            set_filters(gl, glow::TEXTURE_2D);
+            set_anisotropy(gl, glow::TEXTURE_2D);
+            slots.push(tex);
+        }
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        if slots.len() < MIN_RING_DEPTH {
+            for t in slots {
+                gl.delete_texture(t);
+            }
+            return None;
+        }
+        log::info!(
+            "playback ring: {} x {w}x{h} textures ({} MB)",
+            slots.len(),
+            slots.len() as u64 * frame_gpu_bytes(data, half_float) / (1024 * 1024)
+        );
+        Some(Self {
+            slot_frame: vec![None; slots.len()],
+            order: VecDeque::with_capacity(slots.len()),
+            slots,
+            width: w,
+            height: h,
+            format,
+            ty,
+            aspect: data.aspect(),
+            is_encoded_srgb: data.is_encoded_srgb,
+            is_u8: data.is_u8(),
+            clip_max: data.clip_max,
+        })
+    }
+
+    pub fn depth(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// The texture holding `frame`, if it is resident on the GPU.
+    pub fn texture_for(&self, frame: i64) -> Option<glow::Texture> {
+        self.slot_frame
+            .iter()
+            .position(|f| *f == Some(frame))
+            .map(|i| self.slots[i])
+    }
+
+    /// True when `data` has the layout this ring was built for. A sequence whose
+    /// frames disagree cannot share one ring.
+    pub fn accepts(&self, data: &ImageData) -> bool {
+        data.width as i32 == self.width
+            && data.height as i32 == self.height
+            && pixel_format(data).1 == self.format
+            && pixel_format(data).2 == self.ty
+    }
+
+    /// Upload `frame` into the ring, reusing the least-recently-uploaded slot
+    /// that is not currently displayed. Returns whether it is now resident.
+    ///
+    /// # Safety: the GL context must be current.
+    pub unsafe fn upload(
+        &mut self,
+        gl: &glow::Context,
+        frame: i64,
+        data: &ImageData,
+        displayed: Option<i64>,
+    ) -> bool {
+        if !self.accepts(data) {
+            return false;
+        }
+        if self.texture_for(frame).is_some() {
+            return true;
+        }
+        let slot = match self.slot_frame.iter().position(|f| f.is_none()) {
+            Some(i) => i,
+            None => {
+                // Oldest first, skipping whatever is on screen. With a ring of
+                // two or more there is always a reusable slot.
+                let Some(pos) = self
+                    .order
+                    .iter()
+                    .position(|&i| self.slot_frame[i] != displayed)
+                    .and_then(|pos| self.order.remove(pos))
+                else {
+                    return false;
+                };
+                pos
+            }
+        };
+        let (_, format, ty, _, src) = pixel_format(data);
+        gl.bind_texture(glow::TEXTURE_2D, Some(self.slots[slot]));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.tex_sub_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            0,
+            0,
+            self.width,
+            self.height,
+            format,
+            ty,
+            glow::PixelUnpackData::Slice(Some(src)),
+        );
+        // Keep the mip chain: the zoom-out quality path and the 8-bit Lanczos
+        // minification both depend on it, and NVIDIA measure a full chain at
+        // 4096x4096 at ~0.16 ms — under 0.4% of a 24 fps budget.
+        gl.generate_mipmap(glow::TEXTURE_2D);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        self.slot_frame[slot] = Some(frame);
+        self.order.retain(|&i| i != slot);
+        self.order.push_back(slot);
+        true
+    }
+
+    /// # Safety: the GL context must be current.
+    pub unsafe fn delete(self, gl: &glow::Context) {
+        for t in self.slots {
+            gl.delete_texture(t);
+        }
+    }
+}
+
+/// GPU bytes one frame occupies, accounting for the half-float storage option.
+pub fn frame_gpu_bytes(data: &ImageData, half_float: bool) -> u64 {
+    let px = data.width as u64 * data.height as u64 * 4;
+    match data.pixels {
+        PixelBuffer::U8(_) => px,
+        PixelBuffer::F32(_) if half_float => px * 2,
+        PixelBuffer::F32(_) => px * 4,
+    }
+}
+
+/// Upload `data` as a complete single texture in one call, for the paths that
+/// cannot spread the work over frames: leaving playback (the frame you stopped
+/// on must survive the ring being freed) and the tiled-sequence fallback.
+/// `None` if the allocation fails. # Safety: the GL context must be current.
+pub unsafe fn upload_whole(
+    gl: &glow::Context,
+    data: &ImageData,
+    threshold: i32,
+    half_float: bool,
+) -> Option<ImageTexture> {
+    let mut job = begin_upload(gl, data, threshold, half_float)?;
+    loop {
+        if let Some(tex) = pump_upload(gl, &mut job, data) {
+            return Some(tex);
         }
     }
 }

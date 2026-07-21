@@ -14,7 +14,10 @@ use glow::HasContext as _;
 use crate::image_loader::ImageData;
 use crate::ocio::{OcioLut, OcioShader};
 use histogram::HistogramPass;
-use texture::{ImageTexture, ImageTextureKind, SamplerKind, SINGLE_TEXTURE_SAMPLER, TILED_SAMPLER};
+use texture::{
+    frame_gpu_bytes, FrameRing, ImageTexture, ImageTextureKind, SamplerKind,
+    SINGLE_TEXTURE_SAMPLER, TILED_SAMPLER,
+};
 
 pub use histogram::{Histogram, BINS as HISTOGRAM_BINS};
 
@@ -335,6 +338,12 @@ pub struct Renderer {
     /// Display-histogram measurement (F2 box). `None` when the driver has no
     /// compute support, in which case the graph is simply never shown.
     histogram: Option<HistogramPass>,
+    /// Sequence-playback frame ring. `Some` only while playing, and only when
+    /// the frames fit a single texture — see [`FrameRing`].
+    ring: Option<FrameRing>,
+    /// The ring frame currently on screen, so an upload can never reuse the slot
+    /// being drawn from.
+    ring_shown: Option<i64>,
 }
 
 impl Renderer {
@@ -376,6 +385,8 @@ impl Renderer {
                 clip_mask_texture: None,
                 post,
                 histogram,
+                ring: None,
+                ring_shown: None,
             })
         }
     }
@@ -459,6 +470,148 @@ impl Renderer {
             );
             gl.generate_mipmap(glow::TEXTURE_2D);
             gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+    }
+
+    // ---- sequence playback -------------------------------------------------
+
+    /// Build the playback frame ring from the first frame of a sequence, and
+    /// free the standalone image texture it replaces. Returns whether a ring was
+    /// created: `false` means the frames need tiling (or the GPU had no room),
+    /// and the caller should fall back to [`replace_image`](Self::replace_image)
+    /// per frame.
+    pub fn begin_sequence(&mut self, data: &ImageData, frame_count: usize) -> bool {
+        let gl = self.gl.clone();
+        self.end_ring();
+        let depth = texture::ring_depth(frame_gpu_bytes(data, self.half_float), frame_count);
+        let ring = unsafe { FrameRing::new(&gl, data, depth, self.threshold, self.half_float) };
+        match ring {
+            Some(ring) => {
+                // The ring supplies every displayed frame from here, so the
+                // standalone texture is dead weight — reclaim its VRAM before
+                // the first frame goes up.
+                if let Some(prev) = self.image.take() {
+                    unsafe { prev.delete(&gl) };
+                }
+                self.ring = Some(ring);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Tear the ring down, leaving `keep` (the frame the user stopped on)
+    /// installed as an ordinary standalone texture. Returns whether that
+    /// re-upload succeeded; on failure the view is left image-less, which the
+    /// caller reports as it would any other upload failure.
+    pub fn end_sequence(&mut self, keep: Option<&ImageData>) -> bool {
+        // Re-upload BEFORE freeing the ring: `self.image` currently borrows a
+        // ring texture, and deleting it first would leave a dangling name bound
+        // for however long the upload takes.
+        let ok = match keep {
+            Some(data) => self.replace_image(data),
+            None => {
+                self.drop_borrowed_ring_frame();
+                true
+            }
+        };
+        self.end_ring();
+        ok
+    }
+
+    /// Upload one sequence frame into the ring (a no-op if already resident).
+    /// The frame currently on screen is never reused. Returns whether `frame` is
+    /// now resident.
+    pub fn upload_frame(&mut self, frame: i64, data: &ImageData) -> bool {
+        let gl = self.gl.clone();
+        let shown = self.ring_shown;
+        match &mut self.ring {
+            Some(ring) => unsafe { ring.upload(&gl, frame, data, shown) },
+            None => false,
+        }
+    }
+
+    /// True when `frame` is already on the GPU.
+    pub fn frame_resident(&self, frame: i64) -> bool {
+        self.ring
+            .as_ref()
+            .is_some_and(|r| r.texture_for(frame).is_some())
+    }
+
+    /// Point the display at a ring frame. This is the whole frame advance: a
+    /// different texture name, no shader change, no re-upload, and none of the
+    /// view-resetting the adopt pipeline does. `false` if it is not resident.
+    pub fn show_frame(&mut self, frame: i64) -> bool {
+        let Some(ring) = self.ring.as_ref() else {
+            return false;
+        };
+        let Some(tex) = ring.texture_for(frame) else {
+            return false;
+        };
+        let next = ImageTexture {
+            kind: ImageTextureKind::RingFrame(tex),
+            aspect: ring.aspect,
+            is_encoded_srgb: ring.is_encoded_srgb,
+            is_u8: ring.is_u8,
+            clip_max: ring.clip_max,
+        };
+        let gl = self.gl.clone();
+        if let Some(prev) = self.image.replace(next) {
+            unsafe { prev.delete(&gl) };
+        }
+        // Every frame is a plain 2D texture, so the sampler kind cannot change
+        // here and the program never needs rebuilding.
+        debug_assert_eq!(self.sampler_kind, SamplerKind::Single);
+        self.ring_shown = Some(frame);
+        true
+    }
+
+    /// Ring depth actually allocated (0 when there is no ring).
+    pub fn ring_depth(&self) -> usize {
+        self.ring.as_ref().map_or(0, |r| r.depth())
+    }
+
+    /// Synchronously replace the displayed image with `data`. Used when leaving
+    /// playback, and as the per-frame path for sequences whose frames are too
+    /// large to ring (a sequence of 24k panoramas plays at whatever rate this
+    /// achieves). Returns whether the upload succeeded.
+    pub fn replace_image(&mut self, data: &ImageData) -> bool {
+        let gl = self.gl.clone();
+        let Some(tex) =
+            (unsafe { texture::upload_whole(&gl, data, self.threshold, self.half_float) })
+        else {
+            log::error!("failed to upload {}", data.path.display());
+            return false;
+        };
+        let kind = tex.sampler_kind();
+        if let Some(prev) = self.image.replace(tex) {
+            unsafe { prev.delete(&gl) };
+        }
+        if kind != self.sampler_kind {
+            self.sampler_kind = kind;
+            unsafe { self.rebuild_program() };
+            log::info!("image sampler kind -> {kind:?}");
+        }
+        true
+    }
+
+    /// Drop a displayed frame that borrows a ring texture, so the ring can be
+    /// freed without leaving a dangling name installed.
+    fn drop_borrowed_ring_frame(&mut self) {
+        if matches!(
+            self.image.as_ref().map(|i| &i.kind),
+            Some(ImageTextureKind::RingFrame(_))
+        ) {
+            self.image = None;
+        }
+    }
+
+    fn end_ring(&mut self) {
+        let gl = self.gl.clone();
+        self.drop_borrowed_ring_frame();
+        self.ring_shown = None;
+        if let Some(ring) = self.ring.take() {
+            unsafe { ring.delete(&gl) };
         }
     }
 
@@ -797,7 +950,9 @@ impl Renderer {
 
             gl.active_texture(glow::TEXTURE0);
             match &image.kind {
-                ImageTextureKind::Single(tex) => {
+                // A playback frame is an ordinary 2D texture; only the name
+                // differs, which is the whole point of the ring.
+                ImageTextureKind::Single(tex) | ImageTextureKind::RingFrame(tex) => {
                     gl.bind_texture(glow::TEXTURE_2D, Some(*tex));
                     let wrap_t = if params.wrap_2d {
                         glow::REPEAT
@@ -1141,6 +1296,9 @@ impl Drop for Renderer {
         unsafe {
             if let Some(image) = self.image.take() {
                 image.delete(gl);
+            }
+            if let Some(ring) = self.ring.take() {
+                ring.delete(gl);
             }
             if let Some(job) = self.upload.take() {
                 job.discard(gl);

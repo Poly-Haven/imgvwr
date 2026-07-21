@@ -116,6 +116,15 @@ pub struct AppPreferences {
     /// Vertical scale of the F2 box's histogram (the L / Sq / Log selector).
     #[serde(default)]
     pub histogram_scale: HistogramScale,
+    /// Target frame rate for image-sequence playback. Defaults from the OS
+    /// region — 25 in PAL territories, 24 everywhere else — which is as much
+    /// precision as the locale gives us; this setting is the real answer for
+    /// anyone who needs 30 or 48.
+    #[serde(default = "default_playback_fps")]
+    pub playback_fps: f32,
+    /// Share of physical RAM the sequence frame cache may use, as a percentage.
+    #[serde(default = "default_playback_cache_percent")]
+    pub playback_cache_percent: u32,
     /// Internal (not user-facing): unix-seconds of the last successful update
     /// check, so the daily check throttles. `0` = never checked.
     #[serde(default)]
@@ -152,6 +161,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_playback_fps() -> f32 {
+    crate::playback::transport::default_target_fps()
+}
+
+fn default_playback_cache_percent() -> u32 {
+    crate::playback::cache::DEFAULT_CACHE_PERCENT
+}
+
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
@@ -169,6 +186,8 @@ impl Default for AppPreferences {
             half_float_textures: false,
             pin_titlebar: false,
             histogram_scale: HistogramScale::default(),
+            playback_fps: default_playback_fps(),
+            playback_cache_percent: default_playback_cache_percent(),
             last_update_check: 0,
             latest_known_version: String::new(),
         }

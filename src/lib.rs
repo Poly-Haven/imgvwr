@@ -31,6 +31,10 @@ pub enum UserEvent {
     LoadFinished(u64),
     /// A background *preload* (arrow-key look-ahead) finished; its generation id.
     PreloadFinished(u64),
+    /// A sequence-playback frame finished decoding. Carries nothing: the frame
+    /// cache is polled wholesale, and the point is only to wake the loop so a
+    /// stalled playhead moves on promptly.
+    FrameDecoded,
     /// A background "is there a newer release?" check finished (see `update`).
     UpdateChecked,
 }

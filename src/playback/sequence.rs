@@ -155,6 +155,17 @@ impl SequenceError {
     }
 }
 
+/// What a [`Sequence::rescan`] found.
+#[derive(Clone, Default, Debug)]
+pub struct RescanOutcome {
+    /// Anything at all differs from the previous scan.
+    pub changed: bool,
+    /// Frames whose file appeared or was rewritten. Their decode may have failed
+    /// last time on a half-written file, so the caller should let them be tried
+    /// again.
+    pub refreshed: Vec<i64>,
+}
+
 /// A detected frame sequence: a contiguous span of frame numbers, each either
 /// backed by a file or a hole.
 #[derive(Debug)]
@@ -190,13 +201,14 @@ impl Sequence {
     ///
     /// Cheap enough to run on a slow timer while playing: one `read_dir`, and
     /// the sizes come along with the directory entries.
-    pub fn rescan(&mut self) -> bool {
+    pub fn rescan(&mut self) -> RescanOutcome {
+        let mut out = RescanOutcome::default();
         let Ok(entries) = read_dir_entries(&self.dir) else {
-            return false;
+            return out;
         };
         let found = self.match_entries(&entries);
         let Some((&lo, _)) = found.iter().next() else {
-            return false;
+            return out;
         };
         let (&hi, _) = found.iter().next_back().expect("non-empty");
         // Keep every slot we already know about, so a frame that vanishes from
@@ -205,7 +217,6 @@ impl Sequence {
         let new_last = hi.max(self.last());
         let (new_first, new_last) = clamp_span(new_first, new_last, self.first);
 
-        let mut changed = false;
         if new_first != self.first || new_last != self.last() {
             let mut slots = vec![Slot::default(); (new_last - new_first + 1) as usize];
             for (i, slot) in self.slots.drain(..).enumerate() {
@@ -216,7 +227,7 @@ impl Sequence {
             }
             self.slots = slots;
             self.first = new_first;
-            changed = true;
+            out.changed = true;
         }
 
         for (&frame, &(name, len)) in &found {
@@ -230,7 +241,8 @@ impl Sequence {
                 slot.name = Some(name.into());
                 slot.len = len;
                 slot.state = SlotState::Unknown;
-                changed = true;
+                out.refreshed.push(frame);
+                out.changed = true;
             }
         }
         // Files that disappeared become holes.
@@ -238,10 +250,10 @@ impl Sequence {
             let frame = self.first + i as i64;
             if slot.name.is_some() && !found.contains_key(&frame) {
                 *slot = Slot::default();
-                changed = true;
+                out.changed = true;
             }
         }
-        changed
+        out
     }
 
     /// Build a sequence from a directory listing of `(file_name, size)` pairs.
@@ -359,6 +371,13 @@ impl Sequence {
         ))
     }
 
+    /// The frame number `path`'s file name spells, whether or not it is part of
+    /// this sequence.
+    pub fn frame_of(path: &Path) -> Option<i64> {
+        let name = path.file_name()?.to_str()?;
+        split_frame_name(name).map(|f| f.number)
+    }
+
     /// Human-readable name, e.g. `shot_####.png`.
     pub fn display_name(&self) -> String {
         format!(
@@ -434,6 +453,32 @@ impl Sequence {
             frame += step;
         }
         None
+    }
+
+    /// Build a sequence directly from a presence map, for tests elsewhere in the
+    /// crate that need a timeline without touching the filesystem.
+    #[cfg(test)]
+    pub(crate) fn for_test(first: i64, present: &[bool]) -> Self {
+        Self {
+            dir: PathBuf::from("/seq"),
+            prefix: "f".into(),
+            ext: "png".into(),
+            pad: 4,
+            first,
+            slots: present
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| Slot {
+                    name: p.then(|| format!("f{:04}.png", first + i as i64).into_boxed_str()),
+                    len: 1,
+                    state: if p {
+                        SlotState::Unknown
+                    } else {
+                        SlotState::Missing
+                    },
+                })
+                .collect(),
+        }
     }
 
     /// True when the slot has a file that has not (yet) failed to decode.

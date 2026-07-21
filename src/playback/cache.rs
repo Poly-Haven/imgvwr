@@ -133,11 +133,13 @@ impl Drop for Pool {
             w.jobs.clear();
         }
         cv.notify_all();
-        // A worker can only be mid-decode, never blocked on us, so this joins
-        // within one frame's decode at worst.
-        for h in self.threads.drain(..) {
-            let _ = h.join();
-        }
+        // Deliberately NOT joined. A decode cannot be interrupted, so joining
+        // would make Stop wait out whatever frame happens to be in flight —
+        // milliseconds for a 2K frame, seconds for a 24k one. Detaching is safe
+        // because every worker holds its own `Arc`s: it finishes, finds the
+        // channel's receiver gone, and exits. Its late result is dropped, and
+        // `cancelled` stops it waking an event loop that may no longer exist.
+        self.threads.clear();
     }
 }
 
@@ -252,6 +254,16 @@ impl FrameCache {
 
     pub fn set_budget(&mut self, bytes: u64) {
         self.budget_bytes = bytes;
+    }
+
+    /// Put an already-decoded frame straight into the cache. Entering playback
+    /// uses this for the frame that is already on screen, so pressing `Space`
+    /// never re-decodes what the viewer is already showing.
+    pub fn seed(&mut self, frame: i64, data: Arc<ImageData>) {
+        if self.frame_bytes == 0 {
+            self.frame_bytes = frame_byte_size(&data);
+        }
+        self.frames.insert(frame, data);
     }
 
     pub fn get(&self, frame: i64) -> Option<Arc<ImageData>> {
@@ -373,6 +385,29 @@ impl FrameCache {
     /// Frames currently being decoded (diagnostics and the transport readout).
     pub fn inflight_count(&self) -> usize {
         self.pool.inflight_count()
+    }
+
+    /// Test hook: make a frame read as resident without decoding anything, so
+    /// the transport's clock can be exercised without a filesystem.
+    #[cfg(test)]
+    pub(crate) fn mark_resident_for_test(&mut self, frame: i64) {
+        use crate::image_loader::{PixelBuffer, CLIP_MAX_NORM};
+        self.frames.insert(
+            frame,
+            Arc::new(ImageData {
+                path: PathBuf::from("test"),
+                width: 1,
+                height: 1,
+                channels: 4,
+                dtype_name: "test".into(),
+                compression: "test".into(),
+                pixels: PixelBuffer::U8(vec![0; 4]),
+                is_encoded_srgb: true,
+                clip_max: CLIP_MAX_NORM,
+                animation: None,
+                camera: None,
+            }),
+        );
     }
 }
 

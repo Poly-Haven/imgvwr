@@ -32,6 +32,17 @@
 //!   * `IMGVWR_DEBUG_DELETE_CONFIRM` = `1` (show the Delete-key confirm dialog)
 //!   * `IMGVWR_DEBUG_PIN_TITLEBAR` = `1` (force the titlebar permanently shown,
 //!     in-memory only — never writes the real preferences file)
+//!   * `IMGVWR_DEBUG_PLAY` = `1` (enter image-sequence playback and play)
+//!   * `IMGVWR_DEBUG_PLAY_FRAME` = `<n>` (enter playback *paused* on frame `n`,
+//!     so a capture shows exactly that frame — racing the clock is not
+//!     reproducible); `IMGVWR_DEBUG_PLAY_STOP` = `1` then leaves playback once
+//!     it is up, to verify the frame survives the texture ring being freed
+//!   * `IMGVWR_DEBUG_CACHE_MB` = `<n>` (frame-cache budget, to exercise the
+//!     "sequence far larger than the cache" path)
+//!
+//! Two more, not `_DEBUG_` because they are useful in release builds too:
+//! `IMGVWR_PLAYBACK_WORKERS` (decode threads) and `IMGVWR_PLAYBACK_RING_BYTES`
+//! (VRAM the frame ring may take).
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -69,6 +80,7 @@ use crate::image_loader::{
     probe_dimensions, supported_extensions, DecodeIntent, ImageData,
 };
 use crate::ocio::OcioManager;
+use crate::playback::{cache, FrameCache, Playback, Sequence, Tick};
 use crate::prefs::{AppPreferences, PreferredView};
 use crate::renderer::{RenderParams, Renderer};
 use crate::ui::{self, UiAction, UiInputs, UiState};
@@ -694,6 +706,15 @@ pub struct App {
     /// GIF playback state, `Some` only while the current image is an animated GIF
     /// (the frames live in `current_image`'s `ImageData::animation`).
     anim: Option<AnimState>,
+    /// Image-sequence playback. **All** playback state hangs off this one
+    /// `Option`, so a session that never presses `Space` pays nothing for it:
+    /// the hot paths branch once, cheaply, and no threads are spawned until the
+    /// first sequence is opened.
+    playback: Option<Playback>,
+    /// Headless-test override (debug only): leave playback once this frame is on
+    /// screen, so a capture can verify the ring teardown.
+    #[cfg(debug_assertions)]
+    debug_stop_after: Option<i64>,
     /// Comparator slots (Ctrl+1..=9 → index 0..=8); each pins a decoded image.
     slots: [Option<Arc<ImageData>>; 9],
     /// The image shown before the last slot recall, for the A/B toggle-back.
@@ -862,6 +883,9 @@ impl App {
             available_update: None,
             current_image: None,
             anim: None,
+            playback: None,
+            #[cfg(debug_assertions)]
+            debug_stop_after: None,
             slots: std::array::from_fn(|_| None),
             compare_prev: None,
             active_slot: None,
@@ -1633,6 +1657,12 @@ impl App {
         for_compare: bool,
         old_scale: Option<(f32, f32)>,
     ) {
+        // Anything that adopts a new image leaves playback: the timeline belongs
+        // to a sequence, and there is nothing sensible to keep it alive across.
+        // Done first, so the ring's VRAM is freed before the new upload.
+        if self.playback_active() {
+            self.exit_playback();
+        }
         // Changing the displayed image (folder navigation or a comparator-slot
         // recall) ends any active slot-difference view.
         if self.diff_slot.take().is_some() {
@@ -1982,6 +2012,9 @@ impl App {
         self.nav_pending = None;
         // Undo never crosses an image load: start a fresh stack at this state.
         self.reset_undo();
+        // Last: entering playback needs the fully-adopted image, so it cannot
+        // ride along with the other debug overrides above.
+        self.apply_playback_debug_overrides();
         self.request_redraw();
     }
 
@@ -2195,6 +2228,21 @@ impl App {
                 }
                 Err(e) => log::debug!("preload failed: {e}"),
             }
+        }
+    }
+
+    /// Arrows: step one frame while playing back a sequence, otherwise navigate
+    /// the folder.
+    fn step_or_navigate(&mut self, dir: i32) {
+        match self.playback.as_mut() {
+            Some(pb) => {
+                pb.step(dir as i64);
+                // `tick_playback` puts the screen in step with the playhead on
+                // the next frame — including waiting for a frame that has not
+                // decoded yet.
+                self.request_redraw();
+            }
+            None => self.navigate(dir),
         }
     }
 
@@ -3338,18 +3386,31 @@ impl App {
             // Backspace: centre + fit the window at the current zoom (keeps scale).
             (Key::Named(NamedKey::Backspace), _) => self.center_and_fit_window(),
             (Key::Named(NamedKey::F11), _) => self.toggle_fullscreen(),
-            (Key::Named(NamedKey::ArrowRight), _) => self.navigate(1),
-            (Key::Named(NamedKey::ArrowLeft), _) => self.navigate(-1),
+            // In playback the arrows step one frame; otherwise they navigate the
+            // folder as usual. Stop leaves you on the current frame, so folder
+            // navigation resumes from that file.
+            (Key::Named(NamedKey::ArrowRight), _) => self.step_or_navigate(1),
+            (Key::Named(NamedKey::ArrowLeft), _) => self.step_or_navigate(-1),
             // Up / Down rotate the image 90° (CCW / CW), remembered per image.
             (Key::Named(NamedKey::ArrowUp), _) => self.rotate_image(-1),
             (Key::Named(NamedKey::ArrowDown), _) => self.rotate_image(1),
-            // Space pauses / resumes GIF playback (no-op for static images).
-            (Key::Named(NamedKey::Space), _) => self.toggle_animation_pause(),
+            // Space: enter sequence playback, or pause / resume it. For an
+            // animated GIF it stays the old play/pause toggle.
+            (Key::Named(NamedKey::Space), _) => {
+                if self.anim.is_some() {
+                    self.toggle_animation_pause();
+                } else {
+                    self.toggle_playback();
+                }
+            }
             (Key::Named(NamedKey::Escape), _) => {
                 if self.ui_state.confirm_delete {
                     self.ui_state.confirm_delete = false;
                 } else if self.ui_state.show_help {
                     self.ui_state.show_help = false;
+                } else if self.playback_active() {
+                    // Leaving playback comes before Escape's usual meaning.
+                    self.exit_playback();
                 } else {
                     self.escape_or_exit(event_loop);
                 }
@@ -4676,6 +4737,39 @@ impl App {
         self.camera.settle();
     }
 
+    /// Playback's own headless overrides. Split out because entering playback
+    /// mutates more than the camera, and because it must run last — it consumes
+    /// the state the other overrides set up.
+    ///
+    /// `IMGVWR_DEBUG_PLAY_FRAME=<n>` is the deterministic one: it enters
+    /// playback **paused** and parks on frame `n`, so a capture shows exactly
+    /// that frame's pixels. Racing the real clock would not be reproducible.
+    /// `IMGVWR_DEBUG_PLAY_STOP=1` additionally leaves playback once that frame
+    /// is up — the capture then proves the ring teardown left the frame you
+    /// stopped on correctly installed as an ordinary texture.
+    fn apply_playback_debug_overrides(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            let pin = std::env::var("IMGVWR_DEBUG_PLAY_FRAME")
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok());
+            if pin.is_none() && std::env::var_os("IMGVWR_DEBUG_PLAY").is_none() {
+                return;
+            }
+            self.enter_playback(pin.is_none());
+            if let (Some(pb), Some(frame)) = (self.playback.as_mut(), pin) {
+                pb.seek(frame);
+                // The frame must be decoded before the capture reads the
+                // framebuffer, and the capture path polls until the app is idle
+                // — so blocking here would deadlock. Instead the normal
+                // tick/poll loop lands it, and the capture's own delay covers
+                // it. `debug_stop_after` then leaves playback once it is up.
+                log::info!("debug: parked on frame {frame}");
+                self.debug_stop_after = std::env::var_os("IMGVWR_DEBUG_PLAY_STOP").map(|_| frame);
+            }
+        }
+    }
+
     // ---- UI --------------------------------------------------------------
 
     fn update_window_title(&self) {
@@ -5383,6 +5477,264 @@ impl App {
         self.invalidate_histogram();
     }
 
+    // ---- image-sequence playback -----------------------------------------
+
+    /// True while the viewer is a frame player rather than a still viewer.
+    fn playback_active(&self) -> bool {
+        self.playback.is_some()
+    }
+
+    /// The frame cache's byte budget. `IMGVWR_DEBUG_CACHE_MB` (debug builds
+    /// only) overrides it, which is how the "sequence far larger than the cache"
+    /// path is exercised without generating a sequence far larger than 30% of
+    /// this machine's RAM.
+    fn playback_cache_budget(&self) -> u64 {
+        #[cfg(debug_assertions)]
+        if let Some(mb) = std::env::var("IMGVWR_DEBUG_CACHE_MB")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            return mb * 1024 * 1024;
+        }
+        cache::budget_from_percent(self.prefs.playback_cache_percent)
+    }
+
+    /// `Space`: enter playback from the current file, or pause/resume once in.
+    fn toggle_playback(&mut self) {
+        match self.playback.as_mut() {
+            Some(pb) => {
+                let playing = !pb.playing();
+                pb.set_playing(playing);
+                self.show_toast(if playing { "Playing" } else { "Paused" }.to_string());
+                self.request_redraw();
+            }
+            None => self.enter_playback(true),
+        }
+    }
+
+    /// Find the sequence the current file belongs to and become a frame player.
+    /// Refuses (with a toast) when the file is not part of one — the viewer
+    /// stays exactly as it was.
+    fn enter_playback(&mut self, play: bool) {
+        let (Some(path), Some(image)) = (self.loaded_path.clone(), self.current_image.clone())
+        else {
+            return;
+        };
+        if self.is_busy() {
+            return;
+        }
+        let seq = match Sequence::detect(&path) {
+            Ok(seq) => seq,
+            Err(e) => {
+                log::info!("not a sequence: {} ({e:?})", path.display());
+                self.show_toast(e.message());
+                return;
+            }
+        };
+        let Some(frame) = Sequence::frame_of(&path) else {
+            return;
+        };
+
+        let proxy = self.proxy.clone();
+        let cache = FrameCache::new(
+            self.playback_cache_budget(),
+            cache::default_worker_count(),
+            Arc::new(move || {
+                let _ = proxy.send_event(UserEvent::FrameDecoded);
+            }),
+        );
+        let frames = seq.len();
+        let name = seq.display_name();
+        let mut pb = Playback::new(seq, cache, frame, self.prefs.playback_fps);
+        // The frame on screen is already decoded; don't make the pool redo it.
+        pb.cache.seed(frame, image.clone());
+
+        if let Some(gfx) = self.gfx.as_mut() {
+            pb.ringed = gfx.renderer.begin_sequence(&image, frames);
+            if pb.ringed {
+                gfx.renderer.upload_frame(frame, &image);
+                gfx.renderer.show_frame(frame);
+            }
+            // Either way the entry frame is already what is on screen.
+            pb.shown = Some(frame);
+        }
+        if !pb.ringed {
+            log::info!("frames are too large to ring; each one is a full re-upload");
+        }
+        pb.set_playing(play);
+        self.playback = Some(pb);
+        // The clipping overlay's max-mip mask is an O(w·h) CPU build with a full
+        // mip pyramid — far too expensive per frame. The shader's per-texel
+        // fallback takes over while playing (§8); the real mask is rebuilt on
+        // exit.
+        if let Some(gfx) = self.gfx.as_mut() {
+            gfx.renderer.set_clip_mask(None, self.prefs.clip_margin);
+        }
+        self.clip_mask_dirty = false;
+        self.show_toast(format!("Playing {name}"));
+        self.request_redraw();
+    }
+
+    /// Leave playback and go back to being an image viewer, still looking at
+    /// whatever frame we stopped on — so the arrows resume folder navigation
+    /// from that file.
+    fn exit_playback(&mut self) {
+        let Some(pb) = self.playback.take() else {
+            return;
+        };
+        // The frame to keep is the one actually on screen, which is exactly what
+        // `current_image` holds — not the playhead, which may have been seeked
+        // onto a frame that has not decoded yet. Getting this wrong would delete
+        // the ring texture still being drawn from and leave a blank window.
+        let data = self.current_image.clone();
+        // Late results can no longer reach an event loop that may be gone.
+        pb.cache.cancel_wakeups();
+        drop(pb);
+        if let Some(gfx) = self.gfx.as_mut() {
+            if !gfx.renderer.end_sequence(data.as_deref()) {
+                self.load_state =
+                    LoadState::Failed("Not enough GPU memory to keep this frame.".to_string());
+            }
+        }
+        // Back to the exact clipping overlay, and a fresh histogram for a graph
+        // that is no longer chasing a moving image.
+        self.clip_mask_dirty = true;
+        self.invalidate_histogram();
+        self.show_toast("Stopped".to_string());
+        self.request_redraw();
+    }
+
+    /// Put `frame` on screen. This is the whole frame advance: a texture swap
+    /// and the bookkeeping that depends on which pixels are showing. It
+    /// deliberately does NOT go through `load_path` → `begin_adopt` →
+    /// `finalize_adopt`, which would reset the camera, re-run panorama
+    /// detection, re-frame the window, auto-expose and clear undo — all of it
+    /// both wrong and slow to do 24 times a second.
+    fn show_playback_frame(&mut self, frame: i64) {
+        let Some(pb) = self.playback.as_ref() else {
+            return;
+        };
+        let Some(data) = pb.cache.get(frame) else {
+            return;
+        };
+        let ringed = pb.ringed;
+        if let Some(gfx) = self.gfx.as_mut() {
+            let shown = if ringed {
+                gfx.renderer.upload_frame(frame, &data) && gfx.renderer.show_frame(frame)
+            } else {
+                // Frames too large to ring: a full re-upload each time. Correct,
+                // just slow — and the fps readout says so.
+                gfx.renderer.replace_image(&data)
+            };
+            if !shown {
+                return;
+            }
+        }
+        self.file_info.name = data
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.loaded_path = Some(data.path.clone());
+        self.current_image = Some(data);
+        if let Some(pb) = self.playback.as_mut() {
+            pb.shown = Some(frame);
+        }
+        self.update_window_title();
+        // Different pixels are on screen, so the histogram describes the frame
+        // before this one.
+        self.invalidate_histogram();
+    }
+
+    /// One playback step: land finished decodes, rescan, retarget the cache, and
+    /// advance the clock. Called from `render` and from nowhere else, so frames
+    /// can never be double-presented.
+    fn tick_playback(&mut self, now: Instant) {
+        let Some(pb) = self.playback.as_mut() else {
+            return;
+        };
+        pb.cache.poll(&mut pb.seq);
+        if let Some(outcome) = pb.maybe_rescan(now) {
+            for frame in outcome.refreshed {
+                pb.cache.forget_failure(frame);
+            }
+        }
+        let playhead = pb.frame();
+        pb.cache.schedule(&mut pb.seq, playhead, true);
+        // Advancing the clock moves the playhead; putting the screen in step
+        // with it is one job, done in one place. That also covers a seek onto a
+        // frame that had not decoded when the pointer landed on it — the screen
+        // holds the old frame and catches up the moment the new one arrives.
+        let _: Tick = pb.tick(now);
+        let (frame, shown) = (pb.frame(), pb.shown);
+        if shown != Some(frame) {
+            self.show_playback_frame(frame);
+        }
+        self.upload_frame_lookahead();
+        self.log_playback_stats(now);
+        // Dev-only: leave playback once the pinned frame is on screen, so a
+        // capture can verify the ring teardown re-installed it correctly.
+        #[cfg(debug_assertions)]
+        if self.debug_stop_after == Some(frame)
+            && self.playback.as_ref().and_then(|p| p.shown) == Some(frame)
+        {
+            self.debug_stop_after = None;
+            self.exit_playback();
+        }
+    }
+
+    /// Diagnostic heartbeat: the rate actually achieved and how the cache window
+    /// is doing. §5.3 asks for this to be logged rather than announced — the
+    /// cache bar and the fps readout are the user-facing signal, and a modal
+    /// about memory would be worse than either.
+    fn log_playback_stats(&mut self, now: Instant) {
+        let Some(pb) = self.playback.as_mut() else {
+            return;
+        };
+        if !pb.should_log(now) {
+            return;
+        }
+        log::info!(
+            "playback: frame {} of [{}..{}], {:.1}/{:.1} fps{}, cache {}/{} frames ({} in flight)",
+            pb.frame(),
+            pb.seq.first(),
+            pb.seq.last(),
+            pb.achieved_fps().unwrap_or(0.0),
+            pb.target_fps(),
+            if pb.behind() { " BEHIND" } else { "" },
+            pb.cache.resident_frames(),
+            pb.cache.capacity_frames(),
+            pb.cache.inflight_count(),
+        );
+    }
+
+    /// Put the next frame on the GPU while the current one is on screen, so the
+    /// upload is never in the frame-advance's critical path. At most one per
+    /// rendered frame: §6.2 measured a 4K RGBA16F frame at 24 fps as 6-8% of the
+    /// PCIe link, so there is no reason to push harder.
+    fn upload_frame_lookahead(&mut self) {
+        let Some(pb) = self.playback.as_ref() else {
+            return;
+        };
+        if !pb.ringed {
+            return;
+        }
+        let Some(next) = pb.seq.next_playable(pb.frame() + 1, 1, true) else {
+            return;
+        };
+        if next == pb.frame() {
+            return;
+        }
+        let Some(data) = pb.cache.get(next) else {
+            return;
+        };
+        if let Some(gfx) = self.gfx.as_mut() {
+            if !gfx.renderer.frame_resident(next) {
+                gfx.renderer.upload_frame(next, &data);
+            }
+        }
+    }
+
     fn render(&mut self) -> RenderOutcome {
         // Advance any in-progress incremental upload before drawing this frame.
         if self.pending.is_some() {
@@ -5397,6 +5749,9 @@ impl App {
         // Advance animated-GIF playback (uploads the next frame when its delay has
         // elapsed). No-op for static images and while paused.
         self.advance_animation(now);
+        // Advance image-sequence playback: land decodes, retarget the cache, and
+        // swap the displayed frame when its period is up. No-op unless playing.
+        self.tick_playback(now);
         let dt = self
             .last_frame
             .replace(now)
@@ -5458,7 +5813,9 @@ impl App {
 
         // (Re)build the clipping-overlay max-mip mask if it's stale and the
         // overlay is on (lazy — nothing is built while the overlay is off).
-        if self.clip_overlay && self.clip_mask_dirty {
+        // Never during playback: the mask is an O(w·h) CPU build with a full mip
+        // pyramid, so the shader's per-texel fallback covers those frames (§8).
+        if self.clip_overlay && self.clip_mask_dirty && !self.playback_active() {
             if let (Some(img), Some(gfx)) = (self.current_image.clone(), self.gfx.as_mut()) {
                 gfx.renderer
                     .set_clip_mask(Some(&img), self.prefs.clip_margin);
@@ -6366,6 +6723,10 @@ impl ApplicationHandler<UserEvent> for App {
         // Wake to flip to the next GIF frame (the advance + upload happens in
         // `render`). `None` while paused or for a static image.
         let anim_deadline = self.anim.as_ref().filter(|a| !a.paused).map(|a| a.next_at);
+        // Same for the next sequence frame. `None` while paused or stopped, so a
+        // parked player returns the loop to `Wait` rather than idling at the
+        // display rate (mpv measure that at 2-3x the power).
+        let playback_deadline = self.playback.as_ref().and_then(|p| p.deadline());
         if self.capture_active() {
             // Drive continuous frames while a capture is pending.
             event_loop.set_control_flow(ControlFlow::Poll);
@@ -6398,6 +6759,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.metadata_hide_deadline,
             cursor_idle_deadline,
             anim_deadline,
+            playback_deadline,
             // Wake once the held-adjustment coalesce window closes so the deferred
             // undo entry commits even after the tone ease has settled.
             self.adjust_repeat_until,
@@ -6444,6 +6806,9 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::LoadFinished(_gen) => self.poll_loads(),
             UserEvent::PreloadFinished(_gen) => self.poll_preloads(),
+            // The frame is collected in `tick_playback`; this only wakes the loop
+            // so a stalled playhead moves on the moment its frame arrives.
+            UserEvent::FrameDecoded => self.request_redraw(),
             UserEvent::UpdateChecked => self.poll_update(),
         }
     }

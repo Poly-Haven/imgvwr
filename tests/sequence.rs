@@ -88,12 +88,15 @@ fn rescan_extends_the_timeline_and_retries_rewritten_frames() {
     assert_eq!(present(&seq), vec![1, 2, 3]);
 
     // Nothing changed on disk -> nothing to report.
-    assert!(!seq.rescan(), "an unchanged directory is not a change");
+    assert!(
+        !seq.rescan().changed,
+        "an unchanged directory is not a change"
+    );
 
     // Frame 2 decoded as garbage — a half-written file.
     seq.set_state(2, SlotState::Corrupt);
     assert!(
-        !seq.rescan(),
+        !seq.rescan().changed,
         "a corrupt frame stays corrupt until it changes"
     );
     assert_eq!(seq.state(2), SlotState::Corrupt);
@@ -102,7 +105,7 @@ fn rescan_extends_the_timeline_and_retries_rewritten_frames() {
     dir.write("f0002.exr", b"xxxxxx");
     dir.write("f0004.exr", b"xx");
     dir.write("f0005.exr", b"xx");
-    assert!(seq.rescan(), "new frames are a change");
+    assert!(seq.rescan().changed, "new frames are a change");
     assert_eq!(present(&seq), vec![1, 2, 3, 4, 5]);
     assert_eq!(
         seq.state(2),
@@ -124,7 +127,7 @@ fn rescan_turns_a_deleted_frame_into_a_hole() {
     seq.set_state(2, SlotState::Cached);
 
     std::fs::remove_file(dir.path().join("f0002.png")).unwrap();
-    assert!(seq.rescan());
+    assert!(seq.rescan().changed);
     assert_eq!(seq.state(2), SlotState::Missing);
     assert!(!seq.has_file(2));
     assert_eq!((seq.first(), seq.last()), (1, 3), "the span is unchanged");
@@ -147,7 +150,7 @@ fn rescan_extends_backwards() {
     assert_eq!(seq.first(), 10);
 
     dir.write("f0008.png", b"x");
-    assert!(seq.rescan());
+    assert!(seq.rescan().changed);
     assert_eq!((seq.first(), seq.last()), (8, 12));
     assert!(seq.has_file(8));
     assert_eq!(

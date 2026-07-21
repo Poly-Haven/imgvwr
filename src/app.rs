@@ -2253,6 +2253,14 @@ impl App {
     /// reason; the nav-preload bookkeeping it also does is a minor optimisation
     /// not worth replicating for a one-shot delete.
     fn delete_current_file(&mut self) {
+        // Deleting the file under a running playhead is a foot-gun (§8). The
+        // initial Delete keypress is already guarded, but the confirm dialog can
+        // linger while Space enters playback, so the actual delete must re-check.
+        if self.playback_active() {
+            self.ui_state.confirm_delete = false;
+            self.show_toast("Stop playback before deleting a frame".to_string());
+            return;
+        }
         let Some(path) = self.loaded_path.clone() else {
             return;
         };
@@ -5586,6 +5594,10 @@ impl App {
         if let Some(r) = self.image_rotations.get(&pb.seq.identity()).copied() {
             self.rotation = r;
         }
+        // A Delete-confirm dialog must not survive into playback — deleting a
+        // frame under the running playhead is exactly what §8 forbids, and the
+        // dialog's Enter/button would otherwise still fire.
+        self.ui_state.confirm_delete = false;
         // Finding a sequence is worth saying; an animated image starting to play
         // is what opening it has always done, so announcing it would be noise.
         let announce = !pb.seq.is_in_memory();
@@ -5730,8 +5742,18 @@ impl App {
         };
         pb.frames.poll(&mut pb.seq);
         if let Some(outcome) = pb.maybe_rescan(now) {
-            for frame in outcome.refreshed {
-                pb.frames.forget_failure(frame);
+            // A rewritten frame's stale copy has to be dropped from both the RAM
+            // cache and the GPU ring, or the scheduler would keep re-asserting it
+            // as cached and the old pixels would show for the rest of the session.
+            // `pb` (self.playback) and self.gfx are disjoint fields, so both
+            // borrows coexist.
+            for &frame in &outcome.refreshed {
+                pb.frames.forget(frame);
+            }
+            if let Some(gfx) = self.gfx.as_mut() {
+                for &frame in &outcome.refreshed {
+                    gfx.renderer.invalidate_frame(frame);
+                }
             }
         }
         let playhead = pb.frame();
@@ -6810,6 +6832,15 @@ impl ApplicationHandler<UserEvent> for App {
         // measure driving frames at refresh rather than source rate at 2-3x the
         // power.
         let playback_deadline = self.playback.as_ref().and_then(|p| p.deadline());
+        // The directory rescan runs whenever we are *in* playback mode, paused
+        // or not — a render writing frames beside a paused viewer must still
+        // extend the timeline (§3.5). A file-sequence player keeps this wake
+        // alive; an in-memory animation has nothing on disk to rescan.
+        let rescan_deadline = self
+            .playback
+            .as_ref()
+            .filter(|p| !p.seq.is_in_memory())
+            .map(|p| p.rescan_deadline());
         if self.capture_active() {
             // Drive continuous frames while a capture is pending.
             event_loop.set_control_flow(ControlFlow::Poll);
@@ -6842,6 +6873,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.metadata_hide_deadline,
             cursor_idle_deadline,
             playback_deadline,
+            rescan_deadline,
             // Wake once the held-adjustment coalesce window closes so the deferred
             // undo entry commits even after the tone ease has settled.
             self.adjust_repeat_until,

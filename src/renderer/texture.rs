@@ -374,6 +374,18 @@ impl FrameRing {
             && pixel_format(data).2 == self.ty
     }
 
+    /// Forget `frame`'s slot so a later `upload` re-uploads it — used when its
+    /// file was rewritten on disk and the resident texture is stale. The slot
+    /// becomes free for reuse, so the caller must not do this to the frame it is
+    /// currently displaying from (that texture name is still bound); the renderer
+    /// guards that.
+    pub fn forget(&mut self, frame: i64) {
+        if let Some(slot) = self.slot_frame.iter().position(|f| *f == Some(frame)) {
+            self.slot_frame[slot] = None;
+            self.order.retain(|&i| i != slot);
+        }
+    }
+
     /// Upload `frame` into the ring, reusing the least-recently-uploaded slot
     /// that is not currently displayed. Returns whether it is now resident.
     ///

@@ -128,9 +128,11 @@ impl FrameSource {
         }
     }
 
-    pub fn forget_failure(&mut self, frame: i64) {
+    /// A rescan found this frame rewritten on disk: drop what we hold of it so
+    /// it decodes afresh (in-memory animation frames never change on disk).
+    pub fn forget(&mut self, frame: i64) {
         if let Self::Files(cache) = self {
-            cache.forget_failure(frame);
+            cache.forget(frame);
         }
     }
 

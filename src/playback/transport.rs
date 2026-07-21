@@ -194,7 +194,9 @@ impl Playback {
     }
 
     /// When the loop next needs to wake for playback: the frame deadline, or a
-    /// backstop recheck while stalled. `None` when paused.
+    /// backstop recheck while stalled. `None` when paused — but see
+    /// [`rescan_deadline`](Self::rescan_deadline), which keeps the loop waking
+    /// for the directory rescan even while paused.
     pub fn deadline(&self) -> Option<Instant> {
         if !self.playing {
             return None;
@@ -206,15 +208,28 @@ impl Playback {
         })
     }
 
+    /// When the directory should next be re-scanned. Independent of `playing`:
+    /// being *in playback mode* is what §3.5 rescans for, and playback mode is
+    /// left only by Stop, not by pausing — so a render writing frames beside a
+    /// paused viewer must still extend the timeline. Without this wake the loop
+    /// would park on `Wait` the moment playback paused and never rescan again.
+    pub fn rescan_deadline(&self) -> Instant {
+        self.next_rescan
+    }
+
     /// Advance the clock. Called once per rendered frame, from one place only.
     pub fn tick(&mut self, now: Instant) -> Tick {
         if !self.playing || now < self.next_frame_at {
             return Tick::Idle;
         }
         let Some(next) = self.seq.next_playable(self.frame + 1, 1, true) else {
-            // Every slot is a hole. Nothing to play; hold where we are.
-            self.playing = false;
-            log::info!("playback stopped: no playable frames");
+            // Every slot is a hole right now — a render still writing the first
+            // frames, or all frames deleted/corrupt mid-session. Don't stop:
+            // that would leave `playing` false with no wake source, freezing
+            // forever even once frames reappear. Hold, and re-check at the rescan
+            // cadence rather than the frame rate (there is nothing to play until
+            // a file lands on disk, and the rescan is what would notice it).
+            self.next_frame_at = now + RESCAN_INTERVAL;
             return Tick::Idle;
         };
         if next == self.frame {
@@ -500,15 +515,35 @@ mod tests {
         assert_eq!(pb.frame(), 4, "and at the start");
     }
 
-    /// A paused player asks the event loop for nothing, so it can park on Wait
-    /// instead of idling at the display rate.
+    /// A paused player asks for no *frame* wake, so it can park on Wait instead
+    /// of idling at the display rate — but it still owes the directory rescan a
+    /// wake, so a render writing frames beside a paused viewer is noticed.
     #[test]
-    fn a_paused_player_schedules_nothing() {
+    fn a_paused_player_schedules_no_frame_wake_but_still_rescans() {
         let mut pb = player(&[true, true]);
-        assert!(pb.deadline().is_none());
+        assert!(pb.deadline().is_none(), "no frame wake while paused");
         assert!(!pb.behind());
+        // The rescan wake is independent of playing.
+        assert!(pb.rescan_deadline() >= Instant::now());
         pb.set_playing(true);
         assert!(pb.deadline().is_some());
+    }
+
+    /// A timeline that is momentarily all holes (a render still writing the
+    /// first frames, or every frame deleted) must not hard-stop — that would
+    /// leave the loop parked with no wake and freeze forever. It holds, keeps a
+    /// wake scheduled, and stays "playing" so it resumes when a frame appears.
+    #[test]
+    fn an_all_holes_timeline_holds_rather_than_freezing() {
+        let mut pb = player(&[false, false, false]);
+        pb.set_playing(true);
+        let t = Instant::now() + Duration::from_millis(200);
+        assert_eq!(pb.tick(t), Tick::Idle);
+        assert!(
+            pb.playing(),
+            "must not hard-stop into an unrecoverable park"
+        );
+        assert!(pb.deadline().is_some(), "a wake is still scheduled");
     }
 
     /// The achieved rate tracks real advances, and turns red only when it falls

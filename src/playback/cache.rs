@@ -339,9 +339,17 @@ impl FrameCache {
         landed
     }
 
-    /// A rescan found this frame's file rewritten: let it be tried again.
-    pub fn forget_failure(&mut self, frame: i64) {
+    /// A rescan found this frame's file rewritten (new content, possibly a
+    /// different size): drop whatever we have of it so the scheduler decodes it
+    /// afresh. Both the failed marker *and* any resident decoded copy have to
+    /// go — otherwise a frame that decoded fine the first time keeps showing its
+    /// old pixels, because `schedule` re-asserts a still-resident frame as
+    /// `Cached` and never re-queues it. That is exactly the "leave the viewer
+    /// open next to a render" case §3.5 sells.
+    pub fn forget(&mut self, frame: i64) {
         self.failed.remove(&frame);
+        self.frames.remove(&frame);
+        self.marked.remove(&frame);
     }
 
     /// Recompute the cache window around `playhead`: drop everything outside it,
@@ -350,9 +358,13 @@ impl FrameCache {
         let capacity = self.capacity_frames();
         let window = Window::new(seq, playhead, looping, capacity);
 
-        // Evict outside the window. This alone bounds residency: the window is
-        // at most `capacity` frames wide.
-        self.frames.retain(|&f, _| window.rank(f).is_some());
+        // Evict outside the window (bounds residency to `capacity` frames), and
+        // also drop any resident frame whose file has since vanished — a frame
+        // deleted mid-session is a hole now, and its decoded pixels are stale.
+        // Without this, seeking onto that (red) slot would still show the old
+        // pixels rather than holding the previous frame.
+        self.frames
+            .retain(|&f, _| window.rank(f).is_some() && seq.has_file(f));
 
         let inflight = self.pool.inflight();
         // Reflect reality in the slot states, so the cache bar and the transport
@@ -528,8 +540,15 @@ fn frame_byte_size(data: &ImageData) -> u64 {
 }
 
 /// Total physical RAM, for the percentage-of-memory cache budget. Falls back to
-/// 8 GB when the OS will not say.
+/// 8 GB when the OS will not say. Queried once and cached — it is constant for
+/// the process lifetime, and `ui_inputs` reads it every rendered frame.
 pub fn total_physical_memory() -> u64 {
+    use std::sync::OnceLock;
+    static TOTAL: OnceLock<u64> = OnceLock::new();
+    *TOTAL.get_or_init(query_physical_memory)
+}
+
+fn query_physical_memory() -> u64 {
     const FALLBACK: u64 = 8 * 1024 * 1024 * 1024;
     #[cfg(windows)]
     {

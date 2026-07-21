@@ -345,6 +345,10 @@ pub struct Renderer {
     /// The ring frame currently on screen, so an upload can never reuse the slot
     /// being drawn from.
     ring_shown: Option<i64>,
+    /// Ring frames whose file was rewritten while they were the one on screen.
+    /// Their slot can't be freed yet (it's bound), so it is dropped the moment
+    /// the display moves to another frame, and re-uploaded fresh when next shown.
+    ring_stale: std::collections::HashSet<i64>,
 }
 
 impl Renderer {
@@ -388,6 +392,7 @@ impl Renderer {
                 histogram,
                 ring: None,
                 ring_shown: None,
+                ring_stale: std::collections::HashSet::new(),
             })
         }
     }
@@ -512,6 +517,19 @@ impl Renderer {
             .is_some_and(|r| r.texture_for(frame).is_some())
     }
 
+    /// A ring frame's file was rewritten on disk, so its resident texture is
+    /// stale: forget it so the next `upload_frame` re-uploads the fresh pixels.
+    /// The one frame currently on screen can't be forgotten in place (its
+    /// texture is still bound), so it is deferred until the display moves off it.
+    pub fn invalidate_frame(&mut self, frame: i64) {
+        if self.ring_shown == Some(frame) {
+            self.ring_stale.insert(frame);
+        } else if let Some(ring) = self.ring.as_mut() {
+            ring.forget(frame);
+            self.ring_stale.remove(&frame);
+        }
+    }
+
     /// Point the display at a ring frame. This is the whole frame advance: a
     /// different texture name, no shader change, no re-upload, and none of the
     /// view-resetting the adopt pipeline does. `false` if it is not resident.
@@ -537,6 +555,23 @@ impl Renderer {
         // here and the program never needs rebuilding.
         debug_assert_eq!(self.sampler_kind, SamplerKind::Single);
         self.ring_shown = Some(frame);
+        // Any frame that was rewritten while it was on screen can now have its
+        // stale slot freed — the display no longer points at it (unless we just
+        // came right back to it, which the filter preserves).
+        if !self.ring_stale.is_empty() {
+            let freed: Vec<i64> = self
+                .ring_stale
+                .iter()
+                .copied()
+                .filter(|&f| f != frame)
+                .collect();
+            if let Some(ring) = self.ring.as_mut() {
+                for f in freed {
+                    ring.forget(f);
+                    self.ring_stale.remove(&f);
+                }
+            }
+        }
         true
     }
 
@@ -584,6 +619,7 @@ impl Renderer {
         let gl = self.gl.clone();
         self.drop_borrowed_ring_frame();
         self.ring_shown = None;
+        self.ring_stale.clear();
         if let Some(ring) = self.ring.take() {
             unsafe { ring.delete(&gl) };
         }

@@ -13,6 +13,7 @@
 #include <OpenEXR/ImfThreading.h>
 #include <Imath/ImathBox.h>
 
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -51,12 +52,13 @@ extern "C" void exr_native_init_thread_pool(int count) {
 extern "C" void *exr_native_begin(const char *path, int threads, int *out_width, int *out_height,
                                   int *out_channels) {
     try {
-        ExrJob *job = new ExrJob(path, threads < 0 ? 0 : threads);
+        // unique_ptr so any throw after construction (e.g. bad_alloc filling
+        // lone_channel) frees the job rather than leaking it.
+        auto job = std::make_unique<ExrJob>(path, threads < 0 ? 0 : threads);
         job->dw = job->file.header().dataWindow();
         job->width = job->dw.max.x - job->dw.min.x + 1;
         job->height = job->dw.max.y - job->dw.min.y + 1;
         if (job->width <= 0 || job->height <= 0) {
-            delete job;
             return nullptr;
         }
 
@@ -72,7 +74,6 @@ extern "C" void *exr_native_begin(const char *path, int threads, int *out_width,
         if (!job->has_rgb) {
             IMF::ChannelList::ConstIterator it = channels.begin();
             if (it == channels.end()) {
-                delete job;
                 return nullptr;
             }
             job->lone_channel = it.name();
@@ -82,7 +83,7 @@ extern "C" void *exr_native_begin(const char *path, int threads, int *out_width,
         *out_width = job->width;
         *out_height = job->height;
         *out_channels = orig_channels > 0 ? orig_channels : 3;
-        return job;
+        return job.release();
     } catch (...) {
         return nullptr;
     }

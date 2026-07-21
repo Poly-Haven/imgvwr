@@ -544,9 +544,11 @@ fn bottom_ruler_strip(
 }
 
 /// How far below the window edge the bottom panel parks when hidden (points).
-/// Must exceed the panel's tallest form — ruler + transport row + two slider
-/// rows — or a sliver of it stays on screen when it should be gone.
-const BOTTOM_PARK: f32 = 160.0;
+/// Must exceed the panel's tallest form — pixel ruler (~21) + transport row
+/// (~36) + a single-column stack of the four sliders (~4×24 + spacing) — or a
+/// sliver of it would still show at slide 0 (and the last slide-out step would
+/// pop). ~190 clears the ~179pt worst case with headroom.
+const BOTTOM_PARK: f32 = 190.0;
 
 /// Auto-hiding bottom panel (revealed by the cursor near the bottom edge). Sets
 /// `state.pointer_over_panel` so the app keeps it up while hovered. Holds the

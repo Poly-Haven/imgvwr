@@ -196,6 +196,51 @@ fn an_evicted_frame_reverts_to_uncached_on_the_bar() {
     assert!(!seq.state(1).is_hole(), "and it is not a hole either");
 }
 
+/// The "leave it open next to a render" case: a frame that already decoded and
+/// is resident, then gets re-rendered on disk with different content, must be
+/// re-decoded — not kept as stale cached pixels for the session. (Regression
+/// test for a review finding: `forget` used to clear only the failed set.)
+#[test]
+fn a_rewritten_resident_frame_is_re_decoded() {
+    let dir = scratch_dir("rewrite", 5);
+    let mut seq = detect(&dir);
+    let mut cache = new_cache(64 * 1024 * 1024, 4);
+
+    assert!(
+        pump(&mut cache, &mut seq, 1, false, |c| c.resident_frames() == 5),
+        "all five frames should decode"
+    );
+    let before = cache.get(3).expect("frame 3 resident");
+
+    // The artist re-renders frame 3 with a larger file (different content).
+    std::thread::sleep(Duration::from_millis(1100)); // ensure a distinct mtime
+    let big = std::fs::read(dir.path().join("f0001.png")).unwrap();
+    let doubled: Vec<u8> = big.iter().chain(big.iter()).copied().collect();
+    std::fs::write(dir.path().join("f0003.png"), &doubled).unwrap();
+
+    let outcome = seq.rescan();
+    assert!(
+        outcome.refreshed.contains(&3),
+        "rescan should report frame 3"
+    );
+    for f in &outcome.refreshed {
+        cache.forget(*f);
+    }
+    assert!(!cache.contains(3), "the stale copy is dropped");
+
+    // It decodes again (the doubled PNG is still a valid PNG — two IEND-suffixed
+    // streams, but the decoder reads the first image), landing a fresh Arc.
+    assert!(
+        pump(&mut cache, &mut seq, 3, false, |c| c.contains(3)),
+        "frame 3 should be re-decoded"
+    );
+    let after = cache.get(3).expect("frame 3 re-resident");
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &after),
+        "a fresh decode, not the stale Arc"
+    );
+}
+
 /// A frame that cannot be decoded is marked corrupt, is not retried on every
 /// reschedule, and does not stop the rest of the sequence caching.
 #[test]

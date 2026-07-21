@@ -198,12 +198,19 @@ fn draw_track(ui: &mut egui::Ui, pb: &PlaybackInfo, track: egui::Rect) {
     );
     p.rect_filled(bar, 0.0, track_color());
 
-    // Cache bar: one rect per *device pixel* column, never one per frame.
+    // Cache bar: one rect per *device pixel* column, each aligned to the device
+    // pixel grid. This is the histogram lesson (CLAUDE.md, §9.3): a mesh quad
+    // that covers no pixel *centre* rasterises to nothing, so a lone red frame
+    // whose column is sub-pixel-wide or straddles a boundary would silently
+    // vanish — precisely the information the bar exists to show. Working in
+    // device space and snapping each column to `[k, k+1)` device pixels makes
+    // every column exactly one pixel and grid-aligned, so nothing can drop out.
     let ppp = ui.ctx().pixels_per_point().max(0.5);
-    let cols = (bar.width() * ppp).round().max(1.0) as usize;
-    let col_w = bar.width() / cols as f32;
     let states = pb.states.as_slice();
     if !states.is_empty() {
+        let d0 = (bar.left() * ppp).floor() as i64;
+        let d1 = (bar.right() * ppp).ceil() as i64;
+        let cols = (d1 - d0).max(1) as usize;
         let mut mesh = egui::Mesh::default();
         for i in 0..cols {
             let fill = match column_fill(&states[column_span(i, cols, states.len())]) {
@@ -211,12 +218,14 @@ fn draw_track(ui: &mut egui::Ui, pb: &PlaybackInfo, track: egui::Rect) {
                 ColumnFill::Cached => CACHE_BLUE,
                 ColumnFill::Empty => continue,
             };
-            let x = bar.left() + i as f32 * col_w;
+            // Snap to the device-pixel grid, clamped to the bar in point space.
+            let x0 = ((d0 + i as i64) as f32 / ppp).max(bar.left());
+            let x1 = ((d0 + i as i64 + 1) as f32 / ppp).min(bar.right());
+            if x1 <= x0 {
+                continue;
+            }
             mesh.add_colored_rect(
-                egui::Rect::from_min_max(
-                    egui::pos2(x, bar.top()),
-                    egui::pos2(x + col_w, bar.bottom()),
-                ),
+                egui::Rect::from_min_max(egui::pos2(x0, bar.top()), egui::pos2(x1, bar.bottom())),
                 fill,
             );
         }

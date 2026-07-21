@@ -268,33 +268,53 @@ mod tests {
         assert!((white - black - 0.3).abs() < 1e-6, "width preserved");
     }
 
-    /// Every point on the strip grabs *something*. The original hit test left
-    /// dead zones past each handle where a press did nothing at all.
+    /// Every point grabs *something*: a band around each handle, everything else
+    /// slides both. The original hit test left dead zones where a press did
+    /// nothing at all.
     #[test]
     fn grip_hit_test_has_no_dead_zones() {
         let (bx, wx, grab) = (100.0f32, 300.0f32, 7.0);
-        for i in 0..=400 {
+        for i in -100..=500 {
             let x = i as f32;
-            let g = LevelsGrip::at(x, bx, wx, grab);
-            // Exhaustive by construction; assert the regions are where they look.
-            let expect = if x <= bx + grab {
+            let expect = if (x - bx).abs() <= grab {
                 LevelsGrip::Black
-            } else if x >= wx - grab {
+            } else if (x - wx).abs() <= grab {
                 LevelsGrip::White
             } else {
                 LevelsGrip::Both
             };
-            assert_eq!(g, expect, "x={x}");
+            assert_eq!(LevelsGrip::at(x, bx, wx, grab), expect, "x={x}");
         }
     }
 
-    /// Beyond either end still belongs to that handle — that region is where a
-    /// handle sitting at 0 or 1 has to be grabbed from.
+    /// Outside the pair slides both, rather than grabbing the nearest handle.
+    /// That is what leaves the pair reachable once they're butted together: the
+    /// whole rest of the graph becomes the target.
     #[test]
-    fn grip_beyond_the_ends_grabs_the_nearest_handle() {
+    fn grip_outside_the_pair_slides_both() {
         let (bx, wx, grab) = (100.0f32, 300.0f32, 7.0);
-        assert_eq!(LevelsGrip::at(-50.0, bx, wx, grab), LevelsGrip::Black);
-        assert_eq!(LevelsGrip::at(9999.0, bx, wx, grab), LevelsGrip::White);
+        assert_eq!(LevelsGrip::at(-50.0, bx, wx, grab), LevelsGrip::Both);
+        assert_eq!(LevelsGrip::at(9999.0, bx, wx, grab), LevelsGrip::Both);
+        // Still grabbable from just outside the handle itself.
+        assert_eq!(
+            LevelsGrip::at(bx - grab + 1.0, bx, wx, grab),
+            LevelsGrip::Black
+        );
+        assert_eq!(
+            LevelsGrip::at(wx + grab - 1.0, bx, wx, grab),
+            LevelsGrip::White
+        );
+    }
+
+    /// Butted together, the pair owns only its own narrow band and everything
+    /// else moves them as a unit — the case that used to be unreachable.
+    #[test]
+    fn grip_butted_handles_leave_the_rest_to_both() {
+        let (bx, wx, grab) = (200.0f32, 201.3f32, 7.0);
+        assert_eq!(LevelsGrip::at(199.0, bx, wx, grab), LevelsGrip::Black);
+        assert_eq!(LevelsGrip::at(203.0, bx, wx, grab), LevelsGrip::White);
+        assert_eq!(LevelsGrip::at(150.0, bx, wx, grab), LevelsGrip::Both);
+        assert_eq!(LevelsGrip::at(260.0, bx, wx, grab), LevelsGrip::Both);
     }
 
     /// Handles closer together than the grab radius split at the midpoint, so
@@ -369,15 +389,20 @@ impl LevelsGrip {
     /// Which element the point `x` belongs to, given the handles at `bx`/`wx`
     /// and a grab radius.
     ///
-    /// Deliberately total: every x maps to something, so there is no position on
-    /// the strip where a press does nothing. Beyond the outermost handle belongs
-    /// to that handle, and when the two are closer together than the grab radius
-    /// the midpoint splits them rather than either winning outright.
+    /// Each handle owns a band around its own position — that band is the
+    /// full-height line drawn on the graph, which is why the graph's edges can be
+    /// dragged directly. *Everything* else slides both together, including
+    /// outside the pair, which is what keeps the pair movable once the two are
+    /// butted up against each other and there is no strip left between them.
+    ///
+    /// Deliberately total: every x maps to something, so there is nowhere in the
+    /// box where a press does nothing. When the handles are closer than the grab
+    /// radius the midpoint splits them, so neither swallows the other.
     pub fn at(x: f32, bx: f32, wx: f32, grab: f32) -> Self {
         let mid = (bx + wx) * 0.5;
-        if x <= (bx + grab).min(mid) {
+        if (x - bx).abs() <= grab && x <= mid {
             Self::Black
-        } else if x >= (wx - grab).max(mid) {
+        } else if (x - wx).abs() <= grab && x >= mid {
             Self::White
         } else {
             Self::Both

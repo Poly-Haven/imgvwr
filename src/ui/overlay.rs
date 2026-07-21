@@ -2131,9 +2131,11 @@ fn histogram_plot(
         },
     );
 
+    // Both rows are allocated up front so the interaction can span them, and so
+    // the drawing below knows which element is live before it paints anything.
     let (rect, _) = ui.allocate_exact_size(egui::vec2(HIST_ROW_W, HIST_H), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, egui::CornerRadius::same(3), hist_plate());
+    let (strip_row, _) =
+        ui.allocate_exact_size(egui::vec2(HIST_ROW_W, LEVELS_STRIP_H), egui::Sense::hover());
 
     // One column per bin, plus a final 1px column for the over-range spike:
     // samples the screen can only show as full white. Dropping exposure pulls
@@ -2172,6 +2174,17 @@ fn histogram_plot(
     // on it, so a lone spike survives rather than being averaged into invisibility.
     let cols = (plot.width().round() as usize).max(1);
     let col_w = plot.width() / cols as f32;
+
+    // The strip shares the plot's x axis; the interaction spans both, so the
+    // graph's own vertical edges are the handles' grab zones.
+    let strip = egui::Rect::from_min_size(
+        egui::pos2(plot.left(), strip_row.top()),
+        egui::vec2(plot.width(), strip_row.height()),
+    );
+    let live = levels_interaction(ui, inputs, state, actions, rect.union(strip_row), plot);
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::CornerRadius::same(3), hist_plate());
 
     if let Some(hist) = &inputs.histogram {
         let peak = hist.peak();
@@ -2224,60 +2237,70 @@ fn histogram_plot(
         painter.add(egui::Shape::mesh(mesh));
     }
 
-    // Where the two levels cuts fall on the graph, so the handles below read as
-    // positions on this data rather than as an unrelated pair of sliders.
+    // Where the two levels cuts fall on the graph. These aren't just annotation —
+    // each line *is* its handle's grab zone, so it's drawn whenever that handle
+    // is live even when parked at an end with nothing cut off yet, otherwise the
+    // thing you're about to drag would be invisible.
     let (black, white) = inputs.levels;
-    for t in [black, white] {
-        if t > 0.0 && t < 1.0 {
-            let x = plot.left() + t * plot.width();
-            painter.line_segment(
-                [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
-                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(60)),
-            );
+    for (grip, t) in [(LevelsGrip::Black, black), (LevelsGrip::White, white)] {
+        let is_live = live == Some(grip);
+        if !is_live && (t <= 0.0 || t >= 1.0) {
+            continue;
         }
+        let x = plot.left() + t * plot.width();
+        painter.line_segment(
+            [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
+            if is_live {
+                egui::Stroke::new(1.0, ACCENT)
+            } else {
+                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(60))
+            },
+        );
     }
 
-    levels_handles(ui, inputs, state, actions, plot);
+    draw_levels_strip(painter, inputs.levels, strip, live);
 }
 
-/// The two levels handles, on their own strip directly under the plot and
-/// sharing its x axis. Dragging one remaps the display range; the graph itself
-/// deliberately doesn't follow (see `Renderer::update_histogram`).
-fn levels_handles(
+/// The levels interaction: one zone covering the graph *and* the handle strip
+/// beneath it. Returns which element the pointer is on or has grabbed, so the
+/// caller can highlight it.
+///
+/// The graph is part of the control, not just a picture of the data. Each
+/// handle's grab zone is the full-height vertical line at its position — so you
+/// pull the graph's own edges around — and everything else in the box slides
+/// both levels together. That last part is what makes the pair reachable once
+/// they're butted up against each other and the strip between them has vanished:
+/// the entire rest of the graph is the "move both" target.
+///
+/// Dragging remaps the display range; the graph itself deliberately doesn't
+/// follow (see `Renderer::update_histogram`).
+fn levels_interaction(
     ui: &mut egui::Ui,
     inputs: &UiInputs,
     state: &mut UiState,
     actions: &mut Vec<UiAction>,
+    zone: egui::Rect,
     plot: egui::Rect,
-) {
+) -> Option<LevelsGrip> {
     let (black, white) = inputs.levels;
-    // Allocate across the plot's full span, offset so the strip lines up with it
-    // rather than with the surrounding frame margin.
-    // Allocated to the plot's full row width, so the handles at either extreme
-    // still have somewhere to be pressed rather than sitting half outside the
-    // widget egui will accept a press on.
-    let (row, resp) = ui.allocate_exact_size(
-        egui::vec2(HIST_ROW_W, LEVELS_STRIP_H),
+    let resp = ui.interact(
+        zone,
+        ui.id().with("levels_zone"),
         egui::Sense::click_and_drag(),
     );
-    let strip = egui::Rect::from_min_size(
-        egui::pos2(plot.left(), row.top()),
-        egui::vec2(plot.width(), row.height()),
-    );
-    let x_of = |t: f32| strip.left() + t.clamp(0.0, 1.0) * strip.width();
-    let t_of = |x: f32| ((x - strip.left()) / strip.width().max(1.0)).clamp(0.0, 1.0);
+    let x_of = |t: f32| plot.left() + t.clamp(0.0, 1.0) * plot.width();
+    let t_of = |x: f32| ((x - plot.left()) / plot.width().max(1.0)).clamp(0.0, 1.0);
 
     // `pointer_interact_pos` rather than the response's hover position: a drag
-    // routinely leaves the 11pt strip, and losing the pointer there would strand
-    // the handle (the same reason `ruler_spawn_drag` reads it this way).
+    // routinely leaves the zone, and losing the pointer there would strand the
+    // handle (the same reason `ruler_spawn_drag` reads it this way).
     let ctx = ui.ctx().clone();
     let pointer = ctx.pointer_interact_pos();
     let pointer_t = pointer.map(|p| t_of(p.x));
 
     // Which element a given x belongs to. Hit-tested by hand rather than with
-    // three overlapping widgets, so the priority is explicit — and deliberately
-    // *exhaustive*: every point on the strip belongs to something. Earlier this
-    // left dead zones past each handle, where a press did nothing at all.
+    // overlapping widgets, so the priority is explicit — and deliberately
+    // *exhaustive*: every point in the zone belongs to something.
     let grip_at = |x: f32| LevelsGrip::at(x, x_of(black), x_of(white), LEVELS_GRAB);
     let hot = resp
         .contains_pointer()
@@ -2350,10 +2373,32 @@ fn levels_handles(
         }
     }
 
-    // `live` (above) is what highlights: only the element the gesture is on, or
-    // when idle the one the pointer is over. Lighting all of them says nothing
-    // about what a drag would actually move.
-    let painter = ui.painter();
+    if let Some(grip) = live {
+        resp.on_hover_text(match grip {
+            LevelsGrip::Black => {
+                "Display black point — drag the line or the handle; double-click to reset it"
+            }
+            LevelsGrip::White => {
+                "Display white point — drag the line or the handle; double-click to reset it"
+            }
+            LevelsGrip::Both => "Drag anywhere else to slide both; double-click to reset both",
+        });
+    }
+    live
+}
+
+/// The handle strip under the plot: the surviving slice of the range as a bar,
+/// with a triangle at each end. `live` is the element the pointer is on or has
+/// grabbed, which is the only one that highlights — lighting all of them says
+/// nothing about what a drag would actually move.
+fn draw_levels_strip(
+    painter: &egui::Painter,
+    levels: (f32, f32),
+    strip: egui::Rect,
+    live: Option<LevelsGrip>,
+) {
+    let (black, white) = levels;
+    let x_of = |t: f32| strip.left() + t.clamp(0.0, 1.0) * strip.width();
     let bar_y = strip.top() + 1.0;
     painter.line_segment(
         [
@@ -2383,13 +2428,6 @@ fn levels_handles(
             egui::Stroke::new(1.0, egui::Color32::from_gray(120))
         };
         painter.add(egui::Shape::convex_polygon(tri, fill, stroke));
-    }
-    if let Some(grip) = live {
-        resp.on_hover_text(match grip {
-            LevelsGrip::Black => "Display black point — drag; double-click to reset it",
-            LevelsGrip::White => "Display white point — drag; double-click to reset it",
-            LevelsGrip::Both => "Drag to slide both levels; double-click to reset both",
-        });
     }
 }
 
@@ -2804,7 +2842,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                     "Histogram (F2)",
                     "L/Sq/Log scale; eye = visible region only",
                 ),
-                ("Levels handles (F2)", "Drag to set black / white point"),
+                ("Levels (F2)", "Drag a graph edge; elsewhere slides both"),
             ],
         ),
         (
@@ -3065,7 +3103,10 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
 
 #[cfg(test)]
 mod tests {
-    use super::{levels_handles, titlebar_fit, TitlebarFit, HIST_PLOT_W, LEVELS_GRAB};
+    use super::{
+        levels_interaction, titlebar_fit, TitlebarFit, HIST_H, HIST_PLOT_W, HIST_ROW_W,
+        LEVELS_GRAB, LEVELS_STRIP_H,
+    };
     use crate::ui::{UiAction, UiInputs, UiState};
 
     /// Where the test places the strip. Any fixed position works; the assertions
@@ -3086,14 +3127,30 @@ mod tests {
     /// pointer has travelled past its click threshold, which is the exact
     /// behaviour under test.
     fn drag_levels(levels: (f32, f32), press_x: f32, release_x: f32) -> Vec<UiAction> {
+        // Default to a y inside the *graph*: the graph's own area is part of the
+        // control, so that's the interesting place to press.
+        drag_levels_at(levels, press_x, release_x, ORIGIN.y + 20.0)
+    }
+
+    /// [`drag_levels`] at an explicit y, for reaching the strip below the graph.
+    fn drag_levels_at(
+        levels: (f32, f32),
+        press_x: f32,
+        release_x: f32,
+        press_y: f32,
+    ) -> Vec<UiAction> {
         let ctx = egui::Context::default();
         let mut state = UiState::default();
         let inputs = UiInputs {
             levels,
             ..Default::default()
         };
-        let plot = egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_PLOT_W, 68.0));
-        let y = ORIGIN.y + 4.0; // inside the strip, whatever its exact height
+        let plot = egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_PLOT_W, HIST_H));
+        // The zone spans the graph and the strip beneath it — the graph's own
+        // area is now part of the control.
+        let zone =
+            egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_ROW_W, HIST_H + LEVELS_STRIP_H));
+        let y = press_y;
         let mut actions = Vec::new();
 
         let mut frame = |time: f64, events: Vec<egui::Event>, actions: &mut Vec<UiAction>| {
@@ -3110,7 +3167,8 @@ mod tests {
                 egui::Area::new(egui::Id::new("levels_test"))
                     .fixed_pos(ORIGIN)
                     .show(ctx, |ui| {
-                        levels_handles(ui, &inputs, &mut state, actions, plot);
+                        let _ = ui.allocate_exact_size(zone.size(), egui::Sense::hover());
+                        levels_interaction(ui, &inputs, &mut state, actions, zone, plot);
                     });
             });
         };
@@ -3159,7 +3217,11 @@ mod tests {
             levels,
             ..Default::default()
         };
-        let plot = egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_PLOT_W, 68.0));
+        let plot = egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_PLOT_W, HIST_H));
+        // The zone spans the graph and the strip beneath it — the graph's own
+        // area is now part of the control.
+        let zone =
+            egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_ROW_W, HIST_H + LEVELS_STRIP_H));
         let y = ORIGIN.y + 4.0;
         let mut actions = Vec::new();
         let mut cursors = Vec::new();
@@ -3198,7 +3260,8 @@ mod tests {
                 egui::Area::new(egui::Id::new("levels_creep"))
                     .fixed_pos(ORIGIN)
                     .show(ctx, |ui| {
-                        levels_handles(ui, &inputs, &mut state, &mut actions, plot);
+                        let _ = ui.allocate_exact_size(zone.size(), egui::Sense::hover());
+                        levels_interaction(ui, &inputs, &mut state, &mut actions, zone, plot);
                     });
             });
             // Only the frames from the press onward matter.
@@ -3239,7 +3302,11 @@ mod tests {
             levels,
             ..Default::default()
         };
-        let plot = egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_PLOT_W, 68.0));
+        let plot = egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_PLOT_W, HIST_H));
+        // The zone spans the graph and the strip beneath it — the graph's own
+        // area is now part of the control.
+        let zone =
+            egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_ROW_W, HIST_H + LEVELS_STRIP_H));
         let at = egui::pos2(x, ORIGIN.y + 4.0);
         let mut actions = Vec::new();
         let button = |pressed| egui::Event::PointerButton {
@@ -3271,7 +3338,8 @@ mod tests {
                 egui::Area::new(egui::Id::new("levels_dbl"))
                     .fixed_pos(ORIGIN)
                     .show(ctx, |ui| {
-                        levels_handles(ui, &inputs, &mut state, &mut actions, plot);
+                        let _ = ui.allocate_exact_size(zone.size(), egui::Sense::hover());
+                        levels_interaction(ui, &inputs, &mut state, &mut actions, zone, plot);
                     });
             });
         }
@@ -3349,6 +3417,69 @@ mod tests {
         let (nb, nw) = final_levels(&acts).expect("the drag must emit a levels change");
         assert!(nb < black - 0.1, "black should have moved down, got {nb}");
         assert!((nw - white).abs() < 1e-4, "white must not move, got {nw}");
+    }
+
+    /// Dragging the graph's own vertical edge is dragging that handle — the
+    /// pattern the whole design rests on. Pressed high up in the graph, nowhere
+    /// near the triangles.
+    #[test]
+    fn dragging_the_graph_edge_drags_that_handle() {
+        let (black, white) = (0.25f32, 0.75f32);
+        let wx = ORIGIN.x + white * HIST_PLOT_W;
+        let acts = drag_levels_at((black, white), wx, wx - 50.0, ORIGIN.y + 6.0);
+        let (nb, nw) = final_levels(&acts).expect("the drag must emit a levels change");
+        assert!(nw < white - 0.1, "white should have moved, got {nw}");
+        assert!((nb - black).abs() < 1e-4, "black must not move, got {nb}");
+    }
+
+    /// The strip below the graph still drives the same handles.
+    #[test]
+    fn the_strip_below_the_graph_still_works() {
+        let (black, white) = (0.25f32, 0.75f32);
+        let bx = ORIGIN.x + black * HIST_PLOT_W;
+        let strip_y = ORIGIN.y + HIST_H + LEVELS_STRIP_H * 0.5;
+        let acts = drag_levels_at((black, white), bx, bx + 40.0, strip_y);
+        let (nb, nw) = final_levels(&acts).expect("the drag must emit a levels change");
+        assert!(nb > black + 0.1, "black should have moved, got {nb}");
+        assert!((nw - white).abs() < 1e-4, "white must not move, got {nw}");
+    }
+
+    /// Dragging *outside* the pair slides both, rather than grabbing the nearest
+    /// handle as it used to.
+    #[test]
+    fn dragging_outside_the_pair_slides_both() {
+        let (black, white) = (0.4f32, 0.6f32);
+        let bx = ORIGIN.x + black * HIST_PLOT_W;
+        let acts = drag_levels((black, white), bx - 40.0, bx - 10.0);
+        let (nb, nw) = final_levels(&acts).expect("the drag must emit a levels change");
+        assert!(nb > black + 0.05, "black should have slid, got {nb}");
+        assert!(
+            ((nw - nb) - (white - black)).abs() < 1e-4,
+            "the range width must be preserved, got {}",
+            nw - nb
+        );
+    }
+
+    /// Handles butted together are still movable as a pair — the case that had no
+    /// answer before, since the bar between them had shrunk to nothing.
+    #[test]
+    fn butted_handles_can_still_be_slid() {
+        let (black, white) = (0.5f32, 0.505f32);
+        let acts = drag_levels(
+            (black, white),
+            ORIGIN.x + 0.2 * HIST_PLOT_W,
+            ORIGIN.x + 60.0,
+        );
+        let (nb, nw) = final_levels(&acts).expect("the drag must emit a levels change");
+        assert!(
+            (nb - black).abs() > 0.02,
+            "the butted pair should have moved, got {nb}"
+        );
+        assert!(
+            ((nw - nb) - (white - black)).abs() < 1e-4,
+            "the (tiny) range width must be preserved, got {}",
+            nw - nb
+        );
     }
 
     /// Pressing the bar between the handles slides both, keeping their distance.

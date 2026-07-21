@@ -73,6 +73,10 @@ pub struct Playback {
     /// on a frame that has not decoded yet — the screen holds the old frame, and
     /// catches up the moment the new one arrives.
     pub shown: Option<i64>,
+    /// A comparator-slot difference that playing interrupted, to be restored on
+    /// pause. The diff is a full-resolution CPU precompute — not viable per
+    /// frame — but it is perfectly viable on a frame you have stopped on.
+    pub suspended_diff: Option<usize>,
     /// Slot states as the timeline's cache bar wants them, rebuilt only when
     /// some slot state has actually changed. Shared with the UI rather than
     /// copied per frame.
@@ -96,6 +100,7 @@ impl Playback {
             next_log: now + LOG_INTERVAL,
             ringed: false,
             shown: None,
+            suspended_diff: None,
             states: None,
         }
     }

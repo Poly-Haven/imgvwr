@@ -1666,9 +1666,7 @@ impl App {
         // Anything that adopts a new image leaves playback: the timeline belongs
         // to a sequence, and there is nothing sensible to keep it alive across.
         // Done first, so the ring's VRAM is freed before the new upload.
-        if self.playback_active() {
-            self.exit_playback();
-        }
+        self.abandon_playback();
         // Changing the displayed image (folder navigation or a comparator-slot
         // recall) ends any active slot-difference view.
         if self.diff_slot.take().is_some() {
@@ -2080,6 +2078,12 @@ impl App {
     /// exposure/clarity/etc then act on the displayed difference.
     fn toggle_slot_diff(&mut self, n: usize) {
         let idx = n - 1;
+        // The diff is a full-resolution CPU precompute; it cannot keep up with a
+        // frame changing 24 times a second. Pausing makes it available again.
+        if self.playback.as_ref().is_some_and(|p| p.playing()) {
+            self.show_toast("Pause to compare a difference".to_string());
+            return;
+        }
         if self.diff_slot == Some(idx) {
             self.diff_slot = None;
             if let Some(gfx) = &mut self.gfx {
@@ -2404,8 +2408,8 @@ impl App {
             return;
         }
         self.rotation = (self.rotation as i32 + dir).rem_euclid(4) as u8;
-        if let Some(path) = &self.loaded_path {
-            self.image_rotations.insert(path.clone(), self.rotation);
+        if let Some(key) = self.rotation_key() {
+            self.image_rotations.insert(key, self.rotation);
         }
         if !self.camera.is_panorama() {
             self.camera.center_flat_now();
@@ -3383,9 +3387,13 @@ impl App {
                 log::info!("metadata overlay -> {}", self.show_metadata);
             }
             (Key::Named(NamedKey::Home), _) => self.reset_view_full(),
-            // Delete: prompt to remove the current file from disk.
+            // Delete: prompt to remove the current file from disk. Deleting the
+            // file under a running playhead is a foot-gun, so playback has to be
+            // left first.
             (Key::Named(NamedKey::Delete), _) => {
-                if self.loaded_path.is_some() {
+                if self.playback_active() {
+                    self.show_toast("Stop playback before deleting a frame".to_string());
+                } else if self.loaded_path.is_some() {
                     self.ui_state.confirm_delete = true;
                 }
             }
@@ -5544,9 +5552,49 @@ impl App {
                 let playing = !pb.playing();
                 pb.set_playing(playing);
                 self.show_toast(if playing { "Playing" } else { "Paused" }.to_string());
+                self.sync_diff_with_playback();
                 self.request_redraw();
             }
             None => self.enter_playback(true),
+        }
+    }
+
+    /// The comparator difference is a full-resolution CPU precompute, so it
+    /// cannot survive the frame changing 24 times a second. Suspend it while
+    /// playing and bring it back on pause — a frame you have stopped on can
+    /// afford it. Toasted once so it isn't mysterious.
+    ///
+    /// (Computing the diff inside the decode workers would make it work at full
+    /// rate, at the cost of doubling the cached bytes per frame. Worth doing;
+    /// not worth blocking on.)
+    fn sync_diff_with_playback(&mut self) {
+        let playing = self.playback.as_ref().is_some_and(|p| p.playing());
+        if playing {
+            if let Some(slot) = self.diff_slot.take() {
+                if let Some(gfx) = &mut self.gfx {
+                    gfx.renderer.set_diff_image(None);
+                }
+                if let Some(pb) = self.playback.as_mut() {
+                    pb.suspended_diff = Some(slot);
+                }
+                self.show_toast("Difference paused while playing".to_string());
+            }
+        } else if let Some(slot) = self
+            .playback
+            .as_mut()
+            .and_then(|pb| pb.suspended_diff.take())
+        {
+            self.toggle_slot_diff(slot + 1);
+        }
+    }
+
+    /// What display rotation is remembered against. While playing back it is the
+    /// sequence as a whole — keying it to the frame's own path would make `↑`/`↓`
+    /// appear to do nothing as the frame changed under it.
+    fn rotation_key(&self) -> Option<PathBuf> {
+        match self.playback.as_ref() {
+            Some(pb) => Some(pb.seq.identity()),
+            None => self.loaded_path.clone(),
         }
     }
 
@@ -5600,7 +5648,13 @@ impl App {
             log::info!("frames are too large to ring; each one is a full re-upload");
         }
         pb.set_playing(play);
+        // Rotation is remembered per sequence from here on; restore this
+        // sequence's if it has one, else keep whatever the entry frame showed.
+        if let Some(r) = self.image_rotations.get(&pb.seq.identity()).copied() {
+            self.rotation = r;
+        }
         self.playback = Some(pb);
+        self.sync_diff_with_playback();
         // The clipping overlay's max-mip mask is an O(w·h) CPU build with a full
         // mip pyramid — far too expensive per frame. The shader's per-texel
         // fallback takes over while playing (§8); the real mask is rebuilt on
@@ -5617,6 +5671,17 @@ impl App {
     /// whatever frame we stopped on — so the arrows resume folder navigation
     /// from that file.
     fn exit_playback(&mut self) {
+        self.leave_playback(true);
+    }
+
+    /// Leave playback because a different image is being adopted. The frame is
+    /// not kept: re-uploading it as a standalone texture only to overwrite it a
+    /// moment later is pure waste, and for a large frame a visible one.
+    fn abandon_playback(&mut self) {
+        self.leave_playback(false);
+    }
+
+    fn leave_playback(&mut self, keep_frame: bool) {
         let Some(pb) = self.playback.take() else {
             return;
         };
@@ -5624,7 +5689,8 @@ impl App {
         // `current_image` holds — not the playhead, which may have been seeked
         // onto a frame that has not decoded yet. Getting this wrong would delete
         // the ring texture still being drawn from and leave a blank window.
-        let data = self.current_image.clone();
+        let data = keep_frame.then(|| self.current_image.clone()).flatten();
+        let suspended_diff = pb.suspended_diff;
         // Late results can no longer reach an event loop that may be gone.
         pb.cache.cancel_wakeups();
         drop(pb);
@@ -5638,7 +5704,15 @@ impl App {
         // that is no longer chasing a moving image.
         self.clip_mask_dirty = true;
         self.invalidate_histogram();
-        self.show_toast("Stopped".to_string());
+        self.playback_states = None;
+        if keep_frame {
+            // A difference the playing interrupted comes back on the frame you
+            // stopped on.
+            if let Some(slot) = suspended_diff {
+                self.toggle_slot_diff(slot + 1);
+            }
+            self.show_toast("Stopped".to_string());
+        }
         self.request_redraw();
     }
 
@@ -5679,6 +5753,8 @@ impl App {
             pb.shown = Some(frame);
         }
         self.update_window_title();
+        // The comparator flag follows whichever slot holds the frame now shown.
+        self.recompute_active_slot();
         // Different pixels are on screen, so the histogram describes the frame
         // before this one.
         self.invalidate_histogram();
@@ -6237,7 +6313,14 @@ impl App {
         // is just the graph animating along with the image.
         let mut histogram_landed = false;
         if let Some(h) = new_histogram {
-            if histogram_inflight.is_some_and(|k| k.epoch == histogram_now.epoch) {
+            // While playing, the epoch changes on *every* frame, so a strict
+            // match would throw away every measurement and the graph would never
+            // move. A one-frame-old graph beside a moving image is exactly the
+            // live, coarse, honest readout §8 asks for — accept it. On pause the
+            // epoch settles and the strict rule (plus progressive refinement to
+            // the exact answer) takes over again.
+            let playing = self.playback.as_ref().is_some_and(|p| p.playing());
+            if histogram_inflight.is_some_and(|k| k.epoch == histogram_now.epoch || playing) {
                 if log::log_enabled!(log::Level::Debug) {
                     log_histogram(&h);
                 }

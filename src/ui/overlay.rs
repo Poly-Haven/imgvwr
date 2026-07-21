@@ -2189,12 +2189,13 @@ fn histogram_plot(
     if let Some(hist) = &inputs.histogram {
         let peak = hist.peak();
         let mut mesh = egui::Mesh::default();
+        let mut heights = [0.0f32; 3];
         for b in 0..bins {
             let x0 = plot.left() + b as f32 * col_w;
-            let heights: Vec<f32> = (0..active)
-                .map(|c| inputs.histogram_scale.normalise(hist.bins[c][b], peak))
-                .collect();
-            hist_column(&mut mesh, x0, x0 + col_w, plot, &heights, &palette);
+            for (c, h) in heights[..active].iter_mut().enumerate() {
+                *h = inputs.histogram_scale.normalise(hist.bins[c][b], peak);
+            }
+            hist_column(&mut mesh, x0, x0 + col_w, plot, &heights[..active], &palette);
         }
         // The spike shares the bins' normalisation, so it reads on the same
         // scale; an over-range population larger than the tallest bin saturates.
@@ -2209,14 +2210,13 @@ fn histogram_plot(
         } else {
             peak
         };
-        let spike: Vec<f32> = (0..active)
-            .map(|c| {
-                inputs
-                    .histogram_scale
-                    .normalise(hist.over[c], spike_peak)
-                    .min(1.0)
-            })
-            .collect();
+        let mut spike = [0.0f32; 3];
+        for (c, s) in spike[..active].iter_mut().enumerate() {
+            *s = inputs
+                .histogram_scale
+                .normalise(hist.over[c], spike_peak)
+                .min(1.0);
+        }
         // Snapped to whole pixels for the same reason as the columns above: a
         // 1px bar straddling a pixel boundary can rasterise to nothing, and this
         // is the one bar that has no neighbours to cover for it.
@@ -2226,7 +2226,7 @@ fn histogram_plot(
             spike_x,
             spike_x + spike_w,
             plot,
-            &spike,
+            &spike[..active],
             &palette,
         );
         painter.add(egui::Shape::mesh(mesh));
@@ -2452,35 +2452,53 @@ fn hist_column(
 ) {
     // Walk the distinct heights bottom-up; between two consecutive ones exactly
     // the channels that are still taller than the lower bound are covered.
-    let mut levels: Vec<f32> = heights.iter().copied().filter(|h| *h > 0.0).collect();
-    levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    levels.dedup();
+    //
+    // Three channels at most, so both working sets are fixed three-slot arrays.
+    // This runs once per bin on every frame the box is up — a heap allocation
+    // per column, let alone per band, is not the shape that work should have.
+    let mut bands = [0.0f32; 3];
+    let mut n = 0;
+    for &h in heights {
+        if h > 0.0 {
+            bands[n] = h;
+            n += 1;
+        }
+    }
+    let bands = &mut bands[..n];
+    bands.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut low = 0.0f32;
-    for &high in &levels {
-        let covered: Vec<egui::Color32> = heights
-            .iter()
-            .enumerate()
-            .filter(|(_, h)| **h >= high)
-            .map(|(c, _)| palette[c])
-            .collect();
-        if !covered.is_empty() {
-            let band = egui::Rect::from_min_max(
-                egui::pos2(x0, plot.bottom() - high * plot.height()),
-                egui::pos2(x1, plot.bottom() - low * plot.height()),
-            );
-            let idx = mesh.vertices.len() as u32;
-            for p in [
-                band.left_top(),
-                band.right_top(),
-                band.right_bottom(),
-                band.left_bottom(),
-            ] {
-                mesh.colored_vertex(p, hist_band_color(&covered));
-            }
-            mesh.add_triangle(idx, idx + 1, idx + 2);
-            mesh.add_triangle(idx, idx + 2, idx + 3);
+    for &high in bands.iter() {
+        // Ascending, so a repeat of the height just drawn would be a band of no
+        // height at all — which is what the dedup is for.
+        if high <= low {
+            continue;
         }
+        // At least one channel always reaches `high`: that is where it came from.
+        let mut covered = [egui::Color32::TRANSPARENT; 3];
+        let mut n_covered = 0;
+        for (c, h) in heights.iter().enumerate() {
+            if *h >= high {
+                covered[n_covered] = palette[c];
+                n_covered += 1;
+            }
+        }
+        let color = hist_band_color(&covered[..n_covered]);
+        let band = egui::Rect::from_min_max(
+            egui::pos2(x0, plot.bottom() - high * plot.height()),
+            egui::pos2(x1, plot.bottom() - low * plot.height()),
+        );
+        let idx = mesh.vertices.len() as u32;
+        for p in [
+            band.left_top(),
+            band.right_top(),
+            band.right_bottom(),
+            band.left_bottom(),
+        ] {
+            mesh.colored_vertex(p, color);
+        }
+        mesh.add_triangle(idx, idx + 1, idx + 2);
+        mesh.add_triangle(idx, idx + 2, idx + 3);
         low = high;
     }
 }

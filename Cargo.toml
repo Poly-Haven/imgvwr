@@ -60,6 +60,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_Networking_WinHttp",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
+    # Total physical RAM, for the playback cache's percentage-of-memory budget.
+    "Win32_System_SystemInformation",
     # Ctrl+C screenshot-to-clipboard (CF_DIB).
     "Win32_System_DataExchange",
     "Win32_System_Memory",

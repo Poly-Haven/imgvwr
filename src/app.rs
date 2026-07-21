@@ -5742,6 +5742,13 @@ impl App {
         };
         pb.frames.poll(&mut pb.seq);
         if let Some(outcome) = pb.maybe_rescan(now) {
+            log::info!(
+                "rescan: sequence now [{}..{}], {} present ({} frames rewritten)",
+                pb.seq.first(),
+                pb.seq.last(),
+                pb.seq.present_count(),
+                outcome.refreshed.len(),
+            );
             // A rewritten frame's stale copy has to be dropped from both the RAM
             // cache and the GPU ring, or the scheduler would keep re-asserting it
             // as cached and the old pixels would show for the rest of the session.

@@ -463,9 +463,10 @@ pub struct App {
     histogram_key: Option<HistogramKey>,
     /// Phase-offset passes dispatched for that key so far. A big image is
     /// measured a strided slice at a time — each pass costs the same as the
-    /// whole measurement used to, and once every phase has run the accumulated
-    /// result is bit-identical to having read every pixel. Reset whenever the
-    /// key changes, so dragging exposure keeps the cheap live behaviour and the
+    /// whole measurement used to, and once every phase has run the accumulation
+    /// has covered the image (exactly, where the stride divides both dimensions;
+    /// see [`crate::renderer::Histogram`]'s module notes). Reset whenever the key
+    /// changes, so dragging exposure keeps the cheap live behaviour and the
     /// refinement only runs once things settle.
     histogram_pass: u32,
     /// Measure the histogram from the visible region rather than the whole
@@ -5460,11 +5461,11 @@ impl App {
             self.clip_mask_dirty = false;
         }
 
-        // Display histogram (F2 box): re-measure when the graph no longer matches
-        // the tone state, and only while the box is actually on screen — exactly
-        // the same laziness as the clip mask above. `histogram_want` carries the
-        // image's raw (unrotated) dimensions, which is what sizes the sample
-        // grid; a rotation permutes pixels but cannot change their values.
+        // Display histogram (F2 box): restart from pass 0 when the graph no
+        // longer matches the tone state, and measure only while the box is
+        // actually on screen — exactly the same laziness as the clip mask above.
+        // A matching key doesn't mean idle: that is when the remaining phase
+        // passes run, which is what refines the graph to the whole image.
         let viewport_px = self.gfx.as_ref().map(|g| {
             let s = g.window.inner_size();
             (s.width.max(1) as i32, s.height.max(1) as i32)
@@ -5678,9 +5679,11 @@ impl App {
                 }
             }
 
-            // Land a finished measurement, then start the next one if the graph
-            // has gone stale. Done before the scene draw because the pass binds
-            // its own framebuffer and viewport; `render` re-binds both anyway.
+            // Land a finished measurement, then dispatch the next phase pass if
+            // this source still has one owing — staleness only decides *which*
+            // pass that is, by having reset the counter above. Done before the
+            // scene draw because the pass binds its own framebuffer and
+            // viewport; `render` re-binds both anyway.
             new_histogram = gfx.renderer.poll_histogram();
             if let Some(source) = histogram_want {
                 let passes = gfx.renderer.histogram_passes(source);

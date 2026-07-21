@@ -2081,9 +2081,10 @@ const LEVELS_STRIP_H: f32 = 13.0;
 const LEVELS_GRAB: f32 = 7.0;
 
 /// The histogram of the displayed image, its scale selector, and the levels
-/// handles beneath it. Drawn full width under the metadata grid; `width` is the
-/// grid's measured width so the two line up. Greyscale images draw a single
-/// neutral curve, matching how [`channel_boxes`] collapses L / LA.
+/// handles beneath it. Drawn under the metadata grid at a fixed [`HIST_ROW_W`] —
+/// the box is sized around the graph, not the other way round, so the two line
+/// up. Greyscale images draw a single neutral curve, matching how
+/// [`channel_boxes`] collapses L / LA.
 ///
 /// The plate and the handles are drawn whether or not a measurement has landed
 /// yet. A measurement takes a frame or two to come back (and never arrives at

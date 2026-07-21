@@ -986,7 +986,10 @@ impl Renderer {
             // the levelled result would make the histogram chase its own handles.
             levels: [0.0, 1.0],
             point_sample,
-            // Mip sampling needs the mip path, which `nearest` would defeat.
+            // Inert on the live path — `point_sample` already picks the filter
+            // in `draw_quad` before `nearest` is consulted. It only matters to
+            // the mip-sampling benchmark, which wants the trilinear filter
+            // rather than the I key's `NEAREST_MIPMAP_NEAREST`.
             nearest: params.nearest && point_sample,
             // Channel isolation is deliberately *kept*: when a single channel is
             // on screen as greyscale, that is what the graph should describe. The
@@ -1064,9 +1067,11 @@ impl Renderer {
     ///
     /// What it established, on a 24576×12288 EXR (302 Mpx):
     ///
-    /// * Cost is flat below ~8M samples — 0.69 ms at 1M, 0.82 ms at 8M — because
-    ///   the pass is dominated by fixed overhead (target clear, dispatch, fence)
-    ///   rather than by the sampling. 1M was giving away accuracy for nothing.
+    /// * Cost is flat below ~8M samples — 0.69 ms at 1M, 0.82 ms at 8M — so 1M
+    ///   was giving away accuracy for nothing. (Not fixed overhead: a contiguous
+    ///   1080p viewport pass of 2M costs 0.34 ms. What the whole-image pass pays
+    ///   down there is the strided read itself, walking a 302 Mpx source at LOD
+    ///   0, and taking more samples along the way is nearly free.)
     /// * It climbs steeply after that: 2.3 ms at 32M, 8.1 ms at 128M, and 15.8 ms
     ///   to read every pixel — a whole 60 fps frame — for a target that also
     ///   wants 2.4 GB of VRAM, as much again as the image texture itself.

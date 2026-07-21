@@ -21,12 +21,17 @@
 //!   GPU says it has finished. At most one dispatch is ever in flight.
 //!
 //! An image too big for the target is measured a strided slice per frame, and
-//! the passes accumulate: with an integer stride the phase offsets partition the
-//! image, so once every phase has run the result is bit-identical to having read
-//! every pixel. Until it settles — and past the pass cap, which only a
-//! pathologically large image reaches — a *handful* of clipped pixels can still
-//! fall between samples. Finding those is what the clipping overlay (`C`, backed
-//! by a max-mipped mask) is for; this is a tonal overview.
+//! the passes accumulate: the integer stride's phase offsets are residue classes,
+//! so once every phase has run each pixel has been counted once — bit-identical
+//! to reading the whole image, in the case where the stride divides both
+//! dimensions. It usually doesn't, and the grid is rounded up rather than
+//! leaving an edge unmeasured, so in general a sliver of one column and one row
+//! is counted twice ([`HistogramPass::grid_size`]).
+//!
+//! Either way a *handful* of clipped pixels can still fall between samples while
+//! the passes are still landing, and permanently past the pass cap that only a
+//! pathologically large image reaches. Finding those is what the clipping
+//! overlay (`C`, backed by a max-mipped mask) is for; this is a tonal overview.
 //!
 //! Compute shaders are core in GL 4.3, which is the context imgvwr asks for, but
 //! a driver that hands back something older simply leaves [`HistogramPass::new`]
@@ -40,9 +45,12 @@ const BIN_SRC: &str = include_str!("../../resources/shaders/histogram.glsl");
 /// output code — finer would only resolve the display's own rounding.
 pub const BINS: usize = 256;
 
-/// Pixels measured per pass. Progressive refinement means this no longer sets
-/// *accuracy* — every setting converges on having read the whole image — only
-/// how the work is sliced: bigger passes finish sooner but cost more per frame.
+/// Pixels measured per pass. Progressive refinement means this mostly sets how
+/// the work is *sliced* rather than how accurate it ends up: bigger passes
+/// finish sooner but cost more per frame. It does still bound accuracy at the
+/// extreme, since a value small enough to push the stride past ~11 needs more
+/// than [`HistogramPass::passes_for`]'s cap allows and never finishes covering
+/// the image.
 ///
 /// Benchmarked on a 24576×12288 EXR (302 Mpx), where this stride of 6 gives 36
 /// passes: 0.93 ms each and 33 ms of GPU in total. Both neighbours are worse on
@@ -223,9 +231,11 @@ impl HistogramPass {
     /// Because the draw then reads exactly one source texel per target texel
     /// (`point_sample`), that factor *is* the sampling stride — a 24576×12288
     /// EXR becomes a 4096×2048 grid, every 6th pixel each way, spread evenly
-    /// over the whole image. Anything already at or under [`SAMPLES_PER_PASS`]
-    /// (a 4096×2048 image is) comes out at stride 1 and is measured in full,
-    /// leaving the phase offsets nothing to add.
+    /// over the whole image. Anything near or under [`SAMPLES_PER_PASS`] comes
+    /// out at stride 1 and is measured in full, leaving the phase offsets
+    /// nothing to add — the rounding in [`stride`](Self::stride) means that
+    /// covers everything under 18 Mpx (2.25 × the budget), not just images that
+    /// fit it exactly.
     ///
     /// A total-pixel budget alone doesn't bound either side — a 1×200000 strip is
     /// well under the budget yet far past `GL_MAX_TEXTURE_SIZE`, and the
@@ -246,10 +256,12 @@ impl HistogramPass {
 
     /// Sampling stride: take every `stride`-th pixel on each axis.
     ///
-    /// An integer stride is what makes progressive refinement exact — the
-    /// `stride²` phase offsets then partition the image into residue classes
-    /// that tile it perfectly, so each pass measures a disjoint set of pixels
-    /// and the accumulated result is identical to reading every pixel.
+    /// An integer stride is what lets progressive refinement converge — the
+    /// `stride²` phase offsets are residue classes, so each pass measures a
+    /// disjoint set of pixels. They tile the image exactly when the stride
+    /// divides both dimensions, and the accumulated result is then identical to
+    /// reading every pixel; otherwise [`grid_size`](Self::grid_size)'s rounding
+    /// up counts one column and one row twice.
     pub fn stride(image_w: i32, image_h: i32, max_texture: i32) -> i32 {
         let (w, h) = (image_w.max(1), image_h.max(1));
         let px = w as f64 * h as f64;

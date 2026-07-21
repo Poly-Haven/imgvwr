@@ -85,7 +85,8 @@ pub fn build_overlays(
     // the drag started).
     color_pick_tooltip(ctx, inputs);
 
-    // Auto-hiding bottom panel (tone sliders + the merged bottom ruler).
+    // Auto-hiding bottom panel: the merged bottom ruler, the playback transport
+    // (while playing), and the adjustment sliders.
     bottom_panel(ctx, inputs, state, actions);
 
     // Auto-hiding borderless titlebar, drawn last so its controls sit on top.
@@ -984,6 +985,40 @@ fn settings_dialog(
                                 ui.end_row();
                             });
 
+                        // ── Playback ────────────────────────────────────────
+                        settings_heading(ui, "Playback");
+                        egui::Grid::new("set_playback")
+                            .num_columns(2)
+                            .spacing([16.0, 10.0])
+                            .min_col_width(170.0)
+                            .show(ui, |ui| {
+                                ui.label("Frame rate");
+                                playback_fps_combo(ui, inputs, actions);
+                                ui.end_row();
+
+                                ui.label("Frame cache").on_hover_text(
+                                    "Share of system memory the sequence frame cache may \
+                                         use. A sequence that does not fit still plays — it \
+                                         simply decodes on demand, and the timeline's cache bar \
+                                         shows how much is held.",
+                                );
+                                let mut pct = inputs.playback_cache_percent;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut pct, 5..=80)
+                                            .suffix("% of RAM")
+                                            .custom_formatter(|v, _| {
+                                                let gb = inputs.total_memory_gb * v as f32 / 100.0;
+                                                format!("{v:.0}%  ({gb:.1} GB)")
+                                            }),
+                                    )
+                                    .changed()
+                                {
+                                    actions.push(UiAction::SetPlaybackCachePercent(pct));
+                                }
+                                ui.end_row();
+                            });
+
                         // ── Performance ─────────────────────────────────────
                         settings_heading(ui, "Performance");
                         let mut half = inputs.half_float_textures;
@@ -1021,6 +1056,31 @@ fn settings_dialog(
                         ui.add_space(6.0);
                     });
             });
+        });
+}
+
+/// The target playback frame rate. The default comes from the OS region — 25 in
+/// PAL territories, 24 everywhere else — which is as much precision as the
+/// locale gives us; this dropdown is the real answer for anyone who needs 30 or
+/// 48. It does not apply to animated GIF / APNG / WebP, whose per-frame delays
+/// are recorded in the file.
+fn playback_fps_combo(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
+    let label = |fps: f32| {
+        if (fps - fps.round()).abs() < 0.001 {
+            format!("{fps:.0} fps")
+        } else {
+            format!("{fps:.3} fps")
+        }
+    };
+    egui::ComboBox::from_id_salt("playback_fps")
+        .selected_text(label(inputs.playback_fps))
+        .show_ui(ui, |ui| {
+            for fps in crate::playback::transport::FRAME_RATES {
+                let selected = (fps - inputs.playback_fps).abs() < 0.001;
+                if clickable(ui.selectable_label(selected, label(fps))).clicked() {
+                    actions.push(UiAction::SetPlaybackFps(fps));
+                }
+            }
         });
 }
 
@@ -2855,8 +2915,19 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("Ctrl + C", "Copy the window to the clipboard"),
                 ("Delete", "Delete the file (confirms first)"),
                 ("← / →", "Previous / next image"),
-                ("Space", "Pause / play animation (GIF/WebP/APNG)"),
                 ("F2", "Metadata overlay"),
+            ],
+        ),
+        (
+            "Playback",
+            &[
+                ("Space", "Play a sequence / animation, then pause"),
+                ("Esc / ⏹", "Stop (stays on the current frame)"),
+                ("← / →", "Step one frame"),
+                ("Click timeline", "Jump to that frame"),
+                ("Drag timeline", "Scrub (keeps playing)"),
+                ("Blue / red bar", "Frames cached / missing"),
+                ("fps in red", "Running short of the target rate"),
             ],
         ),
         (

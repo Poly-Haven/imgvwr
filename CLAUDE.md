@@ -53,7 +53,11 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   env vars (debug builds only) force state — e.g. `IMGVWR_DEBUG_ZOOM`, `IMGVWR_DEBUG_EXPOSURE`,
   `IMGVWR_DEBUG_PROJECTION=pano`, `IMGVWR_DEBUG_OVERLAY=settings|metadata|error|loading|hint|help`,
   `IMGVWR_DEBUG_BG=black|checker|white|user`,
-  `IMGVWR_DEBUG_LEVELS=black,white`, `IMGVWR_DEBUG_HIST_VIEWPORT=1`. `RUST_LOG=debug` also dumps
+  `IMGVWR_DEBUG_LEVELS=black,white`, `IMGVWR_DEBUG_HIST_VIEWPORT=1`. Playback:
+  `IMGVWR_DEBUG_PLAY=1` (play), `IMGVWR_DEBUG_PLAY_FRAME=<n>` (park *paused* on a frame — racing
+  the clock is not reproducible), `IMGVWR_DEBUG_PLAY_STOP=1` (then leave playback, to check the
+  ring teardown), `IMGVWR_DEBUG_CACHE_MB=<n>`; plus `IMGVWR_PLAYBACK_WORKERS` /
+  `IMGVWR_PLAYBACK_RING_BYTES`, which work in release too. `RUST_LOG=debug` also dumps
   each landed histogram as a 16-bucket digest, which is the only way to check the *numbers* rather
   than the picture — and the digest is what proves e.g. that viewport-mode sampling really tracks
   the zoom (`_ZOOM=4` on a full-range ramp collapses it to the middle quarter).
@@ -196,6 +200,22 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   path headlessly with `imgvwr.exe --register-default-app`; verify the resulting Type strings with
   `SHGetFileInfo(..., SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES)` from a fresh process (the shell
   caches associations per-process).
+- **Sequence playback: the frame advance must never touch the adopt pipeline.** `load_path` →
+  `begin_adopt` → `finalize_adopt` resets the camera, re-runs panorama detection, re-frames the
+  window, auto-exposes, clears undo and re-runs OCIO view selection — all wrong (and slow) 24 times
+  a second. `show_playback_frame` swaps the texture and does *only* the bookkeeping that depends on
+  which pixels are showing. Consequences that fall out of that and are easy to break:
+  - The ring holds `ImageTextureKind::RingFrame`, a **borrowed** texture name. `ImageTexture::delete`
+    must ignore it, and `end_sequence` must re-upload the kept frame *before* freeing the ring.
+  - The frame to keep on Stop is `pb.shown`, not the playhead — a seek can leave the playhead on a
+    frame that has not decoded, and keeping that one deletes the texture still being drawn from.
+  - `invalidate_histogram()` per frame changes the epoch every frame, so the landing check that
+    normally discards a stale measurement would discard *every* one. While playing, a one-frame-old
+    graph is the point; the check relaxes (see `render`).
+  - Rotation is remembered against `seq.identity()`, not the frame path — the frame path changes
+    under it and `↑`/`↓` would appear to do nothing.
+  - An animation's frames all share one `ImageData` whose own buffer mirrors frame 0, so stopping on
+    frame *n* has to lift frame *n*'s pixels into a still (`FrameSource::still_of`).
 - **Panorama detection is format- + content-gated, not just 2:1 aspect.** `ImageData::is_equirectangular()`
   gates in order: `can_be_panorama(path)` (float HDR only — `PANO_EXTS` = exr/hdr/pic; 8-bit/LDR is
   *always* 2D by deliberate choice, since 360 JPEGs exist but the user wants them flat by default,

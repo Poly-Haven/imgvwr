@@ -4925,6 +4925,9 @@ impl App {
             minimap: self.minimap_info(),
             color_pick: self.color_pick_last,
             playback: self.playback_info(),
+            playback_fps: self.prefs.playback_fps,
+            playback_cache_percent: self.prefs.playback_cache_percent,
+            total_memory_gb: cache::total_physical_memory() as f32 / (1024.0 * 1024.0 * 1024.0),
         }
     }
 
@@ -5276,6 +5279,27 @@ impl App {
                     pb.seek(frame);
                     self.request_redraw();
                 }
+            }
+            UiAction::SetPlaybackFps(fps) => {
+                self.prefs.playback_fps = fps;
+                self.prefs.save();
+                if let Some(pb) = self.playback.as_mut() {
+                    pb.set_target_fps(fps);
+                }
+                self.request_redraw();
+            }
+            UiAction::SetPlaybackCachePercent(pct) => {
+                self.prefs.playback_cache_percent = pct;
+                self.prefs.save();
+                // Applies live: the window resizes on the next reschedule, so
+                // lowering it evicts and raising it reads further ahead.
+                let budget = self.playback_cache_budget();
+                if let Some(pb) = self.playback.as_mut() {
+                    if let crate::playback::FrameSource::Files(cache) = &mut pb.frames {
+                        cache.set_budget(budget);
+                    }
+                }
+                self.request_redraw();
             }
             UiAction::SetAutoExposure(on) => {
                 self.prefs.auto_exposure = on;

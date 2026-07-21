@@ -61,6 +61,7 @@ One of my roles at Poly Haven is QC, I spend a lot of time inspecting pixels and
 - **Guides:** Vertical and horizontal guides can be added for straight edge references. Helps you check your HDRIs are level. Press `G` to add them in automatic subdivided increments.
 - **Metadata:** Hover near the top right or press `F2` to show the file metadata (bit depth, resolution, etc). Inspect channels individually.
 - **Levels:** Two handles under the histogram set the display black and white points, stretching that part of the range back out to full. The graph is the control, not just a picture of it — grab either of its vertical edges to move that point, or anywhere else to slide the whole range. And because the graph is measured *before* the adjustment, it stays put while you drag: you're always reading the data you're cutting against, not a picture chasing your own handle.
+- **Sequence playback:** Press `Space` on any frame of an image sequence and the viewer becomes a frame player — it finds the rest of the sequence on disk, decodes ahead into RAM across every core, and plays it with a scrubbable timeline. Everything else keeps working while it plays, because it's the same viewer with the image changing 24 times a second, not a separate mode with its own rules. See [Playback](#playback).
 - **Histogram:** The `F2` box also plots the tonal distribution of what's actually on screen — measured *after* exposure and the view transform, so it follows every adjustment you make. R/G/B are drawn as additive translucent areas (red + green reads yellow, all three read white), and a 1px spike on the right counts everything past the top of the displayable range. Lower the exposure and you'll watch that spike drain back into the graph. Isolate a channel and the graph follows it as a single white area, alpha included. Pick a Linear, square-root or logarithmic vertical scale with the `L` / `Sq` / `Log` buttons, and use the eye button to measure just the visible region instead of the whole image — zoom in for a reading of one area. A large image is measured a slice at a time over the following moment, so within about half a second the graph has counted *every* pixel — without ever costing a dropped frame.
 
 ## OCIO Color Management
@@ -102,7 +103,6 @@ This is the standard in VFX and digital content creation. Using the same system 
 | `Ctrl + C` | Copy the current window render to the clipboard — the displayed region at the current window size, adjustments and view transform baked in, guides/minimap/other UI included |
 | `Delete` | Prompts, then permanently deletes the current file from disk and steps to the next image in the folder |
 | `←` / `→` | Previous / next image in the folder (alphabetical) |
-| `Space` | Pause / play an animation (GIF / animated WebP / APNG) |
 | `F2` | Toggle metadata overlay (also appears on top-right hover) |
 
 ### Inspect / review
@@ -137,10 +137,40 @@ This is the standard in VFX and digital content creation. Using the same system 
 | `F` / `F11` / double-click | Toggle fullscreen (2D images fit the screen but smaller-than-screen ones show at 1:1; the cursor auto-hides when idle) |
 | `Escape` / `Q` | Exit fullscreen or close |
 | Move cursor to top edge | Show the titlebar (Open, Settings, window controls) — also in fullscreen; dragging it there exits fullscreen and moves the window |
-| Move cursor to bottom edge | Show the adjustment sliders panel (Exposure, Gamma) |
+| Move cursor to bottom edge | Show the adjustment sliders panel (Exposure, Gamma, Clarity, Radius) — and the playback transport, while playing |
 
 *Settings → Appearance → Titlebar → "Always show"* keeps the titlebar permanently
 revealed instead of auto-hiding.
+
+### Playback
+
+| Input | Action |
+|---|---|
+| `Space` | Play the image sequence this file belongs to — or the frames of an animated GIF / WebP / APNG. Press again to pause, again to resume |
+| `Escape` or the ⏹ button | Stop, staying on the frame you're looking at — the arrows go back to folder navigation from that file |
+| `←` / `→` | Step one frame back / forward (skipping any gaps) |
+| Click the timeline | Jump to that frame |
+| Drag the timeline | Scrub; if it was playing it keeps playing from the new position |
+| Cache bar | The 4px strip under the timeline: **blue** = the frame is decoded and in memory, **red** = missing from disk or wouldn't decode. A single red frame in a cached run is always drawn, however long the sequence |
+| fps readout | The rate actually achieved. It turns **red** when playback is running short of the target — usually because frames are decoding slower than they're wanted |
+
+Sequences are found from the file you have open: the name must end in a frame
+number (`shot_0047.png`, `render.1001.exr`, `frame12.jpg`), and every sibling
+with the same prefix, extension and padding joins the timeline. Gaps are real
+positions on it rather than being closed up, so you can see them — and the
+playhead skips straight over them rather than freezing.
+
+**It never drops a frame.** If the machine can't decode fast enough, or the
+sequence is far larger than the frame cache, playback runs slow and says so in
+red rather than skipping content. And because the directory is re-scanned while
+you watch, a render writing frames beside you extends the timeline live, and a
+frame that was half-written when it was first tried gets picked up once it's
+finished.
+
+Everything else keeps working while it plays: exposure, the view transform,
+panorama look-around, guides, the colour picker, comparator slots, the
+histogram. Set the target frame rate and the frame cache's share of memory in
+*Settings → Playback*.
 
 ### Comparator & help
 

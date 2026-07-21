@@ -122,6 +122,13 @@ pub struct UiInputs {
     pub clip_margin: f32,
     /// Whether 32-bit-float images upload as 16-bit half (the VRAM-saving toggle).
     pub half_float_textures: bool,
+    /// Target playback frame rate (Settings dropdown).
+    pub playback_fps: f32,
+    /// Share of physical RAM the sequence frame cache may use (Settings slider).
+    pub playback_cache_percent: u32,
+    /// Total physical memory in GB, so the cache slider can show what its
+    /// percentage actually comes to on this machine.
+    pub total_memory_gb: f32,
     /// Whether the titlebar stays permanently revealed instead of auto-hiding.
     pub pin_titlebar: bool,
     /// A newer release than the running build, if known: `(version_label, url)`.
@@ -580,6 +587,10 @@ pub enum UiAction {
     PlaybackStop,
     /// Move the playhead to this frame (a click or drag on the timeline).
     PlaybackSeek(i64),
+    /// Set the target playback frame rate.
+    SetPlaybackFps(f32),
+    /// Set the sequence frame cache's share of physical RAM, as a percentage.
+    SetPlaybackCachePercent(u32),
     /// Open the settings dialog (titlebar gear button).
     OpenSettings,
     // Borderless titlebar controls.

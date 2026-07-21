@@ -68,8 +68,6 @@ pub struct UiInputs {
     pub histogram: Option<std::sync::Arc<crate::renderer::Histogram>>,
     /// Vertical scale for that graph (the L / Sq / Log selector).
     pub histogram_scale: crate::prefs::HistogramScale,
-    /// How many pixels that graph samples (the Settings picker).
-    pub histogram_samples: u32,
     /// Whether the graph measures the visible region instead of the whole image
     /// (the eye toggle).
     pub histogram_viewport: bool,
@@ -265,6 +263,44 @@ mod tests {
         assert!((white - black - 0.3).abs() < 1e-6, "width preserved");
     }
 
+    /// Every point on the strip grabs *something*. The original hit test left
+    /// dead zones past each handle where a press did nothing at all.
+    #[test]
+    fn grip_hit_test_has_no_dead_zones() {
+        let (bx, wx, grab) = (100.0f32, 300.0f32, 7.0);
+        for i in 0..=400 {
+            let x = i as f32;
+            let g = LevelsGrip::at(x, bx, wx, grab);
+            // Exhaustive by construction; assert the regions are where they look.
+            let expect = if x <= bx + grab {
+                LevelsGrip::Black
+            } else if x >= wx - grab {
+                LevelsGrip::White
+            } else {
+                LevelsGrip::Both
+            };
+            assert_eq!(g, expect, "x={x}");
+        }
+    }
+
+    /// Beyond either end still belongs to that handle — that region is where a
+    /// handle sitting at 0 or 1 has to be grabbed from.
+    #[test]
+    fn grip_beyond_the_ends_grabs_the_nearest_handle() {
+        let (bx, wx, grab) = (100.0f32, 300.0f32, 7.0);
+        assert_eq!(LevelsGrip::at(-50.0, bx, wx, grab), LevelsGrip::Black);
+        assert_eq!(LevelsGrip::at(9999.0, bx, wx, grab), LevelsGrip::White);
+    }
+
+    /// Handles closer together than the grab radius split at the midpoint, so
+    /// neither swallows the other and the bar can't be grabbed by accident.
+    #[test]
+    fn grip_splits_touching_handles_at_the_midpoint() {
+        let (bx, wx, grab) = (200.0f32, 204.0f32, 7.0);
+        assert_eq!(LevelsGrip::at(201.0, bx, wx, grab), LevelsGrip::Black);
+        assert_eq!(LevelsGrip::at(203.0, bx, wx, grab), LevelsGrip::White);
+    }
+
     /// Running the bar into an edge stops the pair rather than squashing it —
     /// clamping each end independently would have collapsed the range instead.
     #[test]
@@ -322,6 +358,26 @@ pub enum LevelsGrip {
     /// The bar between the two handles: slides the whole range, keeping the
     /// distance between the points fixed.
     Both,
+}
+
+impl LevelsGrip {
+    /// Which element the point `x` belongs to, given the handles at `bx`/`wx`
+    /// and a grab radius.
+    ///
+    /// Deliberately total: every x maps to something, so there is no position on
+    /// the strip where a press does nothing. Beyond the outermost handle belongs
+    /// to that handle, and when the two are closer together than the grab radius
+    /// the midpoint splits them rather than either winning outright.
+    pub fn at(x: f32, bx: f32, wx: f32, grab: f32) -> Self {
+        let mid = (bx + wx) * 0.5;
+        if x <= (bx + grab).min(mid) {
+            Self::Black
+        } else if x >= (wx - grab).max(mid) {
+            Self::White
+        } else {
+            Self::Both
+        }
+    }
 }
 
 /// A levels drag in progress.
@@ -433,8 +489,6 @@ pub enum UiAction {
     SetChannelIsolate(Option<u8>),
     /// Set the histogram's vertical scale (the L / Sq / Log selector).
     SetHistogramScale(crate::prefs::HistogramScale),
-    /// Set how many pixels the histogram samples.
-    SetHistogramSamples(u32),
     /// Measure the histogram from the visible region instead of the whole image.
     SetHistogramViewport(bool),
     /// Set the display black/white points (dragged on the histogram's handles).

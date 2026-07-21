@@ -969,32 +969,6 @@ fn settings_dialog(
                                     actions.push(UiAction::SetClipMargin(pct / 100.0));
                                 }
                                 ui.end_row();
-
-                                ui.label("Histogram samples");
-                                let cur = inputs.histogram_samples;
-                                egui::ComboBox::from_id_salt("set_hist_samples")
-                                    .selected_text(crate::prefs::histogram_samples_label(cur))
-                                    .width(200.0)
-                                    .show_ui(ui, |ui| {
-                                        for n in crate::prefs::HISTOGRAM_SAMPLE_STEPS {
-                                            let label = crate::prefs::histogram_samples_label(n);
-                                            if ui.selectable_label(n == cur, label).clicked() {
-                                                actions.push(UiAction::SetHistogramSamples(n));
-                                            }
-                                        }
-                                    })
-                                    .response
-                                    .on_hover_text(
-                                        "Pixels the F2 histogram looks at, spread evenly over the \
-                                         image. Anything up to 8M is effectively free; past that \
-                                         the cost shows up as frame rate while you're actively \
-                                         changing exposure. Raising it catches small populations \
-                                         — a few blown highlights — that can otherwise fall \
-                                         between samples. Doesn't affect the eye button's \
-                                         visible-region mode, which always reads every screen \
-                                         pixel.",
-                                    );
-                                ui.end_row();
                             });
 
                         // ── Performance ─────────────────────────────────────
@@ -2099,11 +2073,12 @@ fn hist_band_color(channels: &[egui::Color32]) -> egui::Color32 {
 }
 
 /// Height of the levels handle strip below the plot.
-const LEVELS_STRIP_H: f32 = 11.0;
-/// How close (in points) the pointer must come to a levels handle to grab it
-/// rather than the bar between them. Wider than the 8pt triangle, since a 9pt
-/// target is a fiddly thing to hit exactly.
-const LEVELS_GRAB: f32 = 6.0;
+const LEVELS_STRIP_H: f32 = 13.0;
+/// How far (in points) either side of a levels handle still grabs the handle
+/// rather than the bar between them. Wider than the 8pt triangle, since an 8pt
+/// target is a fiddly thing to hit exactly; everything beyond the outermost
+/// handle belongs to it too, so there is no dead zone at either end.
+const LEVELS_GRAB: f32 = 7.0;
 
 /// The histogram of the displayed image, its scale selector, and the levels
 /// handles beneath it. Drawn full width under the metadata grid; `width` is the
@@ -2278,8 +2253,11 @@ fn levels_handles(
     let (black, white) = inputs.levels;
     // Allocate across the plot's full span, offset so the strip lines up with it
     // rather than with the surrounding frame margin.
+    // Allocated to the plot's full row width, so the handles at either extreme
+    // still have somewhere to be pressed rather than sitting half outside the
+    // widget egui will accept a press on.
     let (row, resp) = ui.allocate_exact_size(
-        egui::vec2(plot.width() + 2.0, LEVELS_STRIP_H),
+        egui::vec2(HIST_ROW_W, LEVELS_STRIP_H),
         egui::Sense::click_and_drag(),
     );
     let strip = egui::Rect::from_min_size(
@@ -2296,39 +2274,31 @@ fn levels_handles(
     let pointer = ctx.pointer_interact_pos();
     let pointer_t = pointer.map(|p| t_of(p.x));
 
-    // Which element the pointer is over, hit-tested by hand rather than by
-    // allocating three overlapping widgets, so the priority is explicit: the
-    // handles win over the bar they sit on the ends of. Only ever `Some` when the
-    // pointer is actually within the strip, so the hover highlight can't light up
-    // from somewhere else in the box.
-    let hot = pointer
-        .filter(|p| strip.expand(2.0).contains(*p))
-        .and_then(|p| {
-            let (bx, wx) = (x_of(black), x_of(white));
-            let (db, dw) = ((p.x - bx).abs(), (p.x - wx).abs());
-            if db.min(dw) <= LEVELS_GRAB {
-                Some(if dw < db {
-                    LevelsGrip::White
-                } else {
-                    LevelsGrip::Black
-                })
-            } else if p.x > bx && p.x < wx {
-                Some(LevelsGrip::Both)
-            } else {
-                // Outside the range entirely: nothing to grab, so nothing
-                // highlights and a drag started here does nothing.
-                None
-            }
-        });
+    // Which element a given x belongs to. Hit-tested by hand rather than with
+    // three overlapping widgets, so the priority is explicit — and deliberately
+    // *exhaustive*: every point on the strip belongs to something. Earlier this
+    // left dead zones past each handle, where a press did nothing at all.
+    let grip_at = |x: f32| LevelsGrip::at(x, x_of(black), x_of(white), LEVELS_GRAB);
+    let hot = resp
+        .contains_pointer()
+        .then(|| pointer.map(|p| grip_at(p.x)))
+        .flatten();
 
-    // The grip is decided once, at drag-start, and held for the rest of the
-    // gesture — otherwise dragging one handle past the other would silently hand
-    // the gesture to its neighbour halfway through.
+    // The grip is decided once, from where the pointer went *down*, and held for
+    // the rest of the gesture.
+    //
+    // `interact_pointer_pos` and not the live pointer: `drag_started` doesn't
+    // fire on the press, it fires once the pointer has passed egui's drag
+    // threshold — several points later. Reading the current position there meant
+    // grabbing whatever the pointer had already moved *onto*, so pressing a
+    // triangle and moving inward silently grabbed the bar instead, and moving
+    // outward grabbed nothing. The highlight said one thing and the drag did
+    // another.
     if resp.drag_started() {
-        if let (Some(grip), Some(grab_t)) = (hot, pointer_t) {
+        if let Some(press) = resp.interact_pointer_pos() {
             state.levels_drag = Some(LevelsDrag {
-                grip,
-                grab_t,
+                grip: grip_at(press.x),
+                grab_t: t_of(press.x),
                 start: (black, white),
             });
         }
@@ -2353,12 +2323,17 @@ fn levels_handles(
     if !resp.dragged() && !resp.is_pointer_button_down_on() {
         state.levels_drag = None;
     }
-    // Double-click anywhere on the strip clears the adjustment.
+    // Double-click resets whatever was under the pointer: a handle goes back to
+    // its own end of the range, the bar between them clears both.
     if resp.double_clicked() {
-        actions.push(UiAction::SetLevels {
-            black: 0.0,
-            white: 1.0,
-        });
+        if let Some(press) = resp.interact_pointer_pos() {
+            let (black, white) = match grip_at(press.x) {
+                LevelsGrip::Black => (0.0, white),
+                LevelsGrip::White => (black, 1.0),
+                LevelsGrip::Both => (0.0, 1.0),
+            };
+            actions.push(UiAction::SetLevels { black, white });
+        }
     }
 
     // Highlight only the element the gesture is on (or, when idle, the one the
@@ -2398,9 +2373,9 @@ fn levels_handles(
     }
     if let Some(grip) = live {
         resp.on_hover_text(match grip {
-            LevelsGrip::Black => "Display black point — drag (double-click resets)",
-            LevelsGrip::White => "Display white point — drag (double-click resets)",
-            LevelsGrip::Both => "Drag to slide both levels together",
+            LevelsGrip::Black => "Display black point — drag; double-click to reset it",
+            LevelsGrip::White => "Display white point — drag; double-click to reset it",
+            LevelsGrip::Both => "Drag to slide both levels; double-click to reset both",
         });
     }
 }

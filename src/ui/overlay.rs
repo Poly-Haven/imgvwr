@@ -2311,13 +2311,26 @@ fn levels_handles(
             let (black, white) = drag.resolve(t, crate::app::LEVELS_MIN_GAP);
             actions.push(UiAction::SetLevels { black, white });
         }
-        ctx.set_cursor_icon(match drag.grip {
-            LevelsGrip::Both => egui::CursorIcon::Grabbing,
-            _ => egui::CursorIcon::ResizeHorizontal,
-        });
-    } else if let Some(grip) = hot {
-        ctx.set_cursor_icon(match grip {
-            LevelsGrip::Both => egui::CursorIcon::Grab,
+    }
+
+    // What the indicators should describe. Once the button is down the answer is
+    // fixed by where it went down — including through the window *before* egui
+    // calls it a drag, which is a real gap: the click threshold is 6pt and the
+    // grab radius is 7, so pulling a handle inward leaves its zone before the
+    // drag starts. Following the live pointer there made the bar light up and the
+    // cursor change for a frame or two, advertising a grab that was never going
+    // to happen.
+    let pressed_grip = resp
+        .is_pointer_button_down_on()
+        .then(|| ctx.input(|i| i.pointer.press_origin()))
+        .flatten()
+        .map(|p| grip_at(p.x));
+    let live = state.levels_drag.map(|d| d.grip).or(pressed_grip).or(hot);
+    if let Some(grip) = live {
+        let dragging = state.levels_drag.is_some();
+        ctx.set_cursor_icon(match (grip, dragging) {
+            (LevelsGrip::Both, true) => egui::CursorIcon::Grabbing,
+            (LevelsGrip::Both, false) => egui::CursorIcon::Grab,
             _ => egui::CursorIcon::ResizeHorizontal,
         });
     }
@@ -2337,10 +2350,9 @@ fn levels_handles(
         }
     }
 
-    // Highlight only the element the gesture is on (or, when idle, the one the
-    // pointer is over) — lighting all of them says nothing about what a drag
-    // would actually move.
-    let live = state.levels_drag.map(|d| d.grip).or(hot);
+    // `live` (above) is what highlights: only the element the gesture is on, or
+    // when idle the one the pointer is over. Lighting all of them says nothing
+    // about what a drag would actually move.
     let painter = ui.painter();
     let bar_y = strip.top() + 1.0;
     painter.line_segment(
@@ -3130,6 +3142,92 @@ mod tests {
         frame(0.4, vec![egui::Event::PointerMoved(release)], &mut actions);
         frame(0.5, vec![button(release, false)], &mut actions);
         actions
+    }
+
+    /// Press on a handle and creep the pointer inward by less than egui's click
+    /// threshold, returning the cursor egui asked for on each of those frames.
+    ///
+    /// This window is real and awkward: the click threshold is 6pt but the grab
+    /// radius is 7, so pulling a handle inward leaves its zone *before* the drag
+    /// officially starts. Following the live pointer there made the bar highlight
+    /// and the cursor flick to Grab for a frame or two, advertising a grab that
+    /// was never going to happen.
+    fn cursors_during_pre_drag_creep(levels: (f32, f32), press_x: f32) -> Vec<egui::CursorIcon> {
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        let inputs = UiInputs {
+            levels,
+            ..Default::default()
+        };
+        let plot = egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_PLOT_W, 68.0));
+        let y = ORIGIN.y + 4.0;
+        let mut actions = Vec::new();
+        let mut cursors = Vec::new();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let press = egui::pos2(press_x, y);
+        let mut seq = vec![
+            vec![egui::Event::PointerMoved(press)],
+            vec![egui::Event::PointerMoved(press)],
+            vec![egui::Event::PointerMoved(press), button(press, true)],
+        ];
+        // 1.5pt a frame, three frames: 4.5pt total, comfortably under the 6pt
+        // click threshold, but past the 7pt grab radius when pressed near a
+        // handle's inner edge.
+        for i in 1..=3 {
+            seq.push(vec![egui::Event::PointerMoved(egui::pos2(
+                press_x + 1.5 * i as f32,
+                y,
+            ))]);
+        }
+        for (f, events) in seq.into_iter().enumerate() {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                time: Some(f as f64 * 0.02),
+                events,
+                ..Default::default()
+            };
+            let out = ctx.run(raw, |ctx| {
+                egui::Area::new(egui::Id::new("levels_creep"))
+                    .fixed_pos(ORIGIN)
+                    .show(ctx, |ui| {
+                        levels_handles(ui, &inputs, &mut state, &mut actions, plot);
+                    });
+            });
+            // Only the frames from the press onward matter.
+            if f >= 2 {
+                cursors.push(out.platform_output.cursor_icon);
+            }
+        }
+        cursors
+    }
+
+    /// Once the button is down, the indicators must describe what the press
+    /// grabbed and stop following the pointer.
+    #[test]
+    fn pre_drag_creep_does_not_flicker_to_the_bar() {
+        let (black, white) = (0.25f32, 0.75f32);
+        let bx = ORIGIN.x + black * HIST_PLOT_W;
+        // Pressed on the handle's inner edge, which is the worst case: only 4pt
+        // of travel leaves the grab radius, well under the click threshold.
+        let cursors = cursors_during_pre_drag_creep((black, white), bx + 3.0);
+        assert!(
+            !cursors.is_empty(),
+            "the harness produced no frames to check"
+        );
+        assert!(
+            cursors
+                .iter()
+                .all(|c| *c == egui::CursorIcon::ResizeHorizontal),
+            "cursor flickered off the handle during the pre-drag window: {cursors:?}"
+        );
     }
 
     /// Drive two quick clicks at the same spot — a real double-click, including

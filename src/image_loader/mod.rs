@@ -197,6 +197,37 @@ impl ImageData {
     }
 }
 
+/// What a decode is optimising for.
+///
+/// The two are genuinely opposed. A single image wants every core inside the
+/// decoder so *that* image appears as soon as possible. A sequence player wants
+/// the opposite: many frames decoding at once, each serially. Measured on the
+/// development machine, one 32-thread EXR decode manages ~10 fps of frames while
+/// 32 concurrent single-threaded decodes manage ~80 fps of aggregate throughput —
+/// the parallelism is far better spent across frames than within one.
+///
+/// Only the EXR paths actually branch on this: PNG / JPEG / TIFF / WebP go
+/// through `image`, which pulls no rayon and is single-threaded either way (and
+/// JPEG's entropy stage is inherently sequential, so thread-per-image is the
+/// wrong axis for it regardless).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DecodeIntent {
+    /// Lowest latency for this one image — the interactive path (open, folder
+    /// navigation, drag-drop, slot recall). Uses every core inside the decoder.
+    #[default]
+    Latency,
+    /// One of many frames being decoded concurrently. Decodes serially so the
+    /// parallelism comes from frames in flight rather than from within a decode.
+    Throughput,
+}
+
+impl DecodeIntent {
+    /// True when this decode should keep to a single thread.
+    pub fn is_serial(self) -> bool {
+        matches!(self, Self::Throughput)
+    }
+}
+
 /// Interleaved HxWx4 RGBA pixel data, either 8-bit or 32-bit float.
 pub enum PixelBuffer {
     /// HxWx4 interleaved uint8 (JPEG / LDR PNG).
@@ -433,7 +464,14 @@ pub fn probe_dimensions(path: &Path) -> Option<(u32, u32)> {
 
 /// Decode an image file into RGBA `ImageData`, dispatching on the (lower-cased)
 /// file extension. See plans/rewrite.md §8.2.
-pub fn load_image(path: &Path, progress: &std::sync::Arc<ReadProgress>) -> Result<ImageData> {
+///
+/// `intent` picks between decoding this image as fast as possible and decoding it
+/// as one of many at once — see [`DecodeIntent`].
+pub fn load_image(
+    path: &Path,
+    progress: &std::sync::Arc<ReadProgress>,
+    intent: DecodeIntent,
+) -> Result<ImageData> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -455,7 +493,7 @@ pub fn load_image(path: &Path, progress: &std::sync::Arc<ReadProgress>) -> Resul
     }
 
     if ext == "exr" {
-        formats::load_exr(path, progress)
+        formats::load_exr(path, progress, intent)
     } else if ext == "gif" {
         // Decode every frame so animated GIFs can play; a single-frame GIF comes
         // back as a plain static image.

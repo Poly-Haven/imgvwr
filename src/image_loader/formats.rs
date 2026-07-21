@@ -4,6 +4,7 @@
 //! sRGB-encoded (`is_encoded_srgb = true`); float formats (EXR / HDR / float
 //! TIFF / developed RAW float) are treated as scene-linear.
 
+use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -13,7 +14,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use image::{DynamicImage, ImageDecoder};
 
-use super::{AnimFrame, Animation, ImageData, PixelBuffer, ReadProgress};
+use super::{AnimFrame, Animation, DecodeIntent, ImageData, PixelBuffer, ReadProgress};
 
 /// Animation frame delays are clamped to this minimum (≈ 50 fps). Many GIFs (and
 /// some WebP/APNG) encode a 0 or 10 ms delay meaning "as fast as possible";
@@ -546,8 +547,12 @@ fn apply_orientation_f32(
 // Without the `ocio` feature the Err arm is a plain `Err(e)`, which clippy
 // flags as a needless match; the OpenEXR fallback (with the feature) is not.
 #[cfg_attr(not(feature = "ocio"), allow(clippy::needless_match))]
-pub fn load_exr(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> {
-    match load_exr_rust(path, progress) {
+pub fn load_exr(
+    path: &Path,
+    progress: &Arc<ReadProgress>,
+    intent: DecodeIntent,
+) -> Result<ImageData> {
+    match load_exr_rust(path, progress, intent) {
         Ok(data) => Ok(data),
         Err(e) => {
             // The pure-Rust exr crate cannot decode DWAA/DWAB (and a few other)
@@ -558,7 +563,7 @@ pub fn load_exr(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> 
                     "exr crate could not decode {} ({e}); trying OpenEXR fallback",
                     path.display()
                 );
-                crate::exr_native::load_exr_native(path)
+                crate::exr_native::load_exr_native(path, intent)
             }
             #[cfg(not(feature = "ocio"))]
             {
@@ -568,16 +573,29 @@ pub fn load_exr(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> 
     }
 }
 
-fn load_exr_rust(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData> {
+fn load_exr_rust(
+    path: &Path,
+    progress: &Arc<ReadProgress>,
+    intent: DecodeIntent,
+) -> Result<ImageData> {
     use exr::prelude::*;
 
     // Read through a counting reader so the loading bar tracks the file read.
-    let image = read()
+    let reader = read()
         .no_deep_data()
         .largest_resolution_level()
         .all_channels()
         .first_valid_layer()
-        .all_attributes()
+        .all_attributes();
+    // The exr crate builds a *fresh rayon thread pool per decode*, which at
+    // sequence rates would be hundreds of pool constructions a second. In
+    // throughput mode the parallelism belongs across frames, so decode serially.
+    let reader = if intent.is_serial() {
+        reader.non_parallel()
+    } else {
+        reader
+    };
+    let image = reader
         .from_unbuffered(counting_open(path, progress)?)
         .map_err(|e| anyhow!("EXR decode failed: {e}"))?;
 
@@ -608,13 +626,6 @@ fn load_exr_rust(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData>
     };
     let compression = format!("{:?}", layer.encoding.compression);
 
-    let to_f32 = |samples: &FlatSamples| -> Vec<f32> {
-        match samples {
-            FlatSamples::F16(v) => v.iter().map(|x| x.to_f32()).collect(),
-            FlatSamples::F32(v) => v.clone(),
-            FlatSamples::U32(v) => v.iter().map(|x| *x as f32).collect(),
-        }
-    };
     // Channel key = the part after the last '.', upper-cased ("diffuse.R" -> "R").
     let key =
         |name: &str| -> String { name.rsplit('.').next().unwrap_or(name).to_ascii_uppercase() };
@@ -624,38 +635,70 @@ fn load_exr_rust(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData>
     let original_channels: u8;
 
     if let (Some(ri), Some(gi), Some(bi)) = (find("R"), find("G"), find("B")) {
-        let r = to_f32(&list[ri].sample_data);
-        let g = to_f32(&list[gi].sample_data);
-        let b = to_f32(&list[bi].sample_data);
-        let a = find("A").map(|ai| to_f32(&list[ai].sample_data));
+        let r = exr_channel_f32(&list[ri].sample_data);
+        let g = exr_channel_f32(&list[gi].sample_data);
+        let b = exr_channel_f32(&list[bi].sample_data);
+        let a = find("A").map(|ai| exr_channel_f32(&list[ai].sample_data));
         ensure_len(&[&r, &g, &b], pixel_count)?;
-        for i in 0..pixel_count {
-            rgba[i * 4] = r[i];
-            rgba[i * 4 + 1] = g[i];
-            rgba[i * 4 + 2] = b[i];
-            rgba[i * 4 + 3] = a.as_ref().map(|a| a[i]).unwrap_or(1.0);
+        if let Some(a) = &a {
+            ensure_len(&[a], pixel_count)?;
+        }
+        // Planar -> interleaved. Iterating in lock-step over exact-size chunks
+        // lets the bounds checks fall out; the previous indexed form re-checked
+        // five slices per pixel (300 M times on a 24k panorama).
+        match &a {
+            Some(a) => {
+                for (px, (((r, g), b), a)) in rgba.chunks_exact_mut(4).zip(
+                    r[..pixel_count]
+                        .iter()
+                        .zip(&g[..pixel_count])
+                        .zip(&b[..pixel_count])
+                        .zip(&a[..pixel_count]),
+                ) {
+                    px[0] = *r;
+                    px[1] = *g;
+                    px[2] = *b;
+                    px[3] = *a;
+                }
+            }
+            None => {
+                for (px, ((r, g), b)) in rgba.chunks_exact_mut(4).zip(
+                    r[..pixel_count]
+                        .iter()
+                        .zip(&g[..pixel_count])
+                        .zip(&b[..pixel_count]),
+                ) {
+                    px[0] = *r;
+                    px[1] = *g;
+                    px[2] = *b;
+                    px[3] = 1.0;
+                }
+            }
         }
         original_channels = 3 + a.is_some() as u8;
     } else {
         // Arbitrary / single / dual channels: take the first up to three in
         // file order; replicate a lone channel to RGB.
         let take = list.len().min(3);
-        let cols: Vec<Vec<f32>> = (0..take).map(|i| to_f32(&list[i].sample_data)).collect();
-        ensure_len(&cols.iter().collect::<Vec<_>>(), pixel_count)?;
-        for i in 0..pixel_count {
-            let r = cols[0][i];
-            let g = if take > 1 { cols[1][i] } else { r };
+        let cols: Vec<Cow<'_, [f32]>> = (0..take)
+            .map(|i| exr_channel_f32(&list[i].sample_data))
+            .collect();
+        let refs: Vec<&[f32]> = cols.iter().map(|c| c.as_ref()).collect();
+        ensure_len(&refs, pixel_count)?;
+        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+            let r = refs[0][i];
+            let g = if take > 1 { refs[1][i] } else { r };
             let b = if take > 2 {
-                cols[2][i]
+                refs[2][i]
             } else if take == 1 {
                 r
             } else {
                 0.0
             };
-            rgba[i * 4] = r;
-            rgba[i * 4 + 1] = g;
-            rgba[i * 4 + 2] = b;
-            rgba[i * 4 + 3] = 1.0;
+            px[0] = r;
+            px[1] = g;
+            px[2] = b;
+            px[3] = 1.0;
         }
         original_channels = list.len() as u8;
     }
@@ -675,7 +718,20 @@ fn load_exr_rust(path: &Path, progress: &Arc<ReadProgress>) -> Result<ImageData>
     })
 }
 
-fn ensure_len(channels: &[&Vec<f32>], expected: usize) -> Result<()> {
+/// One EXR channel's samples as f32. Already-f32 data is *borrowed*: a 4K RGB
+/// float EXR carries 100 MB of samples and cloning them only to read them once
+/// was pure waste. (A free fn rather than a closure — a closure cannot name the
+/// lifetime relationship between its argument and its return value.)
+fn exr_channel_f32(samples: &exr::prelude::FlatSamples) -> Cow<'_, [f32]> {
+    use exr::prelude::FlatSamples;
+    match samples {
+        FlatSamples::F16(v) => Cow::Owned(v.iter().map(|x| x.to_f32()).collect()),
+        FlatSamples::F32(v) => Cow::Borrowed(v.as_slice()),
+        FlatSamples::U32(v) => Cow::Owned(v.iter().map(|x| *x as f32).collect()),
+    }
+}
+
+fn ensure_len(channels: &[&[f32]], expected: usize) -> Result<()> {
     for c in channels {
         if c.len() < expected {
             return Err(anyhow!(
@@ -709,16 +765,28 @@ pub fn dynamic_to_imagedata(
         D::ImageLuma16(_) | D::ImageLumaA16(_) | D::ImageRgb16(_) | D::ImageRgba16(_)
     );
 
+    // `into_*` (not `to_*`): when the source is already the target layout — which
+    // it is for every RGBA8 PNG, the common case — the owned buffer is moved
+    // rather than copied. `to_rgba8` on an already-Rgba8 image was a full-frame
+    // memcpy for nothing (14.75 MB per frame at 2560x1440).
     let (pixels, dtype, is_srgb) = if is_float {
-        let buf = img.to_rgba32f();
-        (PixelBuffer::F32(buf.into_raw()), "float32", false)
+        (
+            PixelBuffer::F32(img.into_rgba32f().into_raw()),
+            "float32",
+            false,
+        )
     } else if is_16 {
-        let buf = img.to_rgba16();
-        let floats = buf.into_raw().iter().map(|&v| v as f32 / 65535.0).collect();
+        // One pass, one allocation: `into_iter` consumes the u16 buffer as it
+        // goes, and `collect` sizes the f32 vector exactly from its size hint.
+        let floats: Vec<f32> = img
+            .into_rgba16()
+            .into_raw()
+            .into_iter()
+            .map(|v| v as f32 / 65535.0)
+            .collect();
         (PixelBuffer::F32(floats), "uint16", true)
     } else {
-        let buf = img.to_rgba8();
-        (PixelBuffer::U8(buf.into_raw()), "uint8", true)
+        (PixelBuffer::U8(img.into_rgba8().into_raw()), "uint8", true)
     };
 
     let dtype_name = match dtype_prefix {

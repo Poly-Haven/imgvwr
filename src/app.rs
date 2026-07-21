@@ -66,7 +66,7 @@ use winit::window::{CursorGrabMode, Fullscreen, ResizeDirection, Window, WindowI
 use crate::camera::{Camera, CameraController};
 use crate::image_loader::{
     can_be_panorama, equirect_content_scores, is_equirectangular, is_supported, load_image,
-    probe_dimensions, supported_extensions, ImageData,
+    probe_dimensions, supported_extensions, DecodeIntent, ImageData,
 };
 use crate::ocio::OcioManager;
 use crate::prefs::{AppPreferences, PreferredView};
@@ -1583,7 +1583,8 @@ impl App {
             .name(format!("image-load-{gen}"))
             .spawn(move || {
                 let result = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    load_image(&path, &progress)
+                    // One image, nothing else in flight: use every core.
+                    load_image(&path, &progress, DecodeIntent::Latency)
                 })) {
                     Ok(Ok(data)) => Ok(data),
                     Ok(Err(e)) => Err(format!("{e:#}")),
@@ -1954,7 +1955,9 @@ impl App {
             let target: Option<Arc<ImageData>> =
                 if let Some(p) = std::env::var_os("IMGVWR_DEBUG_DIFF_FILE") {
                     let prog = Arc::new(crate::image_loader::ReadProgress::default());
-                    load_image(Path::new(&p), &prog).ok().map(Arc::new)
+                    load_image(Path::new(&p), &prog, DecodeIntent::Latency)
+                        .ok()
+                        .map(Arc::new)
                 } else {
                     self.slots[0].clone().or_else(|| self.current_image.clone())
                 };
@@ -2164,7 +2167,9 @@ impl App {
                 // Preload is a silent look-ahead, so its read progress is unused.
                 let progress = Arc::new(crate::image_loader::ReadProgress::default());
                 let result = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    load_image(&path, &progress)
+                    // At most one look-ahead decode runs at a time, and the user
+                    // is waiting on it the moment they press the arrow again.
+                    load_image(&path, &progress, DecodeIntent::Latency)
                 })) {
                     Ok(Ok(data)) => Ok(data),
                     Ok(Err(e)) => Err(format!("{e:#}")),

@@ -10,46 +10,99 @@
 #include <OpenEXR/ImfChannelList.h>
 #include <OpenEXR/ImfFrameBuffer.h>
 #include <OpenEXR/ImfInputFile.h>
+#include <OpenEXR/ImfThreading.h>
 #include <Imath/ImathBox.h>
 
-#include <cstdlib>
+#include <mutex>
 #include <string>
 
 namespace IMF = OPENEXR_IMF_NAMESPACE;
 
-extern "C" float *exr_native_load_rgba(const char *path, int *out_width, int *out_height,
-                                       int *out_channels) {
+namespace {
+
+// Everything `begin` learned, carried to `finish` so the pixels can be decoded
+// straight into the caller's buffer.
+struct ExrJob {
+    IMF::InputFile file;
+    Imath::Box2i dw;
+    int width;
+    int height;
+    bool has_rgb;
+    bool has_alpha;
+    std::string lone_channel; // only set when has_rgb is false
+
+    ExrJob(const char *path, int threads) : file(path, threads) {}
+};
+
+std::once_flag g_pool_once;
+
+} // namespace
+
+extern "C" void exr_native_init_thread_pool(int count) {
+    std::call_once(g_pool_once, [count] {
+        try {
+            IMF::setGlobalThreadCount(count < 0 ? 0 : count);
+        } catch (...) {
+            // A pool that cannot be created just means single-threaded decodes.
+        }
+    });
+}
+
+extern "C" void *exr_native_begin(const char *path, int threads, int *out_width, int *out_height,
+                                  int *out_channels) {
     try {
-        IMF::InputFile file(path);
-        Imath::Box2i dw = file.header().dataWindow();
-        const int width = dw.max.x - dw.min.x + 1;
-        const int height = dw.max.y - dw.min.y + 1;
-        if (width <= 0 || height <= 0) {
+        ExrJob *job = new ExrJob(path, threads < 0 ? 0 : threads);
+        job->dw = job->file.header().dataWindow();
+        job->width = job->dw.max.x - job->dw.min.x + 1;
+        job->height = job->dw.max.y - job->dw.min.y + 1;
+        if (job->width <= 0 || job->height <= 0) {
+            delete job;
             return nullptr;
-        }
-        const size_t n = static_cast<size_t>(width) * height;
-        float *rgba = static_cast<float *>(std::malloc(n * 4 * sizeof(float)));
-        if (!rgba) {
-            return nullptr;
-        }
-        for (size_t i = 0; i < n; ++i) {
-            rgba[i * 4 + 0] = 0.0f;
-            rgba[i * 4 + 1] = 0.0f;
-            rgba[i * 4 + 2] = 0.0f;
-            rgba[i * 4 + 3] = 1.0f;
         }
 
-        const IMF::ChannelList &channels = file.header().channels();
+        const IMF::ChannelList &channels = job->file.header().channels();
         const bool hasR = channels.findChannel("R") != nullptr;
         const bool hasG = channels.findChannel("G") != nullptr;
         const bool hasB = channels.findChannel("B") != nullptr;
-        const bool hasA = channels.findChannel("A") != nullptr;
+        job->has_alpha = channels.findChannel("A") != nullptr;
+        job->has_rgb = hasR || hasG || hasB;
 
+        int orig_channels = (hasR ? 1 : 0) + (hasG ? 1 : 0) + (hasB ? 1 : 0) +
+                            (job->has_alpha ? 1 : 0);
+        if (!job->has_rgb) {
+            IMF::ChannelList::ConstIterator it = channels.begin();
+            if (it == channels.end()) {
+                delete job;
+                return nullptr;
+            }
+            job->lone_channel = it.name();
+            orig_channels = 1;
+        }
+
+        *out_width = job->width;
+        *out_height = job->height;
+        *out_channels = orig_channels > 0 ? orig_channels : 3;
+        return job;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+extern "C" int exr_native_finish(void *handle, float *dst) {
+    ExrJob *job = static_cast<ExrJob *>(handle);
+    if (!job || !dst) {
+        delete job;
+        return 1;
+    }
+    int rc = 1;
+    try {
+        const size_t n = static_cast<size_t>(job->width) * job->height;
         const size_t xs = 4 * sizeof(float);
-        const size_t ys = static_cast<size_t>(width) * 4 * sizeof(float);
+        const size_t ys = static_cast<size_t>(job->width) * 4 * sizeof(float);
         // Base accounts for the data-window origin (OpenEXR slice convention).
-        char *base = reinterpret_cast<char *>(rgba) -
-                     (static_cast<size_t>(dw.min.x) * xs + static_cast<size_t>(dw.min.y) * ys);
+        char *base = reinterpret_cast<char *>(dst) -
+                     (static_cast<size_t>(job->dw.min.x) * xs +
+                      static_cast<size_t>(job->dw.min.y) * ys);
 
         IMF::FrameBuffer fb;
         auto add = [&](const char *name, int offset, double dflt) {
@@ -58,43 +111,35 @@ extern "C" float *exr_native_load_rgba(const char *path, int *out_width, int *ou
                                        1, 1, dflt));
         };
 
-        int orig_channels = (hasR ? 1 : 0) + (hasG ? 1 : 0) + (hasB ? 1 : 0) + (hasA ? 1 : 0);
-
-        if (hasR || hasG || hasB) {
-            if (hasR) add("R", 0, 0.0);
-            if (hasG) add("G", 1, 0.0);
-            if (hasB) add("B", 2, 0.0);
-            if (hasA) add("A", 3, 1.0);
-            file.setFrameBuffer(fb);
-            file.readPixels(dw.min.y, dw.max.y);
+        if (job->has_rgb) {
+            // Slices are inserted for all four channels unconditionally: OpenEXR
+            // fills a slice whose channel is absent from the file with its
+            // `fillValue`, which is exactly the 0/0/0/1 default we want. That is
+            // what lets us skip pre-filling the destination — a full-buffer write
+            // that was redundant whenever RGBA were all present, i.e. always for
+            // the sequence frames this path now decodes.
+            add("R", 0, 0.0);
+            add("G", 1, 0.0);
+            add("B", 2, 0.0);
+            add("A", 3, 1.0);
+            job->file.setFrameBuffer(fb);
+            job->file.readPixels(job->dw.min.y, job->dw.max.y);
         } else {
-            std::string first;
-            for (IMF::ChannelList::ConstIterator it = channels.begin(); it != channels.end();
-                 ++it) {
-                first = it.name();
-                break;
-            }
-            if (first.empty()) {
-                std::free(rgba);
-                return nullptr;
-            }
-            add(first.c_str(), 0, 0.0);
-            file.setFrameBuffer(fb);
-            file.readPixels(dw.min.y, dw.max.y);
+            add(job->lone_channel.c_str(), 0, 0.0);
+            add("A", 3, 1.0); // absent -> filled with 1.0
+            job->file.setFrameBuffer(fb);
+            job->file.readPixels(job->dw.min.y, job->dw.max.y);
             for (size_t i = 0; i < n; ++i) {
-                rgba[i * 4 + 1] = rgba[i * 4 + 0];
-                rgba[i * 4 + 2] = rgba[i * 4 + 0];
+                dst[i * 4 + 1] = dst[i * 4 + 0];
+                dst[i * 4 + 2] = dst[i * 4 + 0];
             }
-            orig_channels = 1;
         }
-
-        *out_width = width;
-        *out_height = height;
-        *out_channels = orig_channels > 0 ? orig_channels : 3;
-        return rgba;
+        rc = 0;
     } catch (...) {
-        return nullptr;
+        rc = 1;
     }
+    delete job;
+    return rc;
 }
 
-extern "C" void exr_native_free(float *data) { std::free(data); }
+extern "C" void exr_native_abort(void *handle) { delete static_cast<ExrJob *>(handle); }

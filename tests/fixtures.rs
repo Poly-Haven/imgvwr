@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
 
-use imgvwr::image_loader::{load_image, probe_dimensions, ImageData, PixelBuffer, ReadProgress};
+use imgvwr::image_loader::{
+    load_image, probe_dimensions, DecodeIntent, ImageData, PixelBuffer, ReadProgress,
+};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -16,8 +18,63 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn load(name: &str) -> ImageData {
+    load_with(name, DecodeIntent::Latency)
+}
+
+fn load_with(name: &str, intent: DecodeIntent) -> ImageData {
     let progress = Arc::new(ReadProgress::default());
-    load_image(&fixture(name), &progress).unwrap_or_else(|e| panic!("failed to load {name}: {e:#}"))
+    load_image(&fixture(name), &progress, intent)
+        .unwrap_or_else(|e| panic!("failed to load {name}: {e:#}"))
+}
+
+/// The OpenEXR C++ fallback is normally reached only for compressions the
+/// pure-Rust decoder rejects (DWAA/DWAB), so it is easy for a change to it to go
+/// unexercised. Call it directly on an ordinary fixture — OpenEXR reads every
+/// compression — and require it to agree with the Rust decoder, at both thread
+/// counts (the fallback now opens files with an explicit worker count).
+#[cfg(feature = "ocio")]
+#[test]
+fn openexr_fallback_matches_the_rust_decoder() {
+    for name in ["tiny_rgba.exr", "tiny_gray.exr"] {
+        let reference = load(name);
+        for intent in [DecodeIntent::Latency, DecodeIntent::Throughput] {
+            let native = imgvwr::exr_native::load_exr_native(&fixture(name), intent)
+                .unwrap_or_else(|e| panic!("OpenEXR fallback failed on {name}: {e:#}"));
+            assert_eq!(
+                (native.width, native.height),
+                (reference.width, reference.height),
+                "{name} dimensions ({intent:?})"
+            );
+            match (&reference.pixels, &native.pixels) {
+                (PixelBuffer::F32(a), PixelBuffer::F32(b)) => {
+                    assert_eq!(
+                        a, b,
+                        "{name} pixels differ from the Rust decoder ({intent:?})"
+                    )
+                }
+                _ => panic!("expected F32 buffers for {name}"),
+            }
+        }
+    }
+}
+
+/// The latency/throughput split is a scheduling choice, not a quality one: a
+/// serial decode must produce byte-identical pixels to a parallel one. EXR is
+/// the only format that actually branches, so it is the one worth pinning.
+#[test]
+fn decode_intent_does_not_change_pixels() {
+    for name in ["tiny_rgba.exr", "tiny_gray.exr"] {
+        let fast = load_with(name, DecodeIntent::Latency);
+        let serial = load_with(name, DecodeIntent::Throughput);
+        assert_eq!((fast.width, fast.height), (serial.width, serial.height));
+        assert_eq!(fast.channels, serial.channels);
+        match (&fast.pixels, &serial.pixels) {
+            (PixelBuffer::F32(a), PixelBuffer::F32(b)) => {
+                assert_eq!(a, b, "{name} differs between decode intents")
+            }
+            _ => panic!("expected F32 buffers for {name}"),
+        }
+    }
 }
 
 #[test]

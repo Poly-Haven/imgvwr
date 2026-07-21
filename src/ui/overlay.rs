@@ -2287,15 +2287,16 @@ fn levels_handles(
     // The grip is decided once, from where the pointer went *down*, and held for
     // the rest of the gesture.
     //
-    // `interact_pointer_pos` and not the live pointer: `drag_started` doesn't
-    // fire on the press, it fires once the pointer has passed egui's drag
-    // threshold — several points later. Reading the current position there meant
-    // grabbing whatever the pointer had already moved *onto*, so pressing a
-    // triangle and moving inward silently grabbed the bar instead, and moving
-    // outward grabbed nothing. The highlight said one thing and the drag did
-    // another.
+    // It must be `press_origin`, and specifically not `interact_pointer_pos`:
+    // `drag_started` doesn't fire on the press, it fires once the pointer has
+    // passed egui's click threshold, several points later — and despite its
+    // name, `interact_pointer_pos` is `pointer.interact_pos()`, the pointer's
+    // position *now*, not where it went down. Deciding the grip from it grabbed
+    // whatever the pointer had already moved onto, so pressing a triangle and
+    // dragging inward silently took the bar instead. `press_origin` is the one
+    // that actually means "where did this drag start".
     if resp.drag_started() {
-        if let Some(press) = resp.interact_pointer_pos() {
+        if let Some(press) = ctx.input(|i| i.pointer.press_origin()) {
             state.levels_drag = Some(LevelsDrag {
                 grip: grip_at(press.x),
                 grab_t: t_of(press.x),
@@ -3052,7 +3053,237 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
 
 #[cfg(test)]
 mod tests {
-    use super::{titlebar_fit, TitlebarFit};
+    use super::{levels_handles, titlebar_fit, TitlebarFit, HIST_PLOT_W, LEVELS_GRAB};
+    use crate::ui::{UiAction, UiInputs, UiState};
+
+    /// Where the test places the strip. Any fixed position works; the assertions
+    /// derive the handle coordinates from it.
+    const ORIGIN: egui::Pos2 = egui::pos2(40.0, 60.0);
+
+    /// Drive a real pointer gesture through egui and return the actions it
+    /// produced.
+    ///
+    /// This exists because the levels handles kept misbehaving in ways that
+    /// couldn't be caught by testing the arithmetic: the bugs were all in *when*
+    /// egui reports an interaction and *where* it says the pointer was. imgvwr's
+    /// borderless window can't be driven by the computer-use tooling, so the only
+    /// way to actually exercise a drag is to feed egui synthetic input.
+    ///
+    /// The gesture is press → move → move → release across four frames, matching
+    /// how a real drag arrives; egui only decides a press is a drag once the
+    /// pointer has travelled past its click threshold, which is the exact
+    /// behaviour under test.
+    fn drag_levels(levels: (f32, f32), press_x: f32, release_x: f32) -> Vec<UiAction> {
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        let inputs = UiInputs {
+            levels,
+            ..Default::default()
+        };
+        let plot = egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_PLOT_W, 68.0));
+        let y = ORIGIN.y + 4.0; // inside the strip, whatever its exact height
+        let mut actions = Vec::new();
+
+        let mut frame = |time: f64, events: Vec<egui::Event>, actions: &mut Vec<UiAction>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                egui::Area::new(egui::Id::new("levels_test"))
+                    .fixed_pos(ORIGIN)
+                    .show(ctx, |ui| {
+                        levels_handles(ui, &inputs, &mut state, actions, plot);
+                    });
+            });
+        };
+
+        let press = egui::pos2(press_x, y);
+        let release = egui::pos2(release_x, y);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+
+        // Two frames of hover before the press: egui hit-tests a press against
+        // the *previous* frame's widget rects, so a widget pressed the instant it
+        // first appears is never credited with the press.
+        let half = egui::pos2((press_x + release_x) * 0.5, y);
+        frame(0.0, vec![egui::Event::PointerMoved(press)], &mut actions);
+        frame(0.1, vec![egui::Event::PointerMoved(press)], &mut actions);
+        frame(
+            0.2,
+            vec![egui::Event::PointerMoved(press), button(press, true)],
+            &mut actions,
+        );
+        // The first move is what crosses egui's click threshold and turns the
+        // press into a drag — and so the frame where the grip gets decided, by
+        // which point the pointer is already well away from where it went down.
+        frame(0.3, vec![egui::Event::PointerMoved(half)], &mut actions);
+        frame(0.4, vec![egui::Event::PointerMoved(release)], &mut actions);
+        frame(0.5, vec![button(release, false)], &mut actions);
+        actions
+    }
+
+    /// Drive two quick clicks at the same spot — a real double-click, including
+    /// egui's timing requirement — and return the actions.
+    fn double_click_levels(levels: (f32, f32), x: f32) -> Vec<UiAction> {
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        let inputs = UiInputs {
+            levels,
+            ..Default::default()
+        };
+        let plot = egui::Rect::from_min_size(ORIGIN, egui::vec2(HIST_PLOT_W, 68.0));
+        let at = egui::pos2(x, ORIGIN.y + 4.0);
+        let mut actions = Vec::new();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let seq = [
+            vec![egui::Event::PointerMoved(at)],
+            vec![egui::Event::PointerMoved(at)],
+            vec![button(true)],
+            vec![button(false)],
+            vec![button(true)],
+            vec![button(false)],
+        ];
+        for (f, events) in seq.into_iter().enumerate() {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                // Well inside egui's double-click window.
+                time: Some(f as f64 * 0.03),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                egui::Area::new(egui::Id::new("levels_dbl"))
+                    .fixed_pos(ORIGIN)
+                    .show(ctx, |ui| {
+                        levels_handles(ui, &inputs, &mut state, &mut actions, plot);
+                    });
+            });
+        }
+        actions
+    }
+
+    /// Double-clicking a handle returns that handle to its own end of the range
+    /// and leaves the other alone; double-clicking the bar clears both.
+    #[test]
+    fn double_click_resets_what_is_under_the_pointer() {
+        let (black, white) = (0.25f32, 0.75f32);
+        let bx = ORIGIN.x + black * HIST_PLOT_W;
+        let wx = ORIGIN.x + white * HIST_PLOT_W;
+        let mid = ORIGIN.x + 0.5 * HIST_PLOT_W;
+
+        let acts = double_click_levels((black, white), bx);
+        assert_eq!(final_levels(&acts), Some((0.0, white)), "black handle");
+
+        let acts = double_click_levels((black, white), wx);
+        assert_eq!(final_levels(&acts), Some((black, 1.0)), "white handle");
+
+        let acts = double_click_levels((black, white), mid);
+        assert_eq!(final_levels(&acts), Some((0.0, 1.0)), "the bar");
+    }
+
+    /// The last levels the gesture asked for, as `(black, white)`.
+    fn final_levels(actions: &[UiAction]) -> Option<(f32, f32)> {
+        actions.iter().rev().find_map(|a| match a {
+            UiAction::SetLevels { black, white } => Some((*black, *white)),
+            _ => None,
+        })
+    }
+
+    /// Pressing just *inside* a handle — between it and the bar — must drag that
+    /// handle, not the bar.
+    ///
+    /// This is the regression that survived two attempted fixes. egui's
+    /// `drag_started` doesn't fire on the press but once the pointer has passed
+    /// its click threshold, and `Response::interact_pointer_pos` returns the
+    /// pointer's position *at that moment*, not where it went down — so deciding
+    /// the grip from it grabbed whatever the pointer had already moved onto.
+    /// Dragging inward off a handle therefore grabbed the bar.
+    #[test]
+    fn press_inside_a_handle_drags_that_handle() {
+        let (black, white) = (0.25f32, 0.75f32);
+        let bx = ORIGIN.x + black * HIST_PLOT_W;
+        let wx = ORIGIN.x + white * HIST_PLOT_W;
+
+        // Black handle, pressed on its inner edge, dragged inward (toward the bar).
+        let acts = drag_levels((black, white), bx + 3.0, bx + 60.0);
+        let (nb, nw) = final_levels(&acts).expect("the drag must emit a levels change");
+        assert!(nb > black + 0.1, "black should have moved, got {nb}");
+        assert!(
+            (nw - white).abs() < 1e-4,
+            "white must not move when dragging the black handle, got {nw}"
+        );
+
+        // White handle, pressed on its inner edge, dragged inward.
+        let acts = drag_levels((black, white), wx - 3.0, wx - 60.0);
+        let (nb, nw) = final_levels(&acts).expect("the drag must emit a levels change");
+        assert!(nw < white - 0.1, "white should have moved, got {nw}");
+        assert!(
+            (nb - black).abs() < 1e-4,
+            "black must not move when dragging the white handle, got {nb}"
+        );
+    }
+
+    /// The outward direction, which happened to work already — kept so a fix for
+    /// the inward case can't regress it.
+    #[test]
+    fn press_outside_a_handle_drags_that_handle() {
+        let (black, white) = (0.25f32, 0.75f32);
+        let bx = ORIGIN.x + black * HIST_PLOT_W;
+        let acts = drag_levels((black, white), bx - 3.0, bx - 40.0);
+        let (nb, nw) = final_levels(&acts).expect("the drag must emit a levels change");
+        assert!(nb < black - 0.1, "black should have moved down, got {nb}");
+        assert!((nw - white).abs() < 1e-4, "white must not move, got {nw}");
+    }
+
+    /// Pressing the bar between the handles slides both, keeping their distance.
+    #[test]
+    fn press_the_bar_slides_both() {
+        let (black, white) = (0.25f32, 0.75f32);
+        let mid = ORIGIN.x + 0.5 * HIST_PLOT_W;
+        let acts = drag_levels((black, white), mid, mid + 30.0);
+        let (nb, nw) = final_levels(&acts).expect("the drag must emit a levels change");
+        assert!(nb > black + 0.05, "black should have slid up, got {nb}");
+        assert!(
+            ((nw - nb) - (white - black)).abs() < 1e-4,
+            "the range width must be preserved, got {}",
+            nw - nb
+        );
+    }
+
+    /// A press anywhere within the grab radius belongs to the handle, in either
+    /// direction — the whole width of the target, not just the half that worked.
+    #[test]
+    fn the_whole_grab_radius_drags_the_handle() {
+        let (black, white) = (0.25f32, 0.75f32);
+        let bx = ORIGIN.x + black * HIST_PLOT_W;
+        for offset in [-LEVELS_GRAB + 1.0, -2.0, 0.0, 2.0, LEVELS_GRAB - 1.0] {
+            let acts = drag_levels((black, white), bx + offset, bx + offset + 40.0);
+            let (_, nw) = final_levels(&acts)
+                .unwrap_or_else(|| panic!("no levels change for offset {offset}"));
+            assert!(
+                (nw - white).abs() < 1e-4,
+                "offset {offset} grabbed something other than the black handle (white -> {nw})"
+            );
+        }
+    }
 
     impl TitlebarFit {
         /// Count of optional elements shown (0..=5), for monotonicity checks.

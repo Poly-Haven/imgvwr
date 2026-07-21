@@ -28,6 +28,11 @@ pub fn build(
 
 /// Immutable per-frame inputs handed to the UI (gathered from `App` before the
 /// mutable egui borrow, to avoid borrow conflicts).
+///
+/// `Default` exists only under `cfg(test)`, so widget tests can build one
+/// without spelling out forty irrelevant fields — and so nothing in the app can
+/// quietly `..Default::default()` its way past a field it forgot to populate.
+#[cfg_attr(test, derive(Default))]
 pub struct UiInputs {
     /// Bottom panel slide-in progress, 0 (hidden below the edge) … 1 (fully in).
     pub bottom_slide: f32,

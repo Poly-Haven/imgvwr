@@ -101,6 +101,18 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   vanishes (a flat-colour test image lost exactly one of its three channel spikes). Draw one column
   per device pixel taking the **max** of the bins that map to it, and snap any lone 1px bar (the
   over-range spike) to a whole pixel.
+- **egui widgets CAN be tested — drive synthetic input through a headless `Context`.** The
+  borderless window is invisible to computer-use, so pointer gestures used to be untestable and got
+  "fixed" twice by reasoning alone. `ui::overlay::tests::drag_levels` is the pattern: build an
+  `egui::Context::default()`, call `ctx.run` once per frame with `RawInput { screen_rect, time,
+  events }`, and assert on the `UiAction`s that come out. Two gotchas the harness encodes: a press
+  is hit-tested against the **previous** frame's widget rects, so the widget needs ~2 hover frames
+  before a press is credited to it; and a drag only starts on the frame the pointer passes egui's
+  click threshold, which is exactly the lag that broke the levels handles.
+- **`Response::interact_pointer_pos()` is the pointer's position NOW, not where it was pressed.**
+  Despite the name and doc wording it's `pointer.interact_pos()`. Because `drag_started()` fires
+  several points into the movement, using it to decide *what* a drag grabbed picks whatever the
+  pointer already moved onto. Use `ctx.input(|i| i.pointer.press_origin())` for that.
 - **Don't use `ui.available_width()` inside the metadata box.** It's an auto-sizing `egui::Area`,
   so available width reflects how wide the box already is; padding it out feeds straight back into
   the box's width and balloons it every frame (the histogram header did this — a 208pt graph in a

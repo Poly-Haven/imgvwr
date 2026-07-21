@@ -386,7 +386,7 @@ mod tests {
                 cache.mark_resident_for_test(1 + i as i64);
             }
         }
-        Playback::new(seq, FrameSource::Files(cache), 1, 10.0)
+        Playback::new(seq, FrameSource::Files(Box::new(cache)), 1, 10.0)
     }
 
     /// Make only these frames resident, replacing whatever the player had.
@@ -395,7 +395,7 @@ mod tests {
         for &f in frames {
             cache.mark_resident_for_test(f);
         }
-        pb.frames = FrameSource::Files(cache);
+        pb.frames = FrameSource::Files(Box::new(cache));
     }
 
     /// Holes consume no time: the playhead moves straight past a gap in one

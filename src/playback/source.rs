@@ -27,7 +27,9 @@ pub enum FramePixels<'a> {
 
 pub enum FrameSource {
     /// Files on disk, decoded on the worker pool into a byte-budgeted cache.
-    Files(FrameCache),
+    /// Boxed because the cache is far larger than an `Arc`, and the in-memory
+    /// case is the common small one.
+    Files(Box<FrameCache>),
     /// The frames of the animated image itself. They are already resident, so
     /// there is no cache, no pool and no budget — pressing `Space` on a GIF
     /// costs nothing but the transport.

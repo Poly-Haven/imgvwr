@@ -207,6 +207,12 @@ pub struct FrameCache {
     /// are dropped rather than landing in the wrong cache. Same discipline as
     /// `App::load_gen`.
     gen: u64,
+    /// Frames whose slot state we last set to something other than the default
+    /// (`Cached`/`Pending`/`Corrupt`). Kept so a reschedule can revert exactly
+    /// those that dropped out — an evicted frame back to `Unknown` — without
+    /// scanning the whole timeline, which at the 1M-slot cap would be millions
+    /// of `set_state` calls per rendered frame.
+    marked: HashSet<i64>,
     /// Set on shutdown so a worker finishing after the event loop has gone does
     /// not try to wake it.
     cancelled: Arc<AtomicBool>,
@@ -234,6 +240,7 @@ impl FrameCache {
             gen: 0,
             cancelled,
             failed: HashSet::new(),
+            marked: HashSet::new(),
         }
     }
 
@@ -243,6 +250,7 @@ impl FrameCache {
         self.gen += 1;
         self.frames.clear();
         self.failed.clear();
+        self.marked.clear();
         self.frame_bytes = 0;
         self.pool.publish(self.gen, VecDeque::new());
     }
@@ -349,21 +357,34 @@ impl FrameCache {
         let inflight = self.pool.inflight();
         // Reflect reality in the slot states, so the cache bar and the transport
         // describe what is actually resident rather than what was wished for.
-        for frame in seq.first()..=seq.last() {
-            if !seq.has_file(frame) {
-                continue;
-            }
-            let state = if self.frames.contains_key(&frame) {
-                SlotState::Cached
-            } else if inflight.contains(&frame) {
-                SlotState::Pending
-            } else if self.failed.contains(&frame) {
-                SlotState::Corrupt
-            } else {
-                SlotState::Unknown
-            };
-            seq.set_state(frame, state);
+        // Only the working set can be non-default, so touch exactly those frames
+        // rather than the whole timeline: mark the resident / in-flight / failed
+        // frames, then revert anything previously marked that has since dropped
+        // out (an evicted frame back to `Unknown`). `set_state` is a no-op on a
+        // hole and only bumps the epoch on a real change.
+        let mut now_marked = HashSet::with_capacity(self.frames.len() + inflight.len());
+        for &frame in self.frames.keys() {
+            seq.set_state(frame, SlotState::Cached);
+            now_marked.insert(frame);
         }
+        for &frame in &inflight {
+            if !self.frames.contains_key(&frame) {
+                seq.set_state(frame, SlotState::Pending);
+                now_marked.insert(frame);
+            }
+        }
+        for &frame in &self.failed {
+            if !self.frames.contains_key(&frame) && !inflight.contains(&frame) {
+                seq.set_state(frame, SlotState::Corrupt);
+                now_marked.insert(frame);
+            }
+        }
+        for &frame in &self.marked {
+            if !now_marked.contains(&frame) {
+                seq.set_state(frame, SlotState::Unknown);
+            }
+        }
+        self.marked = now_marked;
 
         // Room for new work, so `resident + in flight + wanted <= capacity`.
         let taken = self.frames.len() + inflight.len();

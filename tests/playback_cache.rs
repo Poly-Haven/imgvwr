@@ -164,6 +164,38 @@ fn scrubbing_retargets_the_window() {
     );
 }
 
+/// The cache bar must show RAM residency, so a frame evicted when the playhead
+/// moves on has to revert from cached to not-cached — even though the
+/// reschedule only touches the working set rather than the whole timeline.
+#[test]
+fn an_evicted_frame_reverts_to_uncached_on_the_bar() {
+    let (_dir, mut seq) = scratch_sequence("evict_state", 60);
+    let mut cache = new_cache(8 * 64, 4); // room for ~8 frames
+
+    assert!(
+        pump(&mut cache, &mut seq, 1, false, |c| c.contains(1)),
+        "the first window should fill"
+    );
+    assert_eq!(
+        seq.state(1),
+        SlotState::Cached,
+        "frame 1 is cached at the start"
+    );
+
+    // Scrub far away; frame 1 leaves the window and is evicted.
+    assert!(
+        pump(&mut cache, &mut seq, 50, false, |c| c.contains(50)),
+        "the new window should fill"
+    );
+    assert!(!cache.contains(1), "frame 1 was evicted");
+    assert_ne!(
+        seq.state(1),
+        SlotState::Cached,
+        "an evicted frame must not still read cached on the bar"
+    );
+    assert!(!seq.state(1).is_hole(), "and it is not a hole either");
+}
+
 /// A frame that cannot be decoded is marked corrupt, is not retried on every
 /// reschedule, and does not stop the rest of the sequence caching.
 #[test]

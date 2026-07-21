@@ -5549,13 +5549,13 @@ impl App {
                     return;
                 };
                 let proxy = self.proxy.clone();
-                let source = FrameSource::Files(FrameCache::new(
+                let source = FrameSource::Files(Box::new(FrameCache::new(
                     self.playback_cache_budget(),
                     cache::default_worker_count(),
                     Arc::new(move || {
                         let _ = proxy.send_event(UserEvent::FrameDecoded);
                     }),
-                ));
+                )));
                 (seq, source, frame)
             }
         };
@@ -5623,13 +5623,9 @@ impl App {
         let Some(pb) = self.playback.take() else {
             return;
         };
-        // The frame to keep is the one actually on screen, which is exactly what
-        // `current_image` holds — not the playhead, which may have been seeked
-        // onto a frame that has not decoded yet. Getting this wrong would delete
-        // the ring texture still being drawn from and leave a blank window.
         // Keep the frame actually on screen, not the playhead — a seek may have
-        // moved it onto something not yet decoded, and deleting the ring texture
-        // still being drawn from would leave a blank window.
+        // moved the playhead onto a frame that has not decoded yet, and keeping
+        // that one would leave a blank window.
         let keep = pb.shown.unwrap_or_else(|| pb.frame());
         let data = keep_frame
             .then(|| {

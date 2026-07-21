@@ -110,7 +110,11 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   sweeps budgets × {point, mip} and prints GPU ms, VRAM-shaped grid dims, and how many of the 256
   bins each one resolves. On a 24k EXR (302 Mpx): cost is *flat* below ~8M (0.69 ms at 1M, 0.82 ms
   at 8M — the pass is overhead-bound down there), then 2.3 ms at 32M, 15.8 ms to read every pixel
-  (plus 2.4 GB for the target). Hence the 8M default.
+  (plus 2.4 GB for the target). Hence `SAMPLES_PER_PASS = 8M`. There is deliberately **no user
+  setting** for it: with progressive refinement every value converges on the same exact answer, so
+  it only picks how the work is sliced, and 8M measured best on both axes (lowest total work *and*
+  sub-millisecond frames) — a smaller value is strictly worse, needing more passes, more total
+  work, and risking the pass cap.
 - **The histogram refines progressively, and the half-pixel phase offset is load-bearing.** A big
   image is measured a strided slice per frame; `dispatch(accumulate)` just skips zeroing the SSBO
   (the shader only `atomicAdd`s), and the offset rides the existing 2D pan — `pan_u = yaw/2π`, so

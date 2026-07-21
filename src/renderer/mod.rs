@@ -916,27 +916,26 @@ impl Renderer {
         &mut self,
         params: &RenderParams,
         source: HistogramSource,
-        samples: u32,
         pass: u32,
     ) -> bool {
-        let stride = self.histogram_stride(source, samples);
+        let stride = self.histogram_stride(source);
         let phase = (
             (pass % stride.max(1) as u32) as i32,
             (pass / stride.max(1) as u32) as i32,
         );
-        self.run_histogram(params, source, samples, true, None, phase, pass > 0)
+        self.run_histogram(params, source, true, None, phase, pass > 0)
     }
 
     /// How many phase-offset passes it takes to measure every pixel of `source`
     /// at this budget. 1 when the source already fits the budget.
-    pub fn histogram_passes(&self, source: HistogramSource, samples: u32) -> u32 {
-        HistogramPass::passes_for(self.histogram_stride(source, samples))
+    pub fn histogram_passes(&self, source: HistogramSource) -> u32 {
+        HistogramPass::passes_for(self.histogram_stride(source))
     }
 
-    fn histogram_stride(&self, source: HistogramSource, samples: u32) -> i32 {
+    fn histogram_stride(&self, source: HistogramSource) -> i32 {
         match source {
             HistogramSource::WholeImage { width, height } => {
-                HistogramPass::stride(width, height, samples, self.max_texture_size)
+                HistogramPass::stride(width, height, self.max_texture_size)
             }
             // Already one sample per screen pixel; nothing left to refine.
             HistogramSource::Viewport { .. } => 1,
@@ -946,11 +945,11 @@ impl Renderer {
     /// The offscreen grid a source is measured on. The sample budget applies to
     /// the image (which can be 300 Mpx); the viewport is measured pixel-for-pixel
     /// because it is bounded by the display anyway.
-    fn histogram_grid(&self, source: HistogramSource, samples: u32) -> (i32, i32) {
+    fn histogram_grid(&self, source: HistogramSource) -> (i32, i32) {
         let (w, h) = source.dims();
         match source {
             HistogramSource::WholeImage { .. } => {
-                HistogramPass::grid_size(w, h, samples, self.max_texture_size)
+                HistogramPass::grid_size(w, h, self.max_texture_size)
             }
             HistogramSource::Viewport { .. } => {
                 HistogramPass::viewport_grid(w, h, self.max_texture_size)
@@ -967,7 +966,6 @@ impl Renderer {
         &mut self,
         params: &RenderParams,
         source: HistogramSource,
-        samples: u32,
         point_sample: bool,
         force_grid: Option<(i32, i32)>,
         phase: (i32, i32),
@@ -977,7 +975,7 @@ impl Renderer {
             return false;
         }
         let gl = self.gl.clone();
-        let (gw, gh) = force_grid.unwrap_or_else(|| self.histogram_grid(source, samples));
+        let (gw, gh) = force_grid.unwrap_or_else(|| self.histogram_grid(source));
         match &mut self.histogram {
             Some(pass) if !pass.is_pending() => {
                 if unsafe { pass.begin(&gl, gw, gh) }.is_none() {
@@ -1097,19 +1095,10 @@ impl Renderer {
         &mut self,
         params: &RenderParams,
         source: HistogramSource,
-        samples: u32,
         point_sample: bool,
         force_grid: Option<(i32, i32)>,
     ) -> Option<((i32, i32), f32, f32, Histogram)> {
-        self.benchmark_histogram_phase(
-            params,
-            source,
-            samples,
-            point_sample,
-            force_grid,
-            (0, 0),
-            false,
-        )
+        self.benchmark_histogram_phase(params, source, point_sample, force_grid, (0, 0), false)
     }
 
     /// [`benchmark_histogram`](Self::benchmark_histogram) with an explicit phase
@@ -1120,24 +1109,15 @@ impl Renderer {
         &mut self,
         params: &RenderParams,
         source: HistogramSource,
-        samples: u32,
         point_sample: bool,
         force_grid: Option<(i32, i32)>,
         phase: (i32, i32),
         accumulate: bool,
     ) -> Option<((i32, i32), f32, f32, Histogram)> {
-        let grid = force_grid.unwrap_or_else(|| self.histogram_grid(source, samples));
+        let grid = force_grid.unwrap_or_else(|| self.histogram_grid(source));
         let gl = self.gl.clone();
         let start = std::time::Instant::now();
-        if !self.run_histogram(
-            params,
-            source,
-            samples,
-            point_sample,
-            force_grid,
-            phase,
-            accumulate,
-        ) {
+        if !self.run_histogram(params, source, point_sample, force_grid, phase, accumulate) {
             return None;
         }
         unsafe { gl.finish() };

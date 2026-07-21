@@ -34,6 +34,18 @@ const BIN_SRC: &str = include_str!("../../resources/shaders/histogram.glsl");
 /// output code — finer would only resolve the display's own rounding.
 pub const BINS: usize = 256;
 
+/// Pixels measured per pass. Progressive refinement means this no longer sets
+/// *accuracy* — every setting converges on having read the whole image — only
+/// how the work is sliced: bigger passes finish sooner but cost more per frame.
+///
+/// Benchmarked on a 24576×12288 EXR (302 Mpx), where this stride of 6 gives 36
+/// passes: 0.93 ms each and 33 ms of GPU in total. Both neighbours are worse on
+/// one axis or the other — a stride of 4 costs 2.16 ms per frame for the same
+/// total, and a stride of 8 needs 64 passes and 47 ms in total because the
+/// fixed per-pass overhead gets paid more often. It also lands under the pass
+/// cap for any plausible image, so the refinement always completes.
+const SAMPLES_PER_PASS: u32 = 8_000_000;
+
 /// `over[4]` in the shader — three channels plus one slot of padding.
 const OVER_SLOTS: usize = 4;
 const BUF_U32: usize = BINS * 3 + OVER_SLOTS;
@@ -211,9 +223,9 @@ impl HistogramPass {
     /// allocation would simply fail. Each axis is clamped as well; the resulting
     /// aspect skew only re-weights which parts of such a pathological image get
     /// sampled, which beats having no histogram at all.
-    pub fn grid_size(image_w: i32, image_h: i32, samples: u32, max_texture: i32) -> (i32, i32) {
+    pub fn grid_size(image_w: i32, image_h: i32, max_texture: i32) -> (i32, i32) {
         let (w, h) = (image_w.max(1), image_h.max(1));
-        let s = Self::stride(w, h, samples, max_texture);
+        let s = Self::stride(w, h, max_texture);
         // Round *up*, so the grid covers the full extent even when the stride
         // doesn't divide it. The overhang wraps (`wrap_2d`) onto columns already
         // measured, which double-counts a sliver — far better than leaving an
@@ -228,10 +240,10 @@ impl HistogramPass {
     /// `stride²` phase offsets then partition the image into residue classes
     /// that tile it perfectly, so each pass measures a disjoint set of pixels
     /// and the accumulated result is identical to reading every pixel.
-    pub fn stride(image_w: i32, image_h: i32, samples: u32, max_texture: i32) -> i32 {
+    pub fn stride(image_w: i32, image_h: i32, max_texture: i32) -> i32 {
         let (w, h) = (image_w.max(1), image_h.max(1));
         let px = w as f64 * h as f64;
-        let ideal = (px / samples.max(1) as f64).sqrt().round() as i32;
+        let ideal = (px / SAMPLES_PER_PASS as f64).sqrt().round() as i32;
         // Also enough stride to keep the grid inside the driver's texture limit.
         let by_limit = (w.max(h) as f64 / max_texture.max(1) as f64).ceil() as i32;
         ideal.max(by_limit).max(1)

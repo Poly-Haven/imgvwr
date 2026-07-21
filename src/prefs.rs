@@ -116,9 +116,6 @@ pub struct AppPreferences {
     /// Vertical scale of the F2 box's histogram (the L / Sq / Log selector).
     #[serde(default)]
     pub histogram_scale: HistogramScale,
-    /// How many pixels the histogram samples. See [`HISTOGRAM_SAMPLE_STEPS`].
-    #[serde(default = "default_histogram_samples")]
-    pub histogram_samples: u32,
     /// Internal (not user-facing): unix-seconds of the last successful update
     /// check, so the daily check throttles. `0` = never checked.
     #[serde(default)]
@@ -128,35 +125,6 @@ pub struct AppPreferences {
     /// the daily window without re-hitting the network. Empty = none/unknown.
     #[serde(default)]
     pub latest_known_version: String,
-}
-
-/// Selectable histogram sample budgets, doubling each step.
-///
-/// The measurement scales the image down by one uniform factor until it fits the
-/// budget, then reads exactly one source texel per target texel — so the budget
-/// is literally how many pixels get looked at, spread evenly over the image.
-///
-/// The range is set by measurement, not taste. Benchmarked on a 24576×12288 EXR
-/// (302 Mpx), the whole pass costs 0.69 ms at 1M and 0.82 ms at 8M — flat,
-/// because below ~8M it is dominated by fixed overhead rather than by sampling.
-/// After that it climbs: 1.3 ms at 16M, 2.3 ms at 32M, 3.7 ms at 64M. Reading
-/// every pixel takes 15.8 ms — an entire 60 fps frame — and wants 2.4 GB of
-/// VRAM for the target, which is why the ladder stops well short of it.
-pub const HISTOGRAM_SAMPLE_STEPS: [u32; 7] = [
-    1_000_000, 2_000_000, 4_000_000, 8_000_000, 16_000_000, 32_000_000, 64_000_000,
-];
-
-/// 8M: the most accuracy available before the cost curve leaves the floor. On
-/// that same 302 Mpx image it resolves 253 of 256 bins against 1M's 249, and
-/// estimates the clipped fraction to within 0.7% of a full-resolution count —
-/// for 0.13 ms more than 1M, which is nothing.
-fn default_histogram_samples() -> u32 {
-    HISTOGRAM_SAMPLE_STEPS[3]
-}
-
-/// Label a sample budget as e.g. "1M" / "16M".
-pub fn histogram_samples_label(n: u32) -> String {
-    format!("{}M", n / 1_000_000)
 }
 
 fn default_corner_radius() -> u32 {
@@ -201,7 +169,6 @@ impl Default for AppPreferences {
             half_float_textures: false,
             pin_titlebar: false,
             histogram_scale: HistogramScale::default(),
-            histogram_samples: default_histogram_samples(),
             last_update_check: 0,
             latest_known_version: String::new(),
         }

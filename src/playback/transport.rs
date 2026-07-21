@@ -5,8 +5,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::playback::cache::FrameCache;
 use crate::playback::sequence::{Sequence, SlotState};
+use crate::playback::source::FrameSource;
 
 /// How often the directory is re-scanned while in playback mode, so a render
 /// writing frames beside you extends the timeline live. One `read_dir`.
@@ -47,7 +47,7 @@ pub enum Tick {
 /// how fast it is actually going.
 pub struct Playback {
     pub seq: Sequence,
-    pub cache: FrameCache,
+    pub frames: FrameSource,
     /// The playhead, as a real frame number.
     frame: i64,
     playing: bool,
@@ -84,11 +84,11 @@ pub struct Playback {
 }
 
 impl Playback {
-    pub fn new(seq: Sequence, cache: FrameCache, frame: i64, target_fps: f32) -> Self {
+    pub fn new(seq: Sequence, frames: FrameSource, frame: i64, target_fps: f32) -> Self {
         let now = Instant::now();
         Self {
             seq,
-            cache,
+            frames,
             frame,
             playing: false,
             target_fps: target_fps.max(1.0),
@@ -137,8 +137,23 @@ impl Playback {
         self.recent.clear();
     }
 
+    /// How long the frame now showing should stay up. A source with its own
+    /// timing wins — a variable-rate GIF keeps the delays recorded in the file,
+    /// and the achieved-rate readout then reports whatever that works out to.
     fn period(&self) -> Duration {
-        Duration::from_secs_f32(1.0 / self.target_fps)
+        self.period_of(self.frame)
+    }
+
+    fn period_of(&self, frame: i64) -> Duration {
+        self.frames
+            .frame_delay(frame)
+            .unwrap_or_else(|| Duration::from_secs_f32(1.0 / self.target_fps))
+    }
+
+    /// True when the source dictates the timing, so the configured target rate
+    /// does not apply and the readout should not be judged against it.
+    pub fn source_timed(&self) -> bool {
+        self.frames.frame_delay(self.frame).is_some()
     }
 
     /// Start or stop the clock. Resuming holds the current frame for a full
@@ -208,7 +223,7 @@ impl Playback {
             self.next_frame_at = now + self.period();
             return Tick::Idle;
         }
-        if !self.cache.contains(next) {
+        if !self.frames.is_ready(next) {
             // Never drop a frame: wait for it. The visible consequence is that
             // playback runs slow, which is what the red fps readout is for.
             // `next_frame_at` stays in the past, so the moment the frame lands
@@ -261,6 +276,11 @@ impl Playback {
         }
         if self.stalled {
             return true;
+        }
+        // A source that carries its own timing is playing at exactly the rate it
+        // asks for, whatever the configured target says.
+        if self.source_timed() {
+            return false;
         }
         self.achieved_fps()
             .is_some_and(|fps| fps < self.target_fps * (1.0 - RATE_TOLERANCE))
@@ -360,13 +380,22 @@ mod tests {
     /// every present frame already cached, running at 10 fps for round numbers.
     fn player(present: &[bool]) -> Playback {
         let seq = Sequence::for_test(1, present);
-        let mut cache = FrameCache::new(1 << 30, 0, Arc::new(|| {}));
+        let mut cache = crate::playback::cache::FrameCache::new(1 << 30, 0, Arc::new(|| {}));
         for (i, &p) in present.iter().enumerate() {
             if p {
                 cache.mark_resident_for_test(1 + i as i64);
             }
         }
-        Playback::new(seq, cache, 1, 10.0)
+        Playback::new(seq, FrameSource::Files(cache), 1, 10.0)
+    }
+
+    /// Make only these frames resident, replacing whatever the player had.
+    fn only_resident(pb: &mut Playback, frames: &[i64]) {
+        let mut cache = crate::playback::cache::FrameCache::new(1 << 30, 0, Arc::new(|| {}));
+        for &f in frames {
+            cache.mark_resident_for_test(f);
+        }
+        pb.frames = FrameSource::Files(cache);
     }
 
     /// Holes consume no time: the playhead moves straight past a gap in one
@@ -390,9 +419,7 @@ mod tests {
     fn an_undecoded_frame_stalls_rather_than_being_skipped() {
         let mut pb = player(&[true, true, true]);
         // Frame 2 is not resident after all.
-        pb.cache = FrameCache::new(1 << 30, 0, Arc::new(|| {}));
-        pb.cache.mark_resident_for_test(1);
-        pb.cache.mark_resident_for_test(3);
+        only_resident(&mut pb, &[1, 3]);
         pb.set_playing(true);
 
         let t = Instant::now() + Duration::from_millis(200);
@@ -401,7 +428,7 @@ mod tests {
         assert!(pb.behind(), "a stall reads as running short immediately");
 
         // Once it lands, playback picks up exactly where it stopped.
-        pb.cache.mark_resident_for_test(2);
+        only_resident(&mut pb, &[1, 2, 3]);
         assert_eq!(pb.tick(t), Tick::Show(2));
     }
 

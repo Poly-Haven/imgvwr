@@ -166,11 +166,22 @@ pub struct RescanOutcome {
     pub refreshed: Vec<i64>,
 }
 
-/// A detected frame sequence: a contiguous span of frame numbers, each either
-/// backed by a file or a hole.
+/// Where a timeline's frames live.
+#[derive(Clone, Debug)]
+enum Origin {
+    /// One file per frame, in this directory.
+    Dir(PathBuf),
+    /// Every frame inside this one file — an animated GIF / APNG / WebP. There
+    /// is nothing to scan and nothing to decode; the timeline exists only so the
+    /// transport, the cache bar and the scrubber can be the same code.
+    InMemory(PathBuf),
+}
+
+/// A frame timeline: a contiguous span of frame numbers, each either backed by
+/// a frame or a hole.
 #[derive(Debug)]
 pub struct Sequence {
-    dir: PathBuf,
+    origin: Origin,
     prefix: String,
     /// Extension as written on the opened file (case preserved for display; the
     /// scan compares extensions case-insensitively, as `is_supported` does).
@@ -207,7 +218,11 @@ impl Sequence {
     /// the sizes come along with the directory entries.
     pub fn rescan(&mut self) -> RescanOutcome {
         let mut out = RescanOutcome::default();
-        let Ok(entries) = read_dir_entries(&self.dir) else {
+        // Nothing on disk to re-scan for an animation's own frames.
+        let Origin::Dir(dir) = self.origin.clone() else {
+            return out;
+        };
+        let Ok(entries) = read_dir_entries(&dir) else {
             return out;
         };
         let found = self.match_entries(&entries);
@@ -275,7 +290,7 @@ impl Sequence {
         entries: &[(String, u64)],
     ) -> Result<Self, SequenceError> {
         let mut seq = Self {
-            dir,
+            origin: Origin::Dir(dir),
             prefix: opened.prefix.to_string(),
             ext: opened.ext.to_string(),
             pad: detect_pad(opened, entries),
@@ -364,16 +379,55 @@ impl Sequence {
         self.slots.iter().filter(|s| s.name.is_some()).count()
     }
 
-    /// The directory this sequence lives in.
+    /// The directory this timeline's frames live in.
     pub fn dir(&self) -> &Path {
-        &self.dir
+        match &self.origin {
+            Origin::Dir(d) => d,
+            Origin::InMemory(p) => p.parent().unwrap_or(Path::new(".")),
+        }
+    }
+
+    /// True when the frames come from one animated file rather than a directory
+    /// of files.
+    pub fn is_in_memory(&self) -> bool {
+        matches!(self.origin, Origin::InMemory(_))
+    }
+
+    /// A timeline over the frames of one animated image: every slot present,
+    /// numbered from zero, and already in whatever state the caller says (for an
+    /// animation, `Cached` — the frames are in RAM by the time you can press
+    /// Space, so the cache bar is fully blue from the start).
+    pub fn for_animation(path: &Path, count: usize, state: SlotState) -> Self {
+        let name: Box<str> = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into_boxed_str();
+        Self {
+            origin: Origin::InMemory(path.to_path_buf()),
+            prefix: String::new(),
+            ext: String::new(),
+            pad: 1,
+            first: 0,
+            slots: (0..count)
+                .map(|_| Slot {
+                    name: Some(name.clone()),
+                    len: 0,
+                    state,
+                })
+                .collect(),
+            state_epoch: 0,
+        }
     }
 
     /// A stable identity for this sequence, distinct from any single frame's
     /// path. Display rotation is remembered against this, so `↑`/`↓` keep
     /// working as the frame changes.
     pub fn identity(&self) -> PathBuf {
-        self.dir.join(format!(
+        if let Origin::InMemory(p) = &self.origin {
+            return p.clone();
+        }
+        self.dir().join(format!(
             "{}{}.{}",
             self.prefix,
             "#".repeat(self.pad.max(1)),
@@ -390,6 +444,12 @@ impl Sequence {
 
     /// Human-readable name, e.g. `shot_####.png`.
     pub fn display_name(&self) -> String {
+        if let Origin::InMemory(p) = &self.origin {
+            return p
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+        }
         format!(
             "{}{}.{}",
             self.prefix,
@@ -431,8 +491,13 @@ impl Sequence {
 
     /// Full path of the file backing `frame`, or `None` for a hole.
     pub fn path(&self, frame: i64) -> Option<PathBuf> {
+        // An in-memory frame has no file of its own; the pixels come from the
+        // animated image, not from a path.
+        let Origin::Dir(dir) = &self.origin else {
+            return None;
+        };
         let i = self.index_of(frame)?;
-        self.slots[i].name.as_ref().map(|n| self.dir.join(&**n))
+        self.slots[i].name.as_ref().map(|n| dir.join(&**n))
     }
 
     /// True when `frame` has a file (whether or not it decodes).
@@ -476,7 +541,7 @@ impl Sequence {
     #[cfg(test)]
     pub(crate) fn for_test(first: i64, present: &[bool]) -> Self {
         Self {
-            dir: PathBuf::from("/seq"),
+            origin: Origin::Dir(PathBuf::from("/seq")),
             prefix: "f".into(),
             ext: "png".into(),
             pad: 4,

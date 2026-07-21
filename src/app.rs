@@ -80,7 +80,7 @@ use crate::image_loader::{
     probe_dimensions, supported_extensions, DecodeIntent, ImageData,
 };
 use crate::ocio::OcioManager;
-use crate::playback::{cache, FrameCache, Playback, Sequence, Tick};
+use crate::playback::{cache, FrameCache, FrameSource, Playback, Sequence, Tick};
 use crate::prefs::{AppPreferences, PreferredView};
 use crate::renderer::{RenderParams, Renderer};
 use crate::ui::{self, UiAction, UiInputs, UiState};
@@ -257,17 +257,6 @@ struct ColorPickPartial {
     y: i64,
     degrees: Option<(f32, f32)>,
     linear: [f32; 4],
-}
-
-/// Playback state for an animated GIF. The frames themselves live in the
-/// `current_image`'s [`ImageData::animation`]; this just tracks which frame is
-/// showing, when to advance, and whether the user paused (Space).
-struct AnimState {
-    /// Index of the frame currently uploaded to the texture.
-    frame: usize,
-    /// When the current frame should give way to the next.
-    next_at: Instant,
-    paused: bool,
 }
 
 /// Coarse load status (the error string is surfaced in the UI from Commit 9).
@@ -703,9 +692,6 @@ pub struct App {
     // Image comparator.
     /// The currently-displayed decoded image (shared so a slot can pin it).
     current_image: Option<Arc<ImageData>>,
-    /// GIF playback state, `Some` only while the current image is an animated GIF
-    /// (the frames live in `current_image`'s `ImageData::animation`).
-    anim: Option<AnimState>,
     /// Image-sequence playback. **All** playback state hangs off this one
     /// `Option`, so a session that never presses `Space` pays nothing for it:
     /// the hot paths branch once, cheaply, and no threads are spawned until the
@@ -887,7 +873,6 @@ impl App {
             update_checking: false,
             available_update: None,
             current_image: None,
-            anim: None,
             playback: None,
             #[cfg(debug_assertions)]
             debug_stop_after: None,
@@ -1940,37 +1925,11 @@ impl App {
         // graph beside the new image's metadata.
         self.invalidate_histogram();
         self.histogram = None;
-        // Animated GIF: begin playback from frame 0 (already uploaded as the
-        // static image). Frame 0 shows for its own delay before frame 1. A static
-        // image / single-frame GIF clears any prior playback.
-        self.anim = data.animation.as_ref().and_then(|a| {
-            a.frames.first().map(|f0| AnimState {
-                frame: 0,
-                next_at: Instant::now() + f0.delay,
-                paused: false,
-            })
-        });
-        // Dev-only: pin a specific GIF frame (paused) so each frame's pixels can be
-        // verified deterministically in a headless capture (animation timing is
-        // process-relative and jittery otherwise).
-        #[cfg(debug_assertions)]
-        if let Ok(spec) = std::env::var("IMGVWR_DEBUG_GIF_FRAME") {
-            if let (Ok(k), Some(img)) = (spec.parse::<usize>(), self.current_image.clone()) {
-                if let Some(frames) = img.animation.as_ref().map(|a| &a.frames) {
-                    let k = k % frames.len().max(1);
-                    if let Some(anim) = self.anim.as_mut() {
-                        anim.frame = k;
-                        anim.paused = true;
-                    }
-                    if let Some(gfx) = self.gfx.as_mut() {
-                        gfx.renderer.update_animation_frame(
-                            img.width as i32,
-                            img.height as i32,
-                            &frames[k].pixels,
-                        );
-                    }
-                }
-            }
+        // An animated image starts playing straight away, through the same
+        // transport a file sequence uses (§3.4) — one Space, one timeline, one
+        // mental model.
+        if data.animation.is_some() {
+            self.enter_playback(true);
         }
         // Dev-only: IMGVWR_DEBUG_SLOT pins the loaded image into slot 1 so the
         // comparator flag can be verified headlessly.
@@ -3410,13 +3369,7 @@ impl App {
             (Key::Named(NamedKey::ArrowDown), _) => self.rotate_image(1),
             // Space: enter sequence playback, or pause / resume it. For an
             // animated GIF it stays the old play/pause toggle.
-            (Key::Named(NamedKey::Space), _) => {
-                if self.anim.is_some() {
-                    self.toggle_animation_pause();
-                } else {
-                    self.toggle_playback();
-                }
-            }
+            (Key::Named(NamedKey::Space), _) => self.toggle_playback(),
             (Key::Named(NamedKey::Escape), _) => {
                 if self.ui_state.confirm_delete {
                     self.ui_state.confirm_delete = false;
@@ -3784,7 +3737,13 @@ impl App {
         };
         let rx = ((ru * img.width as f32).floor() as i64).clamp(0, img.width as i64 - 1) as u32;
         let ry = ((rv * img.height as f32).floor() as i64).clamp(0, img.height as i64 - 1) as u32;
-        let anim_frame = self.anim.as_ref().map(|a| a.frame);
+        // For an animated image every frame shares one `ImageData`, so the
+        // picker needs to say which frame it is reading.
+        let anim_frame = self
+            .playback
+            .as_ref()
+            .filter(|pb| pb.seq.is_in_memory())
+            .and_then(|pb| usize::try_from(pb.frame()).ok());
         let raw = img.raw_pixel_at(anim_frame, rx, ry)?;
         // Alpha is never sRGB-encoded (the shader passes `texel.a` straight
         // through), so only the colour channels go through the EOTF.
@@ -4772,6 +4731,9 @@ impl App {
             }
             self.enter_playback(pin.is_none());
             if let (Some(pb), Some(frame)) = (self.playback.as_mut(), pin) {
+                // An animated image is already playing by now, so pause it
+                // before parking — a capture must not race the clock.
+                pb.set_playing(false);
                 pb.seek(frame);
                 // The frame must be decoded before the capture reads the
                 // framebuffer, and the capture path polls until the app is idle
@@ -5459,70 +5421,6 @@ impl App {
         })
     }
 
-    /// Toggle GIF play/pause (Space). No-op for a static image. On resume, the
-    /// paused frame is held for its full delay rather than flipping immediately.
-    fn toggle_animation_pause(&mut self) {
-        if self.anim.is_none() {
-            return;
-        }
-        // The resume delay is the paused frame's own duration; read it before the
-        // mutable borrow of `self.anim`.
-        let resume_delay = self.current_image.as_ref().and_then(|img| {
-            let frame = self.anim.as_ref()?.frame;
-            img.animation.as_ref()?.frames.get(frame).map(|f| f.delay)
-        });
-        let anim = self.anim.as_mut().unwrap();
-        anim.paused = !anim.paused;
-        let paused = anim.paused;
-        if !paused {
-            if let Some(d) = resume_delay {
-                anim.next_at = Instant::now() + d;
-            }
-        }
-        self.show_toast(if paused { "Paused" } else { "Playing" }.to_string());
-    }
-
-    /// Advance animated-GIF playback: when the current frame's delay has elapsed,
-    /// step to the next frame (wrapping) and upload it to the texture. No-op when
-    /// the current image isn't an animated GIF or playback is paused.
-    fn advance_animation(&mut self, now: Instant) {
-        match self.anim.as_ref() {
-            Some(a) if !a.paused && now >= a.next_at => {}
-            _ => return,
-        }
-        // The frames live in the current image; clone the Arc so the borrow of
-        // `self.current_image` ends before we touch `self.gfx`. If the backing
-        // frames are somehow gone (shouldn't happen — `anim` and `current_image`
-        // are set together), clear `anim` so the scheduler stops waking for it
-        // rather than spinning on a permanently-past `next_at`.
-        let Some(img) = self.current_image.clone() else {
-            self.anim = None;
-            return;
-        };
-        let frames = match img.animation.as_ref() {
-            Some(a) if a.frames.len() > 1 => &a.frames,
-            _ => {
-                self.anim = None;
-                return;
-            }
-        };
-        let n = frames.len();
-        let anim = self.anim.as_mut().expect("anim present (checked above)");
-        anim.frame = (anim.frame + 1) % n;
-        let idx = anim.frame;
-        anim.next_at = now + frames[idx].delay;
-        if let Some(gfx) = self.gfx.as_mut() {
-            gfx.renderer.update_animation_frame(
-                img.width as i32,
-                img.height as i32,
-                &frames[idx].pixels,
-            );
-        }
-        // Different pixels are on screen now, so the histogram describes the
-        // previous frame.
-        self.invalidate_histogram();
-    }
-
     // ---- image-sequence playback -----------------------------------------
 
     /// True while the viewer is a frame player rather than a still viewer.
@@ -5598,47 +5496,58 @@ impl App {
         }
     }
 
-    /// Find the sequence the current file belongs to and become a frame player.
-    /// Refuses (with a toast) when the file is not part of one — the viewer
-    /// stays exactly as it was.
+    /// Become a frame player over whatever the current image is part of: the
+    /// sequence of files around it, or — for an animated GIF / APNG / WebP — the
+    /// frames already inside it. One `Space`, one transport, one mental model.
+    /// Refuses (with a toast) when the file is neither.
     fn enter_playback(&mut self, play: bool) {
         let (Some(path), Some(image)) = (self.loaded_path.clone(), self.current_image.clone())
         else {
             return;
         };
-        if self.is_busy() {
+        if self.is_busy() || self.playback.is_some() {
             return;
         }
-        let seq = match Sequence::detect(&path) {
-            Ok(seq) => seq,
-            Err(e) => {
-                log::info!("not a sequence: {} ({e:?})", path.display());
-                self.show_toast(e.message());
-                return;
+        // An animated image is its own timeline; only look at the directory when
+        // it isn't one.
+        let (seq, source, frame) = match crate::playback::source::animation_sequence(&image) {
+            Some(seq) => (seq, FrameSource::Memory(image.clone()), 0),
+            None => {
+                let seq = match Sequence::detect(&path) {
+                    Ok(seq) => seq,
+                    Err(e) => {
+                        log::info!("not a sequence: {} ({e:?})", path.display());
+                        self.show_toast(e.message());
+                        return;
+                    }
+                };
+                let Some(frame) = Sequence::frame_of(&path) else {
+                    return;
+                };
+                let proxy = self.proxy.clone();
+                let source = FrameSource::Files(FrameCache::new(
+                    self.playback_cache_budget(),
+                    cache::default_worker_count(),
+                    Arc::new(move || {
+                        let _ = proxy.send_event(UserEvent::FrameDecoded);
+                    }),
+                ));
+                (seq, source, frame)
             }
         };
-        let Some(frame) = Sequence::frame_of(&path) else {
-            return;
-        };
 
-        let proxy = self.proxy.clone();
-        let cache = FrameCache::new(
-            self.playback_cache_budget(),
-            cache::default_worker_count(),
-            Arc::new(move || {
-                let _ = proxy.send_event(UserEvent::FrameDecoded);
-            }),
-        );
         let frames = seq.len();
         let name = seq.display_name();
-        let mut pb = Playback::new(seq, cache, frame, self.prefs.playback_fps);
+        let mut pb = Playback::new(seq, source, frame, self.prefs.playback_fps);
         // The frame on screen is already decoded; don't make the pool redo it.
-        pb.cache.seed(frame, image.clone());
+        pb.frames.seed(frame, image.clone());
 
         if let Some(gfx) = self.gfx.as_mut() {
             pb.ringed = gfx.renderer.begin_sequence(&image, frames);
             if pb.ringed {
-                gfx.renderer.upload_frame(frame, &image);
+                if let Some(pixels) = pb.frames.pixels(frame) {
+                    gfx.renderer.upload_frame(frame, &pixels);
+                }
                 gfx.renderer.show_frame(frame);
             }
             // Either way the entry frame is already what is on screen.
@@ -5653,6 +5562,9 @@ impl App {
         if let Some(r) = self.image_rotations.get(&pb.seq.identity()).copied() {
             self.rotation = r;
         }
+        // Finding a sequence is worth saying; an animated image starting to play
+        // is what opening it has always done, so announcing it would be noise.
+        let announce = !pb.seq.is_in_memory();
         self.playback = Some(pb);
         self.sync_diff_with_playback();
         // The clipping overlay's max-mip mask is an O(w·h) CPU build with a full
@@ -5663,7 +5575,9 @@ impl App {
             gfx.renderer.set_clip_mask(None, self.prefs.clip_margin);
         }
         self.clip_mask_dirty = false;
-        self.show_toast(format!("Playing {name}"));
+        if announce {
+            self.show_toast(format!("Playing {name}"));
+        }
         self.request_redraw();
     }
 
@@ -5689,16 +5603,29 @@ impl App {
         // `current_image` holds — not the playhead, which may have been seeked
         // onto a frame that has not decoded yet. Getting this wrong would delete
         // the ring texture still being drawn from and leave a blank window.
-        let data = keep_frame.then(|| self.current_image.clone()).flatten();
+        // Keep the frame actually on screen, not the playhead — a seek may have
+        // moved it onto something not yet decoded, and deleting the ring texture
+        // still being drawn from would leave a blank window.
+        let keep = pb.shown.unwrap_or_else(|| pb.frame());
+        let data = keep_frame
+            .then(|| {
+                pb.frames
+                    .still_of(keep)
+                    .or_else(|| self.current_image.clone())
+            })
+            .flatten();
         let suspended_diff = pb.suspended_diff;
         // Late results can no longer reach an event loop that may be gone.
-        pb.cache.cancel_wakeups();
+        pb.frames.cancel_wakeups();
         drop(pb);
         if let Some(gfx) = self.gfx.as_mut() {
             if !gfx.renderer.end_sequence(data.as_deref()) {
                 self.load_state =
                     LoadState::Failed("Not enough GPU memory to keep this frame.".to_string());
             }
+        }
+        if let Some(data) = &data {
+            self.current_image = Some(data.clone());
         }
         // Back to the exact clipping overlay, and a fresh histogram for a graph
         // that is no longer chasing a moving image.
@@ -5723,36 +5650,50 @@ impl App {
     /// detection, re-frame the window, auto-expose and clear undo — all of it
     /// both wrong and slow to do 24 times a second.
     fn show_playback_frame(&mut self, frame: i64) {
-        let Some(pb) = self.playback.as_ref() else {
+        let Some(pb) = self.playback.as_mut() else {
             return;
         };
-        let Some(data) = pb.cache.get(frame) else {
+        let Some(data) = pb.frames.image(frame) else {
             return;
         };
         let ringed = pb.ringed;
-        if let Some(gfx) = self.gfx.as_mut() {
-            let shown = if ringed {
-                gfx.renderer.upload_frame(frame, &data) && gfx.renderer.show_frame(frame)
-            } else {
+        // The gfx borrow and the playback borrow are disjoint fields of `self`,
+        // but the pixels borrow `pb`, so take the renderer through a raw split
+        // rather than a method call on `self`.
+        let (playback, gfx) = (&mut self.playback, &mut self.gfx);
+        if let (Some(pb), Some(gfx)) = (playback.as_ref(), gfx.as_mut()) {
+            let shown = match (ringed, pb.frames.pixels(frame)) {
+                (true, Some(pixels)) => {
+                    gfx.renderer.upload_frame(frame, &pixels) && gfx.renderer.show_frame(frame)
+                }
                 // Frames too large to ring: a full re-upload each time. Correct,
                 // just slow — and the fps readout says so.
-                gfx.renderer.replace_image(&data)
+                (false, _) => gfx.renderer.replace_image(&data),
+                (true, None) => false,
             };
             if !shown {
                 return;
             }
         }
-        self.file_info.name = data
-            .path
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        self.loaded_path = Some(data.path.clone());
-        self.current_image = Some(data);
+        // An animated image's frames all share one file, so its name and path
+        // never change; a file sequence's do.
+        if !self
+            .playback
+            .as_ref()
+            .is_some_and(|pb| pb.seq.is_in_memory())
+        {
+            self.file_info.name = data
+                .path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.loaded_path = Some(data.path.clone());
+            self.current_image = Some(data);
+            self.update_window_title();
+        }
         if let Some(pb) = self.playback.as_mut() {
             pb.shown = Some(frame);
         }
-        self.update_window_title();
         // The comparator flag follows whichever slot holds the frame now shown.
         self.recompute_active_slot();
         // Different pixels are on screen, so the histogram describes the frame
@@ -5767,14 +5708,14 @@ impl App {
         let Some(pb) = self.playback.as_mut() else {
             return;
         };
-        pb.cache.poll(&mut pb.seq);
+        pb.frames.poll(&mut pb.seq);
         if let Some(outcome) = pb.maybe_rescan(now) {
             for frame in outcome.refreshed {
-                pb.cache.forget_failure(frame);
+                pb.frames.forget_failure(frame);
             }
         }
         let playhead = pb.frame();
-        pb.cache.schedule(&mut pb.seq, playhead, true);
+        pb.frames.schedule(&mut pb.seq, playhead, true);
         // Advancing the clock moves the playhead; putting the screen in step
         // with it is one job, done in one place. That also covers a seek onto a
         // frame that had not decoded when the pointer landed on it — the screen
@@ -5814,17 +5755,16 @@ impl App {
         if !pb.should_log(now) {
             return;
         }
+        let (resident, capacity, inflight) = pb.frames.stats(&pb.seq);
         log::info!(
-            "playback: frame {} of [{}..{}], {:.1}/{:.1} fps{}, cache {}/{} frames ({} in flight)",
+            "playback: frame {} of [{}..{}], {:.1}/{:.1} fps{}, \
+             cache {resident}/{capacity} frames ({inflight} in flight)",
             pb.frame(),
             pb.seq.first(),
             pb.seq.last(),
             pb.achieved_fps().unwrap_or(0.0),
             pb.target_fps(),
             if pb.behind() { " BEHIND" } else { "" },
-            pb.cache.resident_frames(),
-            pb.cache.capacity_frames(),
-            pb.cache.inflight_count(),
         );
     }
 
@@ -5845,12 +5785,12 @@ impl App {
         if next == pb.frame() {
             return;
         }
-        let Some(data) = pb.cache.get(next) else {
-            return;
-        };
-        if let Some(gfx) = self.gfx.as_mut() {
+        let (playback, gfx) = (&self.playback, &mut self.gfx);
+        if let (Some(pb), Some(gfx)) = (playback.as_ref(), gfx.as_mut()) {
             if !gfx.renderer.frame_resident(next) {
-                gfx.renderer.upload_frame(next, &data);
+                if let Some(pixels) = pb.frames.pixels(next) {
+                    gfx.renderer.upload_frame(next, &pixels);
+                }
             }
         }
     }
@@ -5866,9 +5806,6 @@ impl App {
         // ease is NOT advanced here — it rides its own Resized-event chain so the
         // window resize and the content present stay one-to-one (see ease_window).
         let now = Instant::now();
-        // Advance animated-GIF playback (uploads the next frame when its delay has
-        // elapsed). No-op for static images and while paused.
-        self.advance_animation(now);
         // Advance image-sequence playback: land decodes, retarget the cache, and
         // swap the displayed frame when its period is up. No-op unless playing.
         self.tick_playback(now);
@@ -6847,12 +6784,11 @@ impl ApplicationHandler<UserEvent> for App {
             && !self.cursor_idle_hidden)
             .then(|| self.last_cursor_motion.map(|t| t + CURSOR_IDLE_HIDE))
             .flatten();
-        // Wake to flip to the next GIF frame (the advance + upload happens in
-        // `render`). `None` while paused or for a static image.
-        let anim_deadline = self.anim.as_ref().filter(|a| !a.paused).map(|a| a.next_at);
-        // Same for the next sequence frame. `None` while paused or stopped, so a
-        // parked player returns the loop to `Wait` rather than idling at the
-        // display rate (mpv measure that at 2-3x the power).
+        // Wake to flip to the next frame (the advance + upload happens in
+        // `render`). `None` while paused or stopped, so a parked player returns
+        // the loop to `Wait` rather than idling at the display rate — mpv
+        // measure driving frames at refresh rather than source rate at 2-3x the
+        // power.
         let playback_deadline = self.playback.as_ref().and_then(|p| p.deadline());
         if self.capture_active() {
             // Drive continuous frames while a capture is pending.
@@ -6885,7 +6821,6 @@ impl ApplicationHandler<UserEvent> for App {
             self.bottom_hide_deadline,
             self.metadata_hide_deadline,
             cursor_idle_deadline,
-            anim_deadline,
             playback_deadline,
             // Wake once the held-adjustment coalesce window closes so the deferred
             // undo entry commits even after the tone ease has settled.

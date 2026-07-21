@@ -270,6 +270,12 @@ impl FrameCache {
         self.frames.get(&frame).cloned()
     }
 
+    /// Borrow a resident frame rather than cloning its `Arc` — for the upload
+    /// path, which only reads the pixels.
+    pub fn peek(&self, frame: i64) -> Option<&ImageData> {
+        self.frames.get(&frame).map(|d| d.as_ref())
+    }
+
     pub fn contains(&self, frame: i64) -> bool {
         self.frames.contains_key(&frame)
     }

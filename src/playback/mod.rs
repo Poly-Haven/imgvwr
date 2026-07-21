@@ -6,8 +6,10 @@
 
 pub mod cache;
 pub mod sequence;
+pub mod source;
 pub mod transport;
 
 pub use cache::FrameCache;
 pub use sequence::{RescanOutcome, Sequence, SequenceError, SlotState};
+pub use source::{FramePixels, FrameSource};
 pub use transport::{Playback, Tick};

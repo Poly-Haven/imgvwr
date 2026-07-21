@@ -271,6 +271,7 @@ pub struct FrameRing {
     height: i32,
     format: u32,
     ty: u32,
+    bytes_per_pixel: usize,
     /// The metadata every frame of this sequence shares.
     pub aspect: f32,
     pub is_encoded_srgb: bool,
@@ -297,7 +298,7 @@ impl FrameRing {
         if w <= 0 || h <= 0 || tile_grid(w, h, threshold).is_some() {
             return None;
         }
-        let (mut internal, format, ty, _, _) = pixel_format(data);
+        let (mut internal, format, ty, bpp, _) = pixel_format(data);
         if half_float && matches!(data.pixels, PixelBuffer::F32(_)) {
             internal = glow::RGBA16F;
         }
@@ -344,6 +345,7 @@ impl FrameRing {
             height: h,
             format,
             ty,
+            bytes_per_pixel: bpp,
             aspect: data.aspect(),
             is_encoded_srgb: data.is_encoded_srgb,
             is_u8: data.is_u8(),
@@ -386,6 +388,26 @@ impl FrameRing {
         if !self.accepts(data) {
             return false;
         }
+        let (_, _, _, _, src) = pixel_format(data);
+        self.upload_bytes(gl, frame, src, displayed)
+    }
+
+    /// As [`upload`](Self::upload), but from raw bytes already in the ring's
+    /// pixel layout — an in-memory animation frame, which is full-canvas RGBA8
+    /// and has no `ImageData` of its own.
+    ///
+    /// # Safety: the GL context must be current.
+    pub unsafe fn upload_bytes(
+        &mut self,
+        gl: &glow::Context,
+        frame: i64,
+        src: &[u8],
+        displayed: Option<i64>,
+    ) -> bool {
+        let expected = self.width as usize * self.height as usize * self.bytes_per_pixel;
+        if src.len() < expected {
+            return false;
+        }
         if self.texture_for(frame).is_some() {
             return true;
         }
@@ -405,7 +427,6 @@ impl FrameRing {
                 pos
             }
         };
-        let (_, format, ty, _, src) = pixel_format(data);
         gl.bind_texture(glow::TEXTURE_2D, Some(self.slots[slot]));
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         gl.tex_sub_image_2d(
@@ -415,9 +436,9 @@ impl FrameRing {
             0,
             self.width,
             self.height,
-            format,
-            ty,
-            glow::PixelUnpackData::Slice(Some(src)),
+            self.format,
+            self.ty,
+            glow::PixelUnpackData::Slice(Some(&src[..expected])),
         );
         // Keep the mip chain: the zoom-out quality path and the 8-bit Lanczos
         // minification both depend on it, and NVIDIA measure a full chain at

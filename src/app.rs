@@ -45,6 +45,9 @@
 //!   * `IMGVWR_DEBUG_SEQ_DIFF` = `1` (self-diff the sequence in slot 1 — a
 //!     capture must be black) or `=<frame path>` (diff against that sequence, to
 //!     verify the live two-sequences diff)
+//!   * `IMGVWR_DEBUG_SEQ_SWITCH` = `<frame path>` (save that sequence to slot 2
+//!     and, mid-playback, switch to it — the log must report *playing* on the
+//!     same frame, proving the switch keeps playing and syncs the frame)
 //!
 //! Two more, not `_DEBUG_` because they are useful in release builds too:
 //! `IMGVWR_PLAYBACK_WORKERS` (decode threads) and `IMGVWR_PLAYBACK_RING_BYTES`
@@ -785,6 +788,9 @@ pub struct App {
     /// One-shot guard for `IMGVWR_DEBUG_SEQ_DIFF` (set up the live diff once).
     #[cfg(debug_assertions)]
     debug_seq_diffed: bool,
+    /// One-shot guard for `IMGVWR_DEBUG_SEQ_SWITCH` (switch slots once).
+    #[cfg(debug_assertions)]
+    debug_seq_switched: bool,
     /// The cache bar's slot states, refreshed in `render` before the immutable
     /// UI snapshot is taken (`ui_inputs` is `&self`, and rebuilding this needs
     /// `&mut`). Shared by `Arc`, so a frame on which nothing changed costs a
@@ -799,6 +805,10 @@ pub struct App {
     pending_seq_recall: Option<SeqRecall>,
     /// The image shown before the last slot recall, for the A/B toggle-back.
     compare_prev: Option<Arc<ImageData>>,
+    /// A frame of the sequence we switched *away from* during playback, so
+    /// pressing the active slot again toggles back to it (the sequence A/B
+    /// compare). Any frame works — it's only re-detected into a sequence.
+    prev_playback_image: Option<Arc<ImageData>>,
     /// Slot whose image is currently displayed (drives the active flag).
     active_slot: Option<usize>,
     /// Slot being shown as a difference against the current image (Alt+N).
@@ -973,10 +983,13 @@ impl App {
             debug_seq_recalled: false,
             #[cfg(debug_assertions)]
             debug_seq_diffed: false,
+            #[cfg(debug_assertions)]
+            debug_seq_switched: false,
             playback_states: None,
             slots: std::array::from_fn(|_| None),
             pending_seq_recall: None,
             compare_prev: None,
+            prev_playback_image: None,
             active_slot: None,
             diff_slot: None,
             diff_playback: None,
@@ -2040,6 +2053,16 @@ impl App {
             if let Some(pb) = self.playback.as_mut() {
                 pb.seek(recall.want_frame);
                 pb.set_playing(recall.want_playing);
+                log::info!(
+                    "slot recall: {} on frame {} of {}",
+                    if recall.want_playing {
+                        "playing"
+                    } else {
+                        "paused"
+                    },
+                    pb.frame(),
+                    pb.seq.display_name(),
+                );
             }
             self.sync_diff_with_playback();
         }
@@ -2134,21 +2157,20 @@ impl App {
         };
     }
 
-    /// Ctrl+N: pin what is on screen into comparator slot `n` (1..=9) — the whole
-    /// sequence when playing one (so recalling the slot puts you back in the
-    /// player), otherwise the current still.
+    /// Ctrl+N: pin what is on screen into comparator slot `n` (1..=9). If it is
+    /// part of an image sequence — playing one, or just a numbered frame on disk —
+    /// the whole sequence is pinned, so recalling the slot puts you (back) in the
+    /// player. Otherwise it's the current still. Saving sequences unconditionally
+    /// is what lets slot-switching during playback stay in the player and keep
+    /// playing, however the slots were saved.
     fn save_slot(&mut self, n: usize) {
         let Some(cur) = self.current_image.clone() else {
             return;
         };
-        let slot = match self.playback.as_ref() {
-            Some(pb) => Slot::Sequence(SlotSequence {
-                identity: pb.seq.identity(),
-                frame: pb.frame(),
-                image: cur,
-            }),
-            None => Slot::Still(cur),
-        };
+        let slot = self
+            .sequence_slot_for(&cur)
+            .map(Slot::Sequence)
+            .unwrap_or(Slot::Still(cur));
         let is_seq = matches!(slot, Slot::Sequence(_));
         self.slots[n - 1] = Some(slot);
         // Overwriting the slot currently being diffed against would otherwise leave
@@ -2164,6 +2186,34 @@ impl App {
             format!("Saved slot {n}")
         });
         self.request_redraw();
+    }
+
+    /// Build a [`SlotSequence`] for `image` when it belongs to a sequence — the
+    /// running player's, an animation, or a numbered file on disk — else `None`
+    /// (a plain still). Sharing this between save and the sequence lookups keeps
+    /// "is this part of a sequence?" in one place.
+    fn sequence_slot_for(&self, image: &Arc<ImageData>) -> Option<SlotSequence> {
+        if let Some(pb) = self.playback.as_ref() {
+            return Some(SlotSequence {
+                identity: pb.seq.identity(),
+                frame: pb.frame(),
+                image: image.clone(),
+            });
+        }
+        if image.animation.is_some() {
+            return Some(SlotSequence {
+                identity: image.path.clone(),
+                frame: 0,
+                image: image.clone(),
+            });
+        }
+        let seq = Sequence::detect(&image.path).ok()?;
+        let frame = Sequence::frame_of(&image.path)?;
+        Some(SlotSequence {
+            identity: seq.identity(),
+            frame,
+            image: image.clone(),
+        })
     }
 
     /// Alt+N: toggle the difference against comparator slot `n`. Two shapes:
@@ -2334,41 +2384,43 @@ impl App {
         let Some(target) = self.slots[idx].clone() else {
             return;
         };
-        let for_compare = !refit_window;
-        let old_scale = if refit_window {
-            None
-        } else {
-            self.flat_scale_ref()
-        };
         // Recalling a slot supersedes any in-flight folder-navigation load: bump
         // the load generation so the decode result is discarded when it lands
         // (else poll_loads would adopt it and clobber this recall), and clear the
         // nav debounce offset so a stale `nav_pending` doesn't perturb later arrows.
         self.load_gen += 1;
         self.nav_pending = None;
+
+        // During playback, switching slots never stops or pauses: it re-enters
+        // the player on the switched-to sequence, keeps the playing state, and
+        // lands on the same frame number. Handled in one place so every slot,
+        // however it was saved, behaves the same.
+        if self.playback_active() {
+            self.switch_playback_slot(idx, &target);
+            return;
+        }
+
+        let for_compare = !refit_window;
+        let old_scale = if refit_window {
+            None
+        } else {
+            self.flat_scale_ref()
+        };
         match target {
             Slot::Sequence(seq) => {
-                // Re-enter playback on the saved sequence. Carry the current
-                // frame number and playing state so flipping between two sequence
-                // slots lands on the same frame — continuing to play if we were,
-                // staying paused if we were paused or looking at a still. The
-                // actual re-entry happens in `finalize_adopt` once the saved frame
-                // is on screen and framed (see `pending_seq_recall`).
-                let (want_frame, want_playing) = match self.playback.as_ref() {
-                    Some(pb) => (pb.frame(), pb.playing()),
-                    None => (seq.frame, false),
-                };
-                // The A/B toggle-back is a stills feature; a sequence recall
-                // always (re-)enters the player.
+                // Re-enter playback on the saved sequence, paused on the frame it
+                // was saved on (we weren't playing). The actual re-entry happens
+                // in `finalize_adopt` once the saved frame is on screen and framed
+                // (see `pending_seq_recall`).
                 self.compare_prev = None;
                 self.pending_seq_recall = Some(SeqRecall {
-                    want_frame,
-                    want_playing,
+                    want_frame: seq.frame,
+                    want_playing: false,
                 });
                 self.begin_adopt(seq.image.clone(), for_compare, old_scale);
             }
             Slot::Still(image) => {
-                if self.active_slot == Some(idx) && !self.playback_active() {
+                if self.active_slot == Some(idx) {
                     // Toggle back to the previously-viewed image (swap so a third
                     // press returns to the slot).
                     if let Some(prev) = self.compare_prev.take() {
@@ -2381,6 +2433,44 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Switch the running player to slot `idx`'s sequence — or, when the active
+    /// slot is pressed again, back to the one you switched *from* — without ever
+    /// stopping or pausing. It carries the current frame number and playing state
+    /// onto the new sequence, so two renders of a shot stay in step as you flip
+    /// between them. The switched-to frame is adopted with the view preserved (an
+    /// instant A/B compare, no re-frame); `finalize_adopt` then re-enters the
+    /// player from the queued `SeqRecall`. A slot that isn't part of a sequence
+    /// falls back to being shown as a still (which does leave the player).
+    fn switch_playback_slot(&mut self, idx: usize, target: &Slot) {
+        let Some(pb) = self.playback.as_ref() else {
+            return;
+        };
+        let want_frame = pb.frame();
+        let want_playing = pb.playing();
+
+        // The frame to re-detect the target sequence from: the previous sequence
+        // (toggle-back) when this slot is already active, else the slot's own.
+        let anchor = if self.active_slot == Some(idx) {
+            let Some(prev) = self.prev_playback_image.take() else {
+                return; // nothing to toggle back to
+            };
+            // Remember the current one so a third press returns to it.
+            self.prev_playback_image = self.current_image.clone();
+            prev
+        } else {
+            self.prev_playback_image = self.current_image.clone();
+            target.image().clone()
+        };
+
+        self.compare_prev = None;
+        self.pending_seq_recall = Some(SeqRecall {
+            want_frame,
+            want_playing,
+        });
+        // Keep the view: an A/B compare must not re-frame or reset the camera.
+        self.begin_adopt(anchor, true, self.flat_scale_ref());
     }
 
     /// `(zoom, displayed_image_height)` of the current 2D view, for native-scale
@@ -5065,6 +5155,34 @@ impl App {
                     log::info!("debug: live diff vs slot 1");
                 }
             }
+            // Switch to a second sequence mid-playback: save it to slot 2, mark
+            // ourselves playing, then recall slot 2. The "slot recall:" log line
+            // must report *playing* on the same frame, and a capture must show the
+            // second sequence's pixels — proving the switch keeps playing and syncs.
+            if let Some(bpath) = std::env::var_os("IMGVWR_DEBUG_SEQ_SWITCH") {
+                if self.playback.is_some() && !self.debug_seq_switched {
+                    self.debug_seq_switched = true;
+                    let b = std::path::PathBuf::from(&bpath);
+                    if let Ok(img) = load_image(
+                        &b,
+                        &Arc::new(crate::image_loader::ReadProgress::default()),
+                        DecodeIntent::Latency,
+                    ) {
+                        if let Ok(seq) = Sequence::detect(&b) {
+                            self.slots[1] = Some(Slot::Sequence(SlotSequence {
+                                identity: seq.identity(),
+                                frame: Sequence::frame_of(&b).unwrap_or(0),
+                                image: Arc::new(img),
+                            }));
+                        }
+                    }
+                    if let Some(pb) = self.playback.as_mut() {
+                        pb.set_playing(true);
+                    }
+                    self.recall_slot(2, true);
+                    log::info!("debug: switched to slot 2 during playback");
+                }
+            }
         }
     }
 
@@ -6008,6 +6126,8 @@ impl App {
         if self.diff_playback.is_some() {
             self.clear_diff();
         }
+        // The sequence-switch toggle-back target belongs to this playback session.
+        self.prev_playback_image = None;
         // Keep the frame actually on screen, not the playhead — a seek may have
         // moved the playhead onto a frame that has not decoded yet, and keeping
         // that one would leave a blank window.

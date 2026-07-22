@@ -194,11 +194,13 @@ resolution (different-sized images are not scaled to match). Pressing the same
 number again flips back to what you were viewing. Saved slots appear as small
 numbered flags at the top-right; the active one is highlighted.
 
-When you save a slot while playing a sequence, the whole **sequence** is pinned,
-not just the frame you're on — recalling it puts you back in the player. If you
-were playing, it keeps playing and lands on the same frame number (so you can
-flip between two renders of a shot and watch them at the same point); if you
-were paused, or looking at a still, it stays paused.
+`Ctrl`+`N` on any frame of an image sequence pins the whole **sequence**, not
+just that frame — recalling it puts you in the player. **Switching slots while
+playing never stops playback**: the new sequence keeps playing from the same
+frame number, so you can flip between two renders of a shot (press `2`, `3`, … to
+jump to a slot; press the current slot's number again to flip back to the one you
+came from) and watch them at exactly the same point. Recalling a sequence slot
+while paused, or from a still, stays paused on the synced frame.
 
 `Alt`+`N` against a sequence slot while you're playing one **diffs the two
 sequences live**: both play in sync on the same frame number and every frame

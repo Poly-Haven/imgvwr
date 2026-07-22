@@ -4170,6 +4170,14 @@ impl App {
         if self.file_info.width == 0 || self.window_is_small() {
             return None;
         }
+        // In playback mode the pixel rulers are just clutter — a strip on the
+        // left and one along the bottom that reads like a second timeline. Hide
+        // both (this drops the ruler strips but not the transport row, which is
+        // its own part of the bottom panel) unless the user is actively working
+        // with guides, which still need a ruler to pull from and adjust against.
+        if self.playback_active() && !(self.guides_visible && !self.guides.is_empty()) {
+            return None;
+        }
         let (vw, vh) = self.viewport();
         let cam = &self.camera.camera;
         let img_w = self.file_info.width as f32;

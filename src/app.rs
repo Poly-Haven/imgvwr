@@ -1929,7 +1929,7 @@ impl App {
         // transport a file sequence uses (§3.4) — one Space, one timeline, one
         // mental model.
         if data.animation.is_some() {
-            self.enter_playback(true);
+            self.enter_playback(true, false);
         }
         // Dev-only: IMGVWR_DEBUG_SLOT pins the loaded image into slot 1 so the
         // comparator flag can be verified headlessly.
@@ -4543,16 +4543,24 @@ impl App {
                 }
             }
             (ElementState::Released, MouseButton::Right) => {
+                // Whether this release ends a right-press the app actually took
+                // (set only when the press landed on the image body, not egui and
+                // not the minimap — see the Pressed arm). Captured before it is
+                // cleared, so a plain click can be told apart from a release whose
+                // press egui consumed.
+                let was_image_press = self.right_press_pos.take().is_some();
                 // Past the drag threshold this was a colour-pick, not a click: end
-                // it without touching the guide. Otherwise it's a plain click —
-                // delete the guide captured at press time, exactly as before.
+                // it without touching the guide. A guide captured at press time is
+                // deleted. Otherwise a plain right-click on the image body toggles
+                // playback, exactly like Space.
                 if self.color_picking {
                     self.color_picking = false;
-                } else if let Some(idx) = self.right_press_guide {
+                } else if let Some(idx) = self.right_press_guide.take() {
                     self.remove_guide(idx);
+                } else if was_image_press {
+                    self.right_click_toggle_playback();
                 }
                 self.right_press_guide = None;
-                self.right_press_pos = None;
                 self.request_redraw();
             }
             _ => {}
@@ -4745,7 +4753,7 @@ impl App {
             if pin.is_none() && std::env::var_os("IMGVWR_DEBUG_PLAY").is_none() {
                 return;
             }
-            self.enter_playback(pin.is_none());
+            self.enter_playback(pin.is_none(), false);
             if let (Some(pb), Some(frame)) = (self.playback.as_mut(), pin) {
                 // An animated image is already playing by now, so pause it
                 // before parking — a capture must not race the clock.
@@ -5493,7 +5501,20 @@ impl App {
                 self.sync_diff_with_playback();
                 self.request_redraw();
             }
-            None => self.enter_playback(true),
+            None => self.enter_playback(true, false),
+        }
+    }
+
+    /// A plain right-click on the image body plays/pauses exactly like `Space`.
+    /// It enters silently on a still that isn't a playable sequence: `Space` is a
+    /// deliberate keystroke that deserves an explanation, but a right-click is
+    /// used for guides and colour-picking too, so a refusal toast on every stray
+    /// click would be noise.
+    fn right_click_toggle_playback(&mut self) {
+        if self.playback_active() {
+            self.toggle_playback();
+        } else {
+            self.enter_playback(true, true);
         }
     }
 
@@ -5540,7 +5561,10 @@ impl App {
     /// sequence of files around it, or — for an animated GIF / APNG / WebP — the
     /// frames already inside it. One `Space`, one transport, one mental model.
     /// Refuses (with a toast) when the file is neither.
-    fn enter_playback(&mut self, play: bool) {
+    /// `quiet` suppresses the "not a sequence" refusal toast: `Space` explains
+    /// why nothing played, but a right-click (which does so much else) must stay
+    /// silent when it lands on a plain still.
+    fn enter_playback(&mut self, play: bool, quiet: bool) {
         let (Some(path), Some(image)) = (self.loaded_path.clone(), self.current_image.clone())
         else {
             return;
@@ -5557,7 +5581,9 @@ impl App {
                     Ok(seq) => seq,
                     Err(e) => {
                         log::info!("not a sequence: {} ({e:?})", path.display());
-                        self.show_toast(e.message());
+                        if !quiet {
+                            self.show_toast(e.message());
+                        }
                         return;
                     }
                 };

@@ -123,7 +123,7 @@ This is the standard in VFX and digital content creation. Using the same system 
 | Levels (`F2`) | The two triangles under the histogram set the display black and white points, stretching that slice of the range back out to full. The graph itself is the control: drag either of its vertical edges to move that point, or drag anywhere else on the graph to slide both at once, keeping the range's width. Double-click a handle to reset it, the rest of the graph to reset both; `Ctrl+R` resets them along with the other adjustments |
 | Guides list (`F2`) | Shows each guide (`V 425px` / `H 312px`, plus degrees in panorama); × removes; `Ctrl+R` resets all |
 | Hover / drag a guide | Shows a colour-coded tooltip near the cursor with its coordinate — blue while hovering or grabbing, green while dragging a new one out of a ruler |
-| Right-click + hold-drag | Colour-pick tooltip: swatch, pixel (and panorama degree) coordinates, and Linear / Display values under the cursor — R/G/B(/A) or L(/A) depending on the image's channels, coloured like the F2 box's channel swatches. Suppresses the other auto-hiding toolbars while active; a plain right-click still deletes a guide |
+| Right-click + hold-drag | Colour-pick tooltip: swatch, pixel (and panorama degree) coordinates, and Linear / Display values under the cursor — R/G/B(/A) or L(/A) depending on the image's channels, coloured like the F2 box's channel swatches. Suppresses the other auto-hiding toolbars while active. A plain right-click (no drag) deletes the guide under it, or — on the image body — plays/pauses a sequence |
 
 ### Window (borderless)
 
@@ -147,6 +147,7 @@ revealed instead of auto-hiding.
 | Input | Action |
 |---|---|
 | `Space` | Play the image sequence this file belongs to — or the frames of an animated GIF / WebP / APNG. Press again to pause, again to resume |
+| Right-click | Play / pause — the same as `Space`. A right-*drag* still colour-picks, and a right-click on a guide still deletes it |
 | `Escape` or the ⏹ button | Stop, staying on the frame you're looking at — the arrows go back to folder navigation from that file |
 | `←` / `→` | Step one frame back / forward (skipping any gaps) |
 | Click the timeline | Jump to that frame |

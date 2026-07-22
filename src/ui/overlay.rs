@@ -2924,6 +2924,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
             "Playback",
             &[
                 ("Space", "Play a sequence / animation, then pause"),
+                ("Right-click", "Play / pause"),
                 ("Esc / ⏹", "Stop (stays on the current frame)"),
                 ("← / →", "Step one frame"),
                 ("Click timeline", "Jump to that frame"),

@@ -177,8 +177,8 @@ controls above); the frame cache's share of memory is in *Settings → Playback*
 
 | Input | Action |
 |---|---|
-| `Ctrl` + `1`–`9` | Save the current image to a comparator slot |
-| `1`–`9` (top row) | Recall a saved slot; press again to toggle back |
+| `Ctrl` + `1`–`9` | Save to a comparator slot — the whole sequence when you're playing one, otherwise the current image |
+| `1`–`9` (top row) | Recall a saved slot; a sequence slot resumes in the player (a still toggles back on a second press) |
 | `Alt` + `1`–`9` | Show the difference vs that slot's image (processing applies to the diff) |
 | `L` | Lock zoom/pan across images |
 | `H` | Show keyboard / mouse help (with version + GitHub link) |
@@ -193,6 +193,12 @@ A/B comparison — preserving the view and showing each image at its native
 resolution (different-sized images are not scaled to match). Pressing the same
 number again flips back to what you were viewing. Saved slots appear as small
 numbered flags at the top-right; the active one is highlighted.
+
+When you save a slot while playing a sequence, the whole **sequence** is pinned,
+not just the frame you're on — recalling it puts you back in the player. If you
+were playing, it keeps playing and lands on the same frame number (so you can
+flip between two renders of a shot and watch them at the same point); if you
+were paused, or looking at a still, it stays paused.
 
 ## Supported formats
 

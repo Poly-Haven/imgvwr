@@ -39,6 +39,9 @@
 //!     it is up, to verify the frame survives the texture ring being freed
 //!   * `IMGVWR_DEBUG_CACHE_MB` = `<n>` (frame-cache budget, to exercise the
 //!     "sequence far larger than the cache" path)
+//!   * `IMGVWR_DEBUG_SEQ_RECALL` = `1` (with a playback override: once playing,
+//!     save the sequence to comparator slot 1 and recall it, so a capture proves
+//!     recall re-enters the player on the same frame)
 //!
 //! Two more, not `_DEBUG_` because they are useful in release builds too:
 //! `IMGVWR_PLAYBACK_WORKERS` (decode threads) and `IMGVWR_PLAYBACK_RING_BYTES`
@@ -247,6 +250,64 @@ struct PendingAdopt {
     for_compare: bool,
     /// Pre-swap 2D `(zoom, height)` for native-scale matching on a slot recall.
     old_scale: Option<(f32, f32)>,
+}
+
+/// What a comparator slot holds. A still pins one decoded image (the original
+/// behaviour); a sequence remembers how to re-enter playback and which frame it
+/// was saved on, so recalling it puts you back in the player.
+#[derive(Clone)]
+enum Slot {
+    Still(Arc<ImageData>),
+    Sequence(SlotSequence),
+}
+
+/// A sequence pinned in a comparator slot. The saved frame's `image.path` is the
+/// anchor a file sequence re-detects from (an animation re-derives from
+/// `image.animation`), so neither needs storing separately.
+#[derive(Clone)]
+struct SlotSequence {
+    /// The sequence's stable identity ([`Sequence::identity`]), for matching the
+    /// slot flag while it plays and for the diff pairing.
+    identity: PathBuf,
+    /// The frame saved on.
+    frame: i64,
+    /// That frame decoded — the still preview, the diff source, and what is
+    /// shown while playback spins back up on recall.
+    image: Arc<ImageData>,
+}
+
+impl Slot {
+    /// The decoded image to pin, preview or diff against.
+    fn image(&self) -> &Arc<ImageData> {
+        match self {
+            Slot::Still(image) => image,
+            Slot::Sequence(seq) => &seq.image,
+        }
+    }
+
+    /// The path shown in the slot flag's tooltip and used to disambiguate two
+    /// slots that share a name: a still's file, or a sequence's `####` identity.
+    fn label_path(&self) -> &Path {
+        match self {
+            Slot::Still(image) => &image.path,
+            Slot::Sequence(seq) => &seq.identity,
+        }
+    }
+
+    fn as_sequence(&self) -> Option<&SlotSequence> {
+        match self {
+            Slot::Sequence(seq) => Some(seq),
+            Slot::Still(_) => None,
+        }
+    }
+}
+
+/// A sequence-slot recall waiting on its saved frame to be adopted: the frame to
+/// resume on and whether to keep playing, both captured from the outgoing player
+/// before the switch.
+struct SeqRecall {
+    want_frame: i64,
+    want_playing: bool,
 }
 
 /// Colour-pick data computable without a GPU readback (see
@@ -701,13 +762,22 @@ pub struct App {
     /// screen, so a capture can verify the ring teardown.
     #[cfg(debug_assertions)]
     debug_stop_after: Option<i64>,
+    /// One-shot guard so `IMGVWR_DEBUG_SEQ_RECALL` fires once, not on every
+    /// finalize_adopt (the recall it triggers would otherwise recurse forever).
+    #[cfg(debug_assertions)]
+    debug_seq_recalled: bool,
     /// The cache bar's slot states, refreshed in `render` before the immutable
     /// UI snapshot is taken (`ui_inputs` is `&self`, and rebuilding this needs
     /// `&mut`). Shared by `Arc`, so a frame on which nothing changed costs a
     /// refcount bump.
     playback_states: Option<Arc<Vec<crate::playback::SlotState>>>,
-    /// Comparator slots (Ctrl+1..=9 → index 0..=8); each pins a decoded image.
-    slots: [Option<Arc<ImageData>>; 9],
+    /// Comparator slots (Ctrl+1..=9 → index 0..=8); each pins a still or a
+    /// whole sequence to recall (and diff against).
+    slots: [Option<Slot>; 9],
+    /// A pending sequence-slot recall: once the saved frame is adopted and
+    /// framed, `finalize_adopt` re-enters playback with this frame and playing
+    /// state (so flipping between two sequence slots compares the same frame).
+    pending_seq_recall: Option<SeqRecall>,
     /// The image shown before the last slot recall, for the A/B toggle-back.
     compare_prev: Option<Arc<ImageData>>,
     /// Slot whose image is currently displayed (drives the active flag).
@@ -876,8 +946,11 @@ impl App {
             playback: None,
             #[cfg(debug_assertions)]
             debug_stop_after: None,
+            #[cfg(debug_assertions)]
+            debug_seq_recalled: false,
             playback_states: None,
             slots: std::array::from_fn(|_| None),
+            pending_seq_recall: None,
             compare_prev: None,
             active_slot: None,
             diff_slot: None,
@@ -1931,11 +2004,28 @@ impl App {
         if data.animation.is_some() {
             self.enter_playback(true, false);
         }
+        // A comparator recall of a sequence slot re-enters playback now that its
+        // saved frame is on screen and framed. For a file sequence we are not in
+        // the player yet, so enter it (quietly); an animation already auto-played
+        // above. Either way, seek to the carried frame and match the carried
+        // playing state — so flipping between two sequence slots holds the frame.
+        if let Some(recall) = self.pending_seq_recall.take() {
+            if self.playback.is_none() {
+                self.enter_playback(recall.want_playing, true);
+            }
+            if let Some(pb) = self.playback.as_mut() {
+                pb.seek(recall.want_frame);
+                pb.set_playing(recall.want_playing);
+            }
+            self.sync_diff_with_playback();
+        }
         // Dev-only: IMGVWR_DEBUG_SLOT pins the loaded image into slot 1 so the
         // comparator flag can be verified headlessly.
         #[cfg(debug_assertions)]
         if std::env::var_os("IMGVWR_DEBUG_SLOT").is_some() && self.slots[0].is_none() {
-            self.slots[0] = self.current_image.clone();
+            if let Some(img) = self.current_image.clone() {
+                self.slots[0] = Some(Slot::Still(img));
+            }
         }
         // Dev-only: verify the diff path headlessly. IMGVWR_DEBUG_DIFF self-diffs
         // (renders 0); IMGVWR_DEBUG_DIFF_FILE=<path> diffs against another file (so
@@ -1952,7 +2042,10 @@ impl App {
                         .ok()
                         .map(Arc::new)
                 } else {
-                    self.slots[0].clone().or_else(|| self.current_image.clone())
+                    self.slots[0]
+                        .as_ref()
+                        .map(|s| s.image().clone())
+                        .or_else(|| self.current_image.clone())
                 };
             if let (Some(slot), Some(cur)) = (target, self.current_image.clone()) {
                 if let Some(diff) = abs_diff_image(&cur, &slot) {
@@ -1997,25 +2090,43 @@ impl App {
         self.image_cache.truncate(IMAGE_CACHE_CAP);
     }
 
-    /// The active flag follows whichever slot (if any) holds the current image.
-    /// Matched by path, not `Arc` identity: navigating away and back yields a
+    /// The active flag follows whichever slot (if any) holds what is on screen.
+    /// While playing, that is matched by the sequence's identity (so the flag
+    /// stays lit as the frame changes); otherwise by the still's path — matched
+    /// by path, not `Arc` identity, since navigating away and back yields a
     /// different decoded instance of the same file, which should still highlight.
     fn recompute_active_slot(&mut self) {
-        self.active_slot = match &self.current_image {
-            Some(cur) => self
-                .slots
+        self.active_slot = if let Some(pb) = self.playback.as_ref() {
+            let id = pb.seq.identity();
+            self.slots
                 .iter()
-                .position(|s| s.as_ref().is_some_and(|d| d.path == cur.path)),
-            None => None,
+                .position(|s| s.as_ref().and_then(Slot::as_sequence).is_some_and(|s| s.identity == id))
+        } else if let Some(cur) = &self.current_image {
+            self.slots
+                .iter()
+                .position(|s| s.as_ref().is_some_and(|s| s.image().path == cur.path))
+        } else {
+            None
         };
     }
 
-    /// Ctrl+N: pin the current image into comparator slot `n` (1..=9).
+    /// Ctrl+N: pin what is on screen into comparator slot `n` (1..=9) — the whole
+    /// sequence when playing one (so recalling the slot puts you back in the
+    /// player), otherwise the current still.
     fn save_slot(&mut self, n: usize) {
         let Some(cur) = self.current_image.clone() else {
             return;
         };
-        self.slots[n - 1] = Some(cur);
+        let slot = match self.playback.as_ref() {
+            Some(pb) => Slot::Sequence(SlotSequence {
+                identity: pb.seq.identity(),
+                frame: pb.frame(),
+                image: cur,
+            }),
+            None => Slot::Still(cur),
+        };
+        let is_seq = matches!(slot, Slot::Sequence(_));
+        self.slots[n - 1] = Some(slot);
         // Overwriting the slot currently being diffed against would otherwise leave
         // a stale precomputed diff (vs the old slot content) on screen — turn it
         // off so the comparison can't silently go wrong.
@@ -2026,7 +2137,11 @@ impl App {
             }
         }
         self.recompute_active_slot();
-        self.show_toast(format!("Saved slot {n}"));
+        self.show_toast(if is_seq {
+            format!("Saved sequence to slot {n}")
+        } else {
+            format!("Saved slot {n}")
+        });
         self.request_redraw();
     }
 
@@ -2052,7 +2167,7 @@ impl App {
             self.request_redraw();
             return;
         }
-        let Some(slot) = self.slots[idx].clone() else {
+        let Some(slot) = self.slots[idx].as_ref().map(|s| s.image().clone()) else {
             self.show_toast(format!("Slot {n} empty"));
             return;
         };
@@ -2117,16 +2232,40 @@ impl App {
         // nav debounce offset so a stale `nav_pending` doesn't perturb later arrows.
         self.load_gen += 1;
         self.nav_pending = None;
-        if self.active_slot == Some(idx) {
-            // Toggle back to the previously-viewed image (swap so a third press
-            // returns to the slot).
-            if let Some(prev) = self.compare_prev.take() {
-                self.compare_prev = self.current_image.clone();
-                self.begin_adopt(prev, for_compare, old_scale);
+        match target {
+            Slot::Sequence(seq) => {
+                // Re-enter playback on the saved sequence. Carry the current
+                // frame number and playing state so flipping between two sequence
+                // slots lands on the same frame — continuing to play if we were,
+                // staying paused if we were paused or looking at a still. The
+                // actual re-entry happens in `finalize_adopt` once the saved frame
+                // is on screen and framed (see `pending_seq_recall`).
+                let (want_frame, want_playing) = match self.playback.as_ref() {
+                    Some(pb) => (pb.frame(), pb.playing()),
+                    None => (seq.frame, false),
+                };
+                // The A/B toggle-back is a stills feature; a sequence recall
+                // always (re-)enters the player.
+                self.compare_prev = None;
+                self.pending_seq_recall = Some(SeqRecall {
+                    want_frame,
+                    want_playing,
+                });
+                self.begin_adopt(seq.image.clone(), for_compare, old_scale);
             }
-        } else {
-            self.compare_prev = self.current_image.clone();
-            self.begin_adopt(target, for_compare, old_scale);
+            Slot::Still(image) => {
+                if self.active_slot == Some(idx) && !self.playback_active() {
+                    // Toggle back to the previously-viewed image (swap so a third
+                    // press returns to the slot).
+                    if let Some(prev) = self.compare_prev.take() {
+                        self.compare_prev = self.current_image.clone();
+                        self.begin_adopt(prev, for_compare, old_scale);
+                    }
+                } else {
+                    self.compare_prev = self.current_image.clone();
+                    self.begin_adopt(image, for_compare, old_scale);
+                }
+            }
         }
     }
 
@@ -4773,6 +4912,20 @@ impl App {
                 log::info!("debug: parked on frame {frame}");
                 self.debug_stop_after = std::env::var_os("IMGVWR_DEBUG_PLAY_STOP").map(|_| frame);
             }
+            // Round-trip the sequence through comparator slot 1: save it, then
+            // recall it. A capture after the delay proves recall re-enters the
+            // player on the same frame rather than dropping to a still. One-shot:
+            // the recall triggers another finalize_adopt, so without the guard it
+            // would recurse forever.
+            if std::env::var_os("IMGVWR_DEBUG_SEQ_RECALL").is_some()
+                && self.playback.is_some()
+                && !self.debug_seq_recalled
+            {
+                self.debug_seq_recalled = true;
+                self.save_slot(1);
+                self.recall_slot(1, false);
+                log::info!("debug: saved + recalled the sequence via slot 1");
+            }
         }
     }
 
@@ -4970,10 +5123,10 @@ impl App {
             .slots
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| s.as_ref().map(|d| (i, d.path.as_path())))
+            .filter_map(|(i, s)| s.as_ref().map(|s| (i, s.label_path())))
             .collect();
         std::array::from_fn(|i| {
-            let path = self.slots[i].as_ref()?.path.as_path();
+            let path = self.slots[i].as_ref()?.label_path();
             let group: Vec<&Path> = saved
                 .iter()
                 .filter(|(_, q)| q.file_name() == path.file_name())

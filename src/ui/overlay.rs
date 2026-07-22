@@ -2943,8 +2943,8 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
         (
             "Compare",
             &[
-                ("Ctrl + 1–9", "Save to comparator slot"),
-                ("1–9 (top row)", "Recall slot (again = back)"),
+                ("Ctrl + 1–9", "Save image / sequence to a slot"),
+                ("1–9 (top row)", "Recall slot (sequences resume playing)"),
                 ("Alt + 1–9", "Difference vs that slot"),
                 ("L", "Lock zoom/pan across images"),
                 ("H", "This help"),

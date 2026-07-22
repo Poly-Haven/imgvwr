@@ -28,8 +28,9 @@ const RATE_WINDOW: usize = 24;
 /// turns red. Normal jitter must not flicker it.
 const RATE_TOLERANCE: f32 = 0.03;
 
-/// Frame rates offered in Settings.
-pub const FRAME_RATES: [f32; 7] = [23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 60.0];
+/// Built-in frame rates offered in the timeline's rate menu, on top of any the
+/// user adds (see [`crate::prefs::AppPreferences::custom_frame_rates`]).
+pub const FRAME_RATES: [f32; 8] = [23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 60.0, 120.0];
 
 /// What the clock wants to happen this instant.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

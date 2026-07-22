@@ -122,8 +122,6 @@ pub struct UiInputs {
     pub clip_margin: f32,
     /// Whether 32-bit-float images upload as 16-bit half (the VRAM-saving toggle).
     pub half_float_textures: bool,
-    /// Target playback frame rate (Settings dropdown).
-    pub playback_fps: f32,
     /// Share of physical RAM the sequence frame cache may use (Settings slider).
     pub playback_cache_percent: u32,
     /// Total physical memory in GB, so the cache slider can show what its
@@ -174,6 +172,13 @@ pub struct PlaybackInfo {
     /// Whether the achieved rate is meaningfully short of the target — the
     /// readout turns red.
     pub behind: bool,
+    /// True when the source carries its own per-frame timing (an animated GIF /
+    /// WebP / APNG). The configured target rate does not apply, so the rate
+    /// readout is a plain label rather than the rate-picker menu.
+    pub source_timed: bool,
+    /// User-added frame rates offered in the rate menu alongside the built-ins,
+    /// each removable with its ✕. From `prefs.custom_frame_rates`.
+    pub custom_fps: Vec<f32>,
     /// One entry per slot, in frame order, for the cache bar. Shared rather than
     /// copied, and rebuilt only when a slot state actually changes.
     pub states: std::sync::Arc<Vec<crate::playback::SlotState>>,
@@ -507,6 +512,9 @@ pub struct UiState {
     pub show_help: bool,
     /// Whether the settings dialog is open.
     pub show_settings: bool,
+    /// The in-progress text of the timeline rate menu's "Custom" entry, kept
+    /// across frames while the menu is open so typing isn't lost each pass.
+    pub fps_entry: String,
     /// Whether the "set as default viewer" confirmation is showing.
     pub confirm_default: bool,
     /// Whether the Delete-key "delete this file?" confirmation is showing.
@@ -587,8 +595,13 @@ pub enum UiAction {
     PlaybackStop,
     /// Move the playhead to this frame (a click or drag on the timeline).
     PlaybackSeek(i64),
-    /// Set the target playback frame rate.
+    /// Set the target playback frame rate (a rate chosen from the timeline menu).
     SetPlaybackFps(f32),
+    /// Add a user rate to the timeline menu (and select it). Ignored if it is
+    /// already offered.
+    AddCustomFps(f32),
+    /// Remove a user-added rate from the timeline menu.
+    ForgetCustomFps(f32),
     /// Set the sequence frame cache's share of physical RAM, as a percentage.
     SetPlaybackCachePercent(u32),
     /// Open the settings dialog (titlebar gear button).

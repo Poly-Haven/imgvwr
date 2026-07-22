@@ -596,7 +596,9 @@ fn bottom_panel(
                 // against the image it measures) and the adjustment sliders.
                 // Only present while playing back a sequence.
                 let transport_hot = match &inputs.playback {
-                    Some(pb) => super::timeline::transport_row(ui, pb, actions, screen.width()),
+                    Some(pb) => {
+                        super::timeline::transport_row(ui, pb, state, actions, screen.width())
+                    }
                     None => false,
                 };
                 let sliders = egui::Frame::NONE
@@ -994,10 +996,6 @@ fn settings_dialog(
                             .spacing([16.0, 10.0])
                             .min_col_width(170.0)
                             .show(ui, |ui| {
-                                ui.label("Frame rate");
-                                playback_fps_combo(ui, inputs, actions);
-                                ui.end_row();
-
                                 ui.label("Frame cache").on_hover_text(
                                     "Share of system memory the sequence frame cache may \
                                          use. A sequence that does not fit still plays — it \
@@ -1058,31 +1056,6 @@ fn settings_dialog(
                         ui.add_space(6.0);
                     });
             });
-        });
-}
-
-/// The target playback frame rate. The default comes from the OS region — 25 in
-/// PAL territories, 24 everywhere else — which is as much precision as the
-/// locale gives us; this dropdown is the real answer for anyone who needs 30 or
-/// 48. It does not apply to animated GIF / APNG / WebP, whose per-frame delays
-/// are recorded in the file.
-fn playback_fps_combo(ui: &mut egui::Ui, inputs: &UiInputs, actions: &mut Vec<UiAction>) {
-    let label = |fps: f32| {
-        if (fps - fps.round()).abs() < 0.001 {
-            format!("{fps:.0} fps")
-        } else {
-            format!("{fps:.3} fps")
-        }
-    };
-    egui::ComboBox::from_id_salt("playback_fps")
-        .selected_text(label(inputs.playback_fps))
-        .show_ui(ui, |ui| {
-            for fps in crate::playback::transport::FRAME_RATES {
-                let selected = (fps - inputs.playback_fps).abs() < 0.001;
-                if clickable(ui.selectable_label(selected, label(fps))).clicked() {
-                    actions.push(UiAction::SetPlaybackFps(fps));
-                }
-            }
         });
 }
 
@@ -2930,6 +2903,7 @@ fn help_dialog(ctx: &egui::Context, inputs: &UiInputs, actions: &mut Vec<UiActio
                 ("Click timeline", "Jump to that frame"),
                 ("Drag timeline", "Scrub (keeps playing)"),
                 ("Blue / red bar", "Frames cached / missing"),
+                ("fps readout", "Click to pick the rate (or add one)"),
                 ("fps in red", "Running short of the target rate"),
             ],
         ),

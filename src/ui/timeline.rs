@@ -7,7 +7,7 @@
 //! of the bottom bar, not a second panel.
 
 use super::colors::{panel_bg, ACCENT, CHANNEL_R};
-use super::{clickable, PlaybackInfo, UiAction};
+use super::{clickable, PlaybackInfo, UiAction, UiState};
 use crate::playback::SlotState;
 
 /// Height of the transport row (points).
@@ -111,6 +111,7 @@ pub fn x_of_frame(frame: i64, track: egui::Rect, first: i64, last: i64) -> f32 {
 pub fn transport_row(
     ui: &mut egui::Ui,
     pb: &PlaybackInfo,
+    state: &mut UiState,
     actions: &mut Vec<UiAction>,
     width: f32,
 ) -> bool {
@@ -152,22 +153,175 @@ pub fn transport_row(
         hot |= scrub(ui, pb, actions, track);
     }
 
-    // ---- achieved rate -----------------------------------------------------
-    let fps = pb.achieved_fps.unwrap_or(pb.target_fps);
-    let color = if pb.behind {
-        CHANNEL_R
-    } else {
-        egui::Color32::from_gray(170)
-    };
-    ui.painter().text(
-        egui::pos2(row.right() - PAD, btn_y),
-        egui::Align2::RIGHT_CENTER,
-        format!("{fps:.1} fps"),
-        egui::FontId::proportional(12.0),
-        color,
-    );
+    // ---- rate readout / picker ---------------------------------------------
+    hot |= rate_picker(ui, pb, state, actions, row, btn_y);
 
     hot
+}
+
+/// The frame-rate readout at the right of the transport row — and the rate
+/// picker. Playing, it shows the rate actually *achieved* (rounded to a whole
+/// number, red when short of the target); paused, it shows the selected target.
+/// Clicking it opens a menu of the built-in and custom rates with an inline
+/// field to add a new one — even while playing. An animation carries its own
+/// per-frame timing, so there the target has no meaning and it is a plain label.
+/// Returns whether the pointer is interacting (or the menu is open), so the
+/// caller keeps the bottom panel revealed.
+fn rate_picker(
+    ui: &mut egui::Ui,
+    pb: &PlaybackInfo,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+    row: egui::Rect,
+    btn_y: f32,
+) -> bool {
+    // Playing → the measured rate, rounded; paused → the selected target.
+    let (text, color) = if pb.playing {
+        let fps = pb.achieved_fps.unwrap_or(pb.target_fps);
+        let color = if pb.behind {
+            CHANNEL_R
+        } else {
+            egui::Color32::from_gray(170)
+        };
+        (format!("{} fps", fps.round() as i64), color)
+    } else {
+        (
+            format!("{} fps", fmt_fps(pb.target_fps)),
+            egui::Color32::from_gray(170),
+        )
+    };
+    let font = egui::FontId::proportional(12.0);
+    let anchor = egui::pos2(row.right() - PAD, btn_y);
+
+    // An animation's timing is fixed by the file, so there is nothing to pick.
+    if pb.source_timed {
+        ui.painter()
+            .text(anchor, egui::Align2::RIGHT_CENTER, text, font, color);
+        return false;
+    }
+
+    // A click target over the right gutter, drawn as the same right-aligned text
+    // the plain readout used, brightened on hover to read as clickable.
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(row.right() - PAD - FPS_GUTTER, row.top()),
+        egui::pos2(row.right() - PAD, row.bottom()),
+    );
+    let resp = ui.interact(rect, ui.id().with("fps"), egui::Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let text_color = if resp.hovered() {
+        egui::Color32::WHITE
+    } else {
+        color
+    };
+    ui.painter()
+        .text(anchor, egui::Align2::RIGHT_CENTER, &text, font, text_color);
+
+    let popup_id = ui.id().with("fps_menu");
+    if resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup_id));
+    }
+    fps_menu(ui, pb, state, actions, &resp, popup_id);
+    resp.hovered() || ui.memory(|m| m.is_popup_open(popup_id))
+}
+
+/// The rate menu, opened above the readout: the built-in rates, then any custom
+/// rates (each with a ✕ to forget), then an inline "Add" field. Picking a rate
+/// closes the menu; forgetting one or typing in the field keeps it open
+/// (`CloseOnClickOutside`), so the menu isn't dismissed mid-edit.
+fn fps_menu(
+    ui: &mut egui::Ui,
+    pb: &PlaybackInfo,
+    state: &mut UiState,
+    actions: &mut Vec<UiAction>,
+    trigger: &egui::Response,
+    popup_id: egui::Id,
+) {
+    egui::popup_above_or_below_widget(
+        ui,
+        popup_id,
+        trigger,
+        egui::AboveOrBelow::Above,
+        egui::PopupCloseBehavior::CloseOnClickOutside,
+        |ui| {
+            ui.set_min_width(132.0);
+            let is_selected = |fps: f32| (fps - pb.target_fps).abs() < 0.001;
+
+            for fps in crate::playback::transport::FRAME_RATES {
+                if clickable(ui.selectable_label(is_selected(fps), fps_label(fps))).clicked() {
+                    actions.push(UiAction::SetPlaybackFps(fps));
+                    ui.memory_mut(|m| m.close_popup());
+                }
+            }
+
+            // Custom rates, sorted, each removable with its ✕.
+            let mut customs = pb.custom_fps.clone();
+            customs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            if !customs.is_empty() {
+                ui.separator();
+            }
+            for fps in customs {
+                let (picked, forget) = egui::Sides::new().show(
+                    ui,
+                    |ui| clickable(ui.selectable_label(is_selected(fps), fps_label(fps))).clicked(),
+                    |ui| {
+                        clickable(ui.small_button("✕"))
+                            .on_hover_text("Forget this rate")
+                            .clicked()
+                    },
+                );
+                if picked {
+                    actions.push(UiAction::SetPlaybackFps(fps));
+                    ui.memory_mut(|m| m.close_popup());
+                }
+                if forget {
+                    actions.push(UiAction::ForgetCustomFps(fps));
+                }
+            }
+
+            // Inline "add a custom rate": type a number, Enter or ＋ to add it.
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Add:");
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut state.fps_entry)
+                        .desired_width(46.0)
+                        .hint_text("fps"),
+                );
+                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let added = clickable(ui.button("＋")).clicked();
+                if entered || added {
+                    if let Some(fps) = parse_fps(&state.fps_entry) {
+                        actions.push(UiAction::AddCustomFps(fps));
+                        state.fps_entry.clear();
+                    }
+                }
+            });
+        },
+    );
+}
+
+/// A rate as a menu label: "24 fps", "23.976 fps".
+fn fps_label(fps: f32) -> String {
+    format!("{} fps", fmt_fps(fps))
+}
+
+/// A rate without trailing zeros: 24.0 → "24", 23.976 → "23.976", 29.97 → "29.97".
+fn fmt_fps(fps: f32) -> String {
+    if (fps - fps.round()).abs() < 0.001 {
+        format!("{}", fps.round() as i64)
+    } else {
+        let s = format!("{fps:.3}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// Parse a user-typed rate. Accepts a bare number and rejects non-positive or
+/// absurd values, so a typo can't set an unusable rate.
+fn parse_fps(text: &str) -> Option<f32> {
+    let fps = text.trim().parse::<f32>().ok()?;
+    (fps.is_finite() && fps > 0.0 && fps <= 1000.0).then_some(fps)
 }
 
 fn transport_button(
@@ -327,6 +481,31 @@ fn scrub(
 mod tests {
     use super::*;
 
+    /// Rates read the way people say them: whole numbers have no decimals, and
+    /// the NTSC fractionals keep exactly the digits that distinguish them.
+    #[test]
+    fn rates_format_without_trailing_zeros() {
+        assert_eq!(fmt_fps(24.0), "24");
+        assert_eq!(fmt_fps(120.0), "120");
+        assert_eq!(fmt_fps(23.976), "23.976");
+        assert_eq!(fmt_fps(29.97), "29.97");
+        assert_eq!(fmt_fps(30.0), "30");
+        assert_eq!(fps_label(60.0), "60 fps");
+    }
+
+    /// The custom-rate field takes a bare number and refuses anything that would
+    /// set an unusable rate — blank, zero, negative, non-numeric, or absurd.
+    #[test]
+    fn custom_rate_parsing_rejects_junk() {
+        assert_eq!(parse_fps("48"), Some(48.0));
+        assert_eq!(parse_fps("  90.5 "), Some(90.5));
+        assert_eq!(parse_fps(""), None);
+        assert_eq!(parse_fps("0"), None);
+        assert_eq!(parse_fps("-5"), None);
+        assert_eq!(parse_fps("fast"), None);
+        assert_eq!(parse_fps("100000"), None, "absurd rates are rejected");
+    }
+
     fn track() -> egui::Rect {
         egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(300.0, 12.0))
     }
@@ -340,6 +519,8 @@ mod tests {
             target_fps: 24.0,
             achieved_fps: None,
             behind: false,
+            source_timed: false,
+            custom_fps: Vec::new(),
             states: Default::default(),
         }
     }
@@ -536,5 +717,98 @@ mod tests {
                 assert!(covered.iter().all(|&c| c >= 1), "n={n} cols={cols}");
             }
         }
+    }
+
+    /// Drive the rate readout through a headless `Context`, one frame per event
+    /// batch, returning what `rate_picker` reported as "hot" (which the caller
+    /// folds into keeping the bottom panel revealed) each frame. The rate menu
+    /// lives above the bottom panel, so the wiring worth guarding is that opening
+    /// it latches the panel open even once the pointer leaves the readout for the
+    /// menu — the same "keep the panel up for the whole gesture" contract the
+    /// scrubber relies on.
+    fn drive_picker(pb: &PlaybackInfo, frames: Vec<Vec<egui::Event>>) -> Vec<bool> {
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        let mut actions = Vec::new();
+        let mut hots = Vec::new();
+        let row = egui::Rect::from_min_size(egui::pos2(500.0, 500.0), egui::vec2(280.0, 36.0));
+        for (i, events) in frames.into_iter().enumerate() {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                time: Some(i as f64 * 0.1),
+                events,
+                ..Default::default()
+            };
+            let mut hot = false;
+            let _ = ctx.run(raw, |ctx| {
+                egui::Area::new(egui::Id::new("picker_test"))
+                    .fixed_pos(row.min)
+                    .show(ctx, |ui| {
+                        let _ = ui.allocate_exact_size(row.size(), egui::Sense::hover());
+                        hot = rate_picker(ui, pb, &mut state, &mut actions, row, row.center().y);
+                    });
+            });
+            hots.push(hot);
+        }
+        hots
+    }
+
+    /// Clicking the fps readout opens the rate menu, and while it is open the
+    /// readout reports "hot" even when the pointer has moved off it (into the
+    /// menu) — so the bottom panel stays revealed. Clicking again closes it, and
+    /// then the readout goes cold once the pointer leaves.
+    #[test]
+    fn opening_the_rate_menu_latches_the_panel_open() {
+        // Paused (so the readout is the active picker, not a plain label) and not
+        // source-timed.
+        let pb = info(1, 100, 50, false);
+        let trigger = egui::pos2(735.0, 518.0); // inside the right-gutter click target
+        let away = egui::pos2(100.0, 100.0);
+        let moved = egui::Event::PointerMoved;
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+
+        let hots = drive_picker(
+            &pb,
+            vec![
+                // Two hover frames: a press hit-tests against the previous frame.
+                vec![moved(trigger)],
+                vec![moved(trigger)],
+                vec![moved(trigger), button(trigger, true)],
+                vec![button(trigger, false)], // click → menu opens
+                vec![moved(away)],            // pointer leaves the readout for the menu
+                vec![moved(trigger), button(trigger, true)],
+                vec![button(trigger, false)], // click again → menu closes
+                vec![moved(away)],            // pointer off the readout, menu closed
+            ],
+        );
+
+        assert!(
+            hots[4],
+            "with the menu open, the readout stays hot off-cursor so the panel holds"
+        );
+        assert!(
+            !hots[7],
+            "once the menu is closed and the pointer has left, the readout goes cold"
+        );
+    }
+
+    /// An animation's timing is fixed by the file, so the readout is a plain
+    /// label with no menu — it never reports hot, whatever the pointer does.
+    #[test]
+    fn a_source_timed_readout_is_not_a_picker() {
+        let mut pb = info(0, 30, 10, true);
+        pb.source_timed = true;
+        let trigger = egui::pos2(735.0, 518.0);
+        let moved = egui::Event::PointerMoved;
+        let hots = drive_picker(&pb, vec![vec![moved(trigger)], vec![moved(trigger)]]);
+        assert!(hots.iter().all(|&h| !h), "a plain label is never interactive");
     }
 }

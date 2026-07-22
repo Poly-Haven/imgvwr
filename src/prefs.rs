@@ -125,6 +125,12 @@ pub struct AppPreferences {
     /// Share of physical RAM the sequence frame cache may use, as a percentage.
     #[serde(default = "default_playback_cache_percent")]
     pub playback_cache_percent: u32,
+    /// User-added playback frame rates, offered in the timeline's rate menu
+    /// alongside the built-in ones (see [`crate::playback::transport::FRAME_RATES`]).
+    /// Added via the menu's "Custom" entry and removed with its ✕; persisted so
+    /// they follow the user across sessions.
+    #[serde(default)]
+    pub custom_frame_rates: Vec<f32>,
     /// Internal (not user-facing): unix-seconds of the last successful update
     /// check, so the daily check throttles. `0` = never checked.
     #[serde(default)]
@@ -188,6 +194,7 @@ impl Default for AppPreferences {
             histogram_scale: HistogramScale::default(),
             playback_fps: default_playback_fps(),
             playback_cache_percent: default_playback_cache_percent(),
+            custom_frame_rates: Vec::new(),
             last_update_check: 0,
             latest_known_version: String::new(),
         }

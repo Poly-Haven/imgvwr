@@ -4164,6 +4164,12 @@ impl App {
     /// The image↔screen mapping the rulers need. In 2D it mirrors the shader's UV
     /// mapping so ticks land on real image pixels; in panorama it carries the
     /// sphere projection so the rulers can read out longitude/latitude degrees.
+    /// Whether any guide is currently drawn (the visibility toggle is on and at
+    /// least one guide exists).
+    fn has_visible_guides(&self) -> bool {
+        self.guides_visible && !self.guides.is_empty()
+    }
+
     fn ruler_info(&self) -> Option<crate::ui::RulerInfo> {
         // The mapping is needed whenever either ruler might show; each ruler's
         // own slide (bottom panel / left ruler) gates its actual rendering.
@@ -4175,7 +4181,7 @@ impl App {
         // both (this drops the ruler strips but not the transport row, which is
         // its own part of the bottom panel) unless the user is actively working
         // with guides, which still need a ruler to pull from and adjust against.
-        if self.playback_active() && !(self.guides_visible && !self.guides.is_empty()) {
+        if self.playback_active() && !self.has_visible_guides() {
             return None;
         }
         let (vw, vh) = self.viewport();
@@ -4800,6 +4806,8 @@ impl App {
             target_fps: pb.target_fps(),
             achieved_fps: pb.achieved_fps(),
             behind: pb.behind(),
+            source_timed: pb.source_timed(),
+            custom_fps: self.prefs.custom_frame_rates.clone(),
             states: self.playback_states.clone().unwrap_or_default(),
         })
     }
@@ -4949,7 +4957,6 @@ impl App {
             minimap: self.minimap_info(),
             color_pick: self.color_pick_last,
             playback: self.playback_info(),
-            playback_fps: self.prefs.playback_fps,
             playback_cache_percent: self.prefs.playback_cache_percent,
             total_memory_gb: cache::total_physical_memory() as f32 / (1024.0 * 1024.0 * 1024.0),
         }
@@ -5305,11 +5312,24 @@ impl App {
                 }
             }
             UiAction::SetPlaybackFps(fps) => {
-                self.prefs.playback_fps = fps;
-                self.prefs.save();
-                if let Some(pb) = self.playback.as_mut() {
-                    pb.set_target_fps(fps);
+                self.set_playback_fps(fps);
+            }
+            UiAction::AddCustomFps(fps) => {
+                // Store the new rate for future sessions unless it is already
+                // offered (a built-in, or one already added), then select it —
+                // matching the timeline menu, whose custom list dedups the same way.
+                let known = crate::playback::transport::FRAME_RATES
+                    .iter()
+                    .chain(self.prefs.custom_frame_rates.iter())
+                    .any(|&r| (r - fps).abs() < 0.001);
+                if !known {
+                    self.prefs.custom_frame_rates.push(fps);
                 }
+                self.set_playback_fps(fps);
+            }
+            UiAction::ForgetCustomFps(fps) => {
+                self.prefs.custom_frame_rates.retain(|&r| (r - fps).abs() >= 0.001);
+                self.prefs.save();
                 self.request_redraw();
             }
             UiAction::SetPlaybackCachePercent(pct) => {
@@ -5489,6 +5509,17 @@ impl App {
             return mb * 1024 * 1024;
         }
         cache::budget_from_percent(self.prefs.playback_cache_percent)
+    }
+
+    /// Select the target playback rate: persist it and apply it live to the
+    /// running transport. Shared by the menu's built-in rates and its custom ones.
+    fn set_playback_fps(&mut self, fps: f32) {
+        self.prefs.playback_fps = fps;
+        self.prefs.save();
+        if let Some(pb) = self.playback.as_mut() {
+            pb.set_target_fps(fps);
+        }
+        self.request_redraw();
     }
 
     /// `Space`: enter playback from the current file, or pause/resume once in.

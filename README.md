@@ -153,7 +153,7 @@ revealed instead of auto-hiding.
 | Click the timeline | Jump to that frame |
 | Drag the timeline | Scrub; if it was playing it keeps playing from the new position |
 | Cache bar | The 4px strip under the timeline: **blue** = the frame is decoded and in memory, **red** = missing from disk or wouldn't decode. A single red frame in a cached run is always drawn, however long the sequence |
-| fps readout | The rate actually achieved. It turns **red** when playback is running short of the target — usually because frames are decoding slower than they're wanted |
+| fps readout | While playing, the rate actually achieved (rounded), turning **red** when playback is running short of the target — usually because frames are decoding slower than they're wanted; paused, the selected target rate. Click it to open a menu and pick the playback rate — even while playing. Alongside the common rates (24, 25, 30, 48, 60, 120, the NTSC fractionals) you can type your own in the **Add** field; it's remembered for future sessions and removed again with its **✕** |
 
 Sequences are found from the file you have open: the name must end in a frame
 number (`shot_0047.png`, `render.1001.exr`, `frame12.jpg`), and every sibling
@@ -170,8 +170,8 @@ finished.
 
 Everything else keeps working while it plays: exposure, the view transform,
 panorama look-around, guides, the colour picker, comparator slots, the
-histogram. Set the target frame rate and the frame cache's share of memory in
-*Settings → Playback*.
+histogram. The target frame rate is set from the timeline's fps menu (see the
+controls above); the frame cache's share of memory is in *Settings → Playback*.
 
 ### Comparator & help
 

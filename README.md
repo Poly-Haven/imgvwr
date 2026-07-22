@@ -199,8 +199,10 @@ just that frame — recalling it puts you in the player. **Switching slots while
 playing never stops playback**: the new sequence keeps playing from the same
 frame number, so you can flip between two renders of a shot (press `2`, `3`, … to
 jump to a slot; press the current slot's number again to flip back to the one you
-came from) and watch them at exactly the same point. Recalling a sequence slot
-while paused, or from a still, stays paused on the synced frame.
+came from) and watch them at exactly the same point. The last few sequences you
+switch away from keep their decoded frames in memory, so flipping back and forth
+is instant rather than re-decoding each time. Recalling a sequence slot while
+paused, or from a still, stays paused on the synced frame.
 
 `Alt`+`N` against a sequence slot while you're playing one **diffs the two
 sequences live**: both play in sync on the same frame number and every frame

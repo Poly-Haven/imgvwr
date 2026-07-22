@@ -46,8 +46,9 @@
 //!     capture must be black) or `=<frame path>` (diff against that sequence, to
 //!     verify the live two-sequences diff)
 //!   * `IMGVWR_DEBUG_SEQ_SWITCH` = `<frame path>` (save that sequence to slot 2
-//!     and, mid-playback, switch to it — the log must report *playing* on the
-//!     same frame, proving the switch keeps playing and syncs the frame)
+//!     and, mid-playback, switch to it and back — the log must report *playing*
+//!     on the same frame each way, and "reusing parked cache" on the return,
+//!     proving the switch keeps playing, syncs the frame, and doesn't re-decode)
 //!
 //! Two more, not `_DEBUG_` because they are useful in release builds too:
 //! `IMGVWR_PLAYBACK_WORKERS` (decode threads) and `IMGVWR_PLAYBACK_RING_BYTES`
@@ -327,6 +328,48 @@ struct DiffPlayback {
     /// The frame number currently in the diff texture, so it is re-uploaded only
     /// when the playhead moves to a different frame.
     uploaded: Option<i64>,
+}
+
+/// The most-recently played sequences, kept alive with their decoded frames still
+/// in RAM after you switch away, so switching *back* is instant instead of
+/// re-decoding. A small bounded LRU keyed by sequence identity — bounded so a run
+/// of switches can't grow memory without limit. Left behind entirely on Stop or
+/// when navigating out of the sequences.
+#[derive(Default)]
+struct ParkedSources {
+    /// Least-recently parked first, most-recent last.
+    entries: Vec<(PathBuf, Sequence, FrameSource)>,
+}
+
+/// How many switched-away-from sequences keep their caches. One covers the A↔B
+/// toggle; a few more let a short cycle through several sequences stay instant.
+const MAX_PARKED_SOURCES: usize = 3;
+
+impl ParkedSources {
+    /// Park `seq`/`frames` under `id`, replacing any existing entry for it and
+    /// evicting (and quieting) the least-recently parked beyond the cap.
+    fn park(&mut self, id: PathBuf, seq: Sequence, frames: FrameSource) {
+        self.entries.retain(|(k, _, _)| *k != id);
+        self.entries.push((id, seq, frames));
+        while self.entries.len() > MAX_PARKED_SOURCES {
+            let (_, _, frames) = self.entries.remove(0);
+            frames.cancel_wakeups();
+        }
+    }
+
+    /// Take back a parked sequence + its cache by identity, if we kept it.
+    fn take(&mut self, id: &Path) -> Option<(Sequence, FrameSource)> {
+        let pos = self.entries.iter().position(|(k, _, _)| k == id)?;
+        let (_, seq, frames) = self.entries.remove(pos);
+        Some((seq, frames))
+    }
+
+    /// Drop every parked cache (leaving the sequences behind).
+    fn clear(&mut self) {
+        for (_, _, frames) in self.entries.drain(..) {
+            frames.cancel_wakeups();
+        }
+    }
 }
 
 /// Colour-pick data computable without a GPU readback (see
@@ -788,9 +831,10 @@ pub struct App {
     /// One-shot guard for `IMGVWR_DEBUG_SEQ_DIFF` (set up the live diff once).
     #[cfg(debug_assertions)]
     debug_seq_diffed: bool,
-    /// One-shot guard for `IMGVWR_DEBUG_SEQ_SWITCH` (switch slots once).
+    /// Step counter for `IMGVWR_DEBUG_SEQ_SWITCH`: 0 = switch to slot 2, 1 =
+    /// switch back, so a capture proves the round-trip reuses the parked cache.
     #[cfg(debug_assertions)]
-    debug_seq_switched: bool,
+    debug_switch_step: u8,
     /// The cache bar's slot states, refreshed in `render` before the immutable
     /// UI snapshot is taken (`ui_inputs` is `&self`, and rebuilding this needs
     /// `&mut`). Shared by `Arc`, so a frame on which nothing changed costs a
@@ -817,6 +861,9 @@ pub struct App {
     /// playing one: sequence B, following the primary playhead. `None` for the
     /// still (precomputed) diff, which is what runs when not in playback.
     diff_playback: Option<DiffPlayback>,
+    /// Caches of sequences switched away from during playback, kept so switching
+    /// back is instant (see [`ParkedSources`]).
+    parked_sources: ParkedSources,
 
     // F2 metadata box hover-reveal (near the top-right corner).
     metadata_hover: bool,
@@ -984,7 +1031,7 @@ impl App {
             #[cfg(debug_assertions)]
             debug_seq_diffed: false,
             #[cfg(debug_assertions)]
-            debug_seq_switched: false,
+            debug_switch_step: 0,
             playback_states: None,
             slots: std::array::from_fn(|_| None),
             pending_seq_recall: None,
@@ -993,6 +1040,7 @@ impl App {
             active_slot: None,
             diff_slot: None,
             diff_playback: None,
+            parked_sources: ParkedSources::default(),
             metadata_hover: false,
             metadata_hide_deadline: None,
             metadata_menu_grace: None,
@@ -2063,6 +2111,10 @@ impl App {
                     pb.frame(),
                     pb.seq.display_name(),
                 );
+            } else {
+                // The switch target wasn't a sequence — we've dropped to a still,
+                // leaving the sequences behind, so release any parked caches.
+                self.parked_sources.clear();
             }
             self.sync_diff_with_playback();
         }
@@ -5155,13 +5207,15 @@ impl App {
                     log::info!("debug: live diff vs slot 1");
                 }
             }
-            // Switch to a second sequence mid-playback: save it to slot 2, mark
-            // ourselves playing, then recall slot 2. The "slot recall:" log line
-            // must report *playing* on the same frame, and a capture must show the
-            // second sequence's pixels — proving the switch keeps playing and syncs.
+            // Round-trip between two sequences mid-playback. Step 0: save the
+            // second sequence to slot 2 and switch to it. Step 1 (on its finalize):
+            // switch back. The logs must show "parked cache for" on each leg and
+            // "reusing parked cache for" on the return — proving switching back
+            // reuses the parked frames instead of re-decoding — and each "slot
+            // recall:" line must report *playing* on the same frame.
             if let Some(bpath) = std::env::var_os("IMGVWR_DEBUG_SEQ_SWITCH") {
-                if self.playback.is_some() && !self.debug_seq_switched {
-                    self.debug_seq_switched = true;
+                if self.playback.is_some() && self.debug_switch_step == 0 {
+                    self.debug_switch_step = 1;
                     let b = std::path::PathBuf::from(&bpath);
                     if let Ok(img) = load_image(
                         &b,
@@ -5181,6 +5235,15 @@ impl App {
                     }
                     self.recall_slot(2, true);
                     log::info!("debug: switched to slot 2 during playback");
+                } else if self.playback.is_some() && self.debug_switch_step == 1 {
+                    self.debug_switch_step = 2;
+                    // Toggle back to the first sequence — its cache should be
+                    // parked, so this must log "reusing parked cache".
+                    if let Some(pb) = self.playback.as_mut() {
+                        pb.set_playing(true);
+                    }
+                    self.recall_slot(2, true);
+                    log::info!("debug: switched back to the first sequence");
                 }
             }
         }
@@ -6036,14 +6099,26 @@ impl App {
                 let Some(frame) = Sequence::frame_of(&path) else {
                     return;
                 };
-                let proxy = self.proxy.clone();
-                let source = FrameSource::Files(Box::new(FrameCache::new(
-                    self.playback_cache_budget(),
-                    cache::default_worker_count(),
-                    Arc::new(move || {
-                        let _ = proxy.send_event(UserEvent::FrameDecoded);
-                    }),
-                )));
+                // Reuse the cache we parked when we switched away from this
+                // sequence — its frames are still in RAM, so switching back skips
+                // re-decoding entirely — else build a fresh one.
+                let (seq, source) = match self.parked_sources.take(&seq.identity()) {
+                    Some((seq, source)) => {
+                        log::info!("reusing parked cache for {}", seq.display_name());
+                        (seq, source)
+                    }
+                    None => {
+                        let proxy = self.proxy.clone();
+                        let source = FrameSource::Files(Box::new(FrameCache::new(
+                            self.playback_cache_budget(),
+                            cache::default_worker_count(),
+                            Arc::new(move || {
+                                let _ = proxy.send_event(UserEvent::FrameDecoded);
+                            }),
+                        )));
+                        (seq, source)
+                    }
+                };
                 (seq, source, frame)
             }
         };
@@ -6121,13 +6196,15 @@ impl App {
         let Some(pb) = self.playback.take() else {
             return;
         };
-        // A live two-sequences diff has no primary sequence to compare against
-        // once the player is gone — end it (and free B's decode pool).
+        // Whether this is a slot switch (which parks the outgoing cache and keeps
+        // the toggle-back target) rather than a real leave.
+        let switching = self.pending_seq_recall.is_some();
+        // A live two-sequences diff has no primary to compare against once the
+        // player is gone — end it (and free B's decode pool). It doesn't carry
+        // across a switch either: it was between the outgoing sequence and B.
         if self.diff_playback.is_some() {
             self.clear_diff();
         }
-        // The sequence-switch toggle-back target belongs to this playback session.
-        self.prev_playback_image = None;
         // Keep the frame actually on screen, not the playhead — a seek may have
         // moved the playhead onto a frame that has not decoded yet, and keeping
         // that one would leave a blank window.
@@ -6140,9 +6217,23 @@ impl App {
             })
             .flatten();
         let suspended_diff = pb.suspended_diff;
-        // Late results can no longer reach an event loop that may be gone.
-        pb.frames.cancel_wakeups();
-        drop(pb);
+        // A slot switch (`pending_seq_recall` is queued) parks the sequence we're
+        // leaving with its decoded frames still in RAM, so switching back is
+        // instant. Anything else — Stop, navigating out to a different image —
+        // drops it, clears the whole pool, and forgets the toggle-back target:
+        // we've left the sequences behind, so holding their caches would just
+        // waste memory.
+        if switching {
+            let id = pb.seq.identity();
+            log::info!("parked cache for {}", pb.seq.display_name());
+            self.parked_sources.park(id, pb.seq, pb.frames);
+        } else {
+            self.prev_playback_image = None;
+            self.parked_sources.clear();
+            // Late results can no longer reach an event loop that may be gone.
+            pb.frames.cancel_wakeups();
+            drop(pb);
+        }
         if let Some(gfx) = self.gfx.as_mut() {
             if !gfx.renderer.end_sequence(data.as_deref()) {
                 self.load_state =

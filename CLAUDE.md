@@ -205,6 +205,17 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
 - **Out-of-band adopts (slot recall, drop, open dialog) must bump `load_gen` and clear
   `nav_pending` before `begin_adopt`.** Otherwise a still-running nav decode's result passes
   `poll_loads`'s gen check and clobbers the recall.
+- **Switching sequences mid-playback re-enters through `begin_adopt`, whose `abandon_playback`
+  runs `leave_playback` — so any state the switch set beforehand that `leave_playback` also
+  touches gets clobbered mid-switch.** `switch_playback_slot` sets `prev_playback_image` (the
+  toggle-back target) and `pending_seq_recall`, then calls `begin_adopt`; `leave_playback` used to
+  null `prev_playback_image` unconditionally, wiping the toggle target before the re-enter could
+  read it. `leave_playback` distinguishes a switch (`pending_seq_recall.is_some()`) from a real
+  leave: on a switch it **parks** the outgoing `(seq, frames)` in `parked_sources` (so switching
+  back reuses the decoded frames instead of re-decoding — verified via `IMGVWR_DEBUG_SEQ_SWITCH`'s
+  "reusing parked cache" log) and keeps the toggle target; only a real Stop/nav clears them and
+  cancels wakeups. The parked pool is a small bounded LRU (`MAX_PARKED_SOURCES`) — it holds decoded
+  frames, so it can't be unbounded.
 - **`DragWindow` and `ToggleMaximize` must call `set_fullscreen(false)` first when fullscreen.**
   That's the only call that clears both winit's `Fullscreen(Borderless)` and `self.fullscreen`
   together. Skipping it leaves OS window state and app state disagreeing.

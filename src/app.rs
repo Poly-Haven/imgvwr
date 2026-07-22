@@ -5598,6 +5598,12 @@ impl App {
         // frame under the running playhead is exactly what §8 forbids, and the
         // dialog's Enter/button would otherwise still fire.
         self.ui_state.confirm_delete = false;
+        // Set the OS window title (taskbar / alt-tab) to the sequence name once,
+        // here — the per-frame path deliberately does NOT touch it, because
+        // `SetWindowText` at 24 fps flashes the native caption frame.
+        if let Some(gfx) = &self.gfx {
+            gfx.window.set_title(&format!("{name} · imgvwr"));
+        }
         // Finding a sequence is worth saying; an animated image starting to play
         // is what opening it has always done, so announcing it would be noise.
         let announce = !pb.seq.is_in_memory();
@@ -5659,6 +5665,9 @@ impl App {
         if let Some(data) = &data {
             self.current_image = Some(data.clone());
         }
+        // The OS title was frozen at the sequence name during playback (see
+        // `show_playback_frame`); restore it to the frame we stopped on.
+        self.update_window_title();
         // Back to the exact clipping overlay, and a fresh histogram for a graph
         // that is no longer chasing a moving image.
         self.clip_mask_dirty = true;
@@ -5708,7 +5717,13 @@ impl App {
             }
         }
         // An animated image's frames all share one file, so its name and path
-        // never change; a file sequence's do.
+        // never change; a file sequence's do. Update the *internal* name (the
+        // egui titlebar and metadata box track the current frame from it) — but
+        // NOT the OS window title: `SetWindowText` forces a native non-client
+        // caption repaint, and doing it 24 times a second flashes the GDI frame
+        // that the borderless window otherwise hides. The OS title is set once
+        // to the sequence name on entry (it only feeds the taskbar / alt-tab,
+        // which do not need to track every frame) and restored on exit.
         if !self
             .playback
             .as_ref()
@@ -5721,7 +5736,6 @@ impl App {
                 .unwrap_or_default();
             self.loaded_path = Some(data.path.clone());
             self.current_image = Some(data);
-            self.update_window_title();
         }
         if let Some(pb) = self.playback.as_mut() {
             pb.shown = Some(frame);

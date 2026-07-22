@@ -81,6 +81,12 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   Stripping them breaks snap/resize. The GDI frame flash on focus-change is suppressed by
   `suppress_nonclient_frame` (swallows `WM_NCPAINT`, forwards `WM_NCACTIVATE` with `lParam = -1`);
   `DWMWA_NCRENDERING_POLICY` is the DWM frame, not the GDI one — wrong lever.
+  **Corollary: don't call `window.set_title` on a hot path.** `SetWindowText`
+  forces a native non-client caption repaint that flashes the GDI frame through,
+  even with `suppress_nonclient_frame` active — sequence playback hit this by
+  updating the OS title per frame. The egui custom titlebar tracks state via
+  `file_info.name` (a plain egui redraw, no flash); the OS title only feeds the
+  taskbar/alt-tab, so set it rarely (playback sets it once on entry/exit).
 - **LibRaw must be built with OpenMP, or RAW loads are ~2.6× slower.** vcpkg's `libraw` port
   defaults to *no* OpenMP, and nothing warns you — the demosaic just runs single-threaded.
   `vcpkg.json` pins `libraw[openmp]`; classic-mode installs need `libraw[openmp]` explicitly.

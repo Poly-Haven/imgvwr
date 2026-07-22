@@ -6,7 +6,9 @@ use super::colors::{
     panel_bg, panel_bg_alpha, ACCENT, CHANNEL_B, CHANNEL_G, CHANNEL_R, GUIDE_ADD, GUIDE_HOVER,
     PANEL_ALPHA,
 };
-use super::{clickable, LevelsDrag, LevelsGrip, PanoProj, RulerInfo, UiAction, UiInputs, UiState};
+use super::{
+    clickable, icon_button, LevelsDrag, LevelsGrip, PanoProj, RulerInfo, UiAction, UiInputs, UiState,
+};
 
 /// Height of the borderless custom titlebar; the top strip is reserved for it so
 /// the slot flags / metadata box never sit under the window controls.
@@ -1815,7 +1817,10 @@ fn metadata_hud(
                                                 .color(egui::Color32::WHITE)
                                                 .size(12.0),
                                         );
-                                        if clickable(ui.small_button("×")).clicked() {
+                                        let x_icon = egui::include_image!(
+                                            "../../resources/icons/ui/x-lg.svg"
+                                        );
+                                        if icon_button(ui, x_icon, "Remove guide").clicked() {
                                             actions.push(UiAction::RemoveGuide(i));
                                         }
                                     });

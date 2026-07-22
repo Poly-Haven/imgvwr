@@ -47,8 +47,13 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   [`src/ui/overlay.rs`](src/ui/overlay.rs) `help_dialog`) **and** the README controls table.
 - Run clippy on **both** feature sets before declaring done:
   `cargo clippy --all-targets -- -D warnings` and the same with `--no-default-features`.
-- **UI icons: prefer the *filled* Bootstrap variant** (`*-fill.svg`). At titlebar/HUD sizes the
-  hairline outline strokes render muddy; filled glyphs stay crisp.
+- **UI icons come from `resources/icons`, never from a font character.** The UI font (Inter)
+  doesn't cover most symbols — `+`, `✕`, `✓`, arrows, etc. render as a tofu box (a missing-glyph
+  square). Any icon in a widget must be an SVG rendered through `ui::icon_button` (or
+  `egui::Image`/`Button::image` with `egui::include_image!("../../resources/icons/…")`), not a
+  `Button`/`label` with a glyph string. If the icon you need isn't in `resources/icons/ui`, add the
+  Bootstrap SVG for it. Prefer the *filled* Bootstrap variant (`*-fill.svg`): at titlebar/HUD sizes
+  the hairline outline strokes render muddy; filled glyphs stay crisp.
 - **Headless verification:** `IMGVWR_CAPTURE=out.png` renders one frame to a PNG; `IMGVWR_DEBUG_*`
   env vars (debug builds only) force state — e.g. `IMGVWR_DEBUG_ZOOM`, `IMGVWR_DEBUG_EXPOSURE`,
   `IMGVWR_DEBUG_PROJECTION=pano`, `IMGVWR_DEBUG_OVERLAY=settings|metadata|error|loading|hint|help`,

@@ -7,7 +7,7 @@
 //! of the bottom bar, not a second panel.
 
 use super::colors::{panel_bg, ACCENT, CHANNEL_R};
-use super::{clickable, PlaybackInfo, UiAction, UiState};
+use super::{clickable, icon_button, PlaybackInfo, UiAction, UiState};
 use crate::playback::SlotState;
 
 /// Height of the transport row (points).
@@ -262,14 +262,11 @@ fn fps_menu(
                 ui.separator();
             }
             for fps in customs {
+                let x_icon = egui::include_image!("../../resources/icons/ui/x-lg.svg");
                 let (picked, forget) = egui::Sides::new().show(
                     ui,
                     |ui| clickable(ui.selectable_label(is_selected(fps), fps_label(fps))).clicked(),
-                    |ui| {
-                        clickable(ui.small_button("✕"))
-                            .on_hover_text("Forget this rate")
-                            .clicked()
-                    },
+                    |ui| icon_button(ui, x_icon, "Forget this rate").clicked(),
                 );
                 if picked {
                     actions.push(UiAction::SetPlaybackFps(fps));
@@ -280,7 +277,7 @@ fn fps_menu(
                 }
             }
 
-            // Inline "add a custom rate": type a number, Enter or ＋ to add it.
+            // Inline "add a custom rate": type a number, Enter or + to add it.
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label("Add:");
@@ -290,7 +287,8 @@ fn fps_menu(
                         .hint_text("fps"),
                 );
                 let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let added = clickable(ui.button("＋")).clicked();
+                let plus_icon = egui::include_image!("../../resources/icons/ui/plus-lg.svg");
+                let added = icon_button(ui, plus_icon, "Add this rate").clicked();
                 if entered || added {
                     if let Some(fps) = parse_fps(&state.fps_entry) {
                         actions.push(UiAction::AddCustomFps(fps));

@@ -11,6 +11,21 @@ pub(crate) fn clickable(resp: egui::Response) -> egui::Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A small icon button. The glyph is always an SVG from `resources/icons`, never
+/// a font character: the UI font doesn't cover most symbols (`+`, `✕`, …) and
+/// renders a tofu box for the missing glyph, so icons must come from files.
+pub(crate) fn icon_button(
+    ui: &mut egui::Ui,
+    icon: egui::ImageSource<'static>,
+    tooltip: &str,
+) -> egui::Response {
+    let image = egui::Image::new(icon)
+        .tint(egui::Color32::from_gray(210))
+        .fit_to_exact_size(egui::vec2(11.0, 11.0));
+    let resp = ui.add(egui::Button::image(image).min_size(egui::vec2(22.0, 20.0)));
+    clickable(resp).on_hover_text(tooltip)
+}
+
 /// Build the whole overlay UI for a frame: toolbar + overlays.
 pub fn build(
     ctx: &egui::Context,

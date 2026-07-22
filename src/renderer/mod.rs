@@ -112,6 +112,10 @@ pub struct RenderParams {
     pub sharpness: bool,
     /// Show the absolute difference against the loaded comparator-slot image.
     pub diff: bool,
+    /// The diff texture holds sequence B's raw frame (not a precomputed diff), so
+    /// the shader subtracts it from the image live — the two-sequences comparison
+    /// while playing. Ignored unless `diff` is set.
+    pub diff_live: bool,
     /// Guide lines: `[image_coord (0..1), orientation (0=vertical/1=horizontal)]`.
     /// Capped at [`MAX_GUIDES`] (a full 1/32 grid on both axes = 62 lines).
     pub guides: [[f32; 2]; MAX_GUIDES],
@@ -174,6 +178,7 @@ impl Default for RenderParams {
             stretch: [1.0, 1.0],
             sharpness: false,
             diff: false,
+            diff_live: false,
             guides: [[0.0; 2]; MAX_GUIDES],
             guide_count: 0,
             guide_color: [1.0, 0.314, 0.314],
@@ -209,6 +214,7 @@ struct Uniforms {
     stretch: Option<glow::UniformLocation>,
     sharpness: Option<glow::UniformLocation>,
     diff: Option<glow::UniformLocation>,
+    diff_live: Option<glow::UniformLocation>,
     diff_image: Option<glow::UniformLocation>,
     guide_count: Option<glow::UniformLocation>,
     guides: Option<glow::UniformLocation>,
@@ -256,6 +262,7 @@ impl Uniforms {
             stretch: u("u_stretch"),
             sharpness: u("u_sharpness"),
             diff: u("u_diff"),
+            diff_live: u("u_diff_live"),
             diff_image: u("u_diff_image"),
             guide_count: u("u_guide_count"),
             guides: u("u_guides"),
@@ -331,6 +338,11 @@ pub struct Renderer {
     half_float: bool,
     /// Uploaded comparator-slot image for the difference checker (unit DIFF_UNIT).
     diff_texture: Option<glow::Texture>,
+    /// `(width, height, internal format)` of `diff_texture`, so the live sequence
+    /// diff can re-upload frame after frame into the same texture instead of
+    /// reallocating one every frame. `None` when there is no diff texture, or it
+    /// was set by the still-diff precompute path.
+    diff_spec: Option<(i32, i32, u32)>,
     /// Max-mipped per-channel clip mask for the clipping overlay (unit
     /// CLIP_MASK_UNIT); `None` for tiled images (overlay falls back to per-texel).
     clip_mask_texture: Option<glow::Texture>,
@@ -387,6 +399,7 @@ impl Renderer {
                 max_texture_size,
                 half_float: false,
                 diff_texture: None,
+                diff_spec: None,
                 clip_mask_texture: None,
                 post,
                 histogram,
@@ -409,6 +422,8 @@ impl Renderer {
             if let Some(t) = self.diff_texture.take() {
                 self.gl.delete_texture(t);
             }
+            // The still-diff precompute does not share the live-diff reuse path.
+            self.diff_spec = None;
             match data {
                 Some(d) => {
                     self.diff_texture =
@@ -417,6 +432,23 @@ impl Renderer {
                 }
                 None => true,
             }
+        }
+    }
+
+    /// Upload one frame of sequence B into the diff texture for the live
+    /// two-sequences comparison, reusing the existing texture when its size and
+    /// format are unchanged (only its pixels + mips are refreshed) so a
+    /// frame-per-tick upload never reallocates. Returns false if the frame is too
+    /// large to hold in a single (untiled) texture.
+    pub fn upload_diff_frame(&mut self, data: &ImageData) -> bool {
+        unsafe {
+            texture::refresh_diff_texture(
+                &self.gl,
+                &mut self.diff_texture,
+                &mut self.diff_spec,
+                data,
+                self.max_texture_size,
+            )
         }
     }
 
@@ -670,6 +702,7 @@ impl Renderer {
         unsafe {
             if let Some(t) = self.diff_texture.take() {
                 self.gl.delete_texture(t);
+                self.diff_spec = None;
                 freed += 1;
             }
             if let Some(t) = self.clip_mask_texture.take() {
@@ -927,6 +960,9 @@ impl Renderer {
             // Slot-difference image on its own unit (only meaningful when u_diff).
             let diffing = params.diff && self.diff_texture.is_some();
             gl.uniform_1_i32(u.diff.as_ref(), diffing as i32);
+            // Live mode: the diff texture is sequence B's raw frame, subtracted in
+            // the shader; otherwise it is a precomputed difference shown directly.
+            gl.uniform_1_i32(u.diff_live.as_ref(), (diffing && params.diff_live) as i32);
             gl.uniform_1_i32(u.diff_image.as_ref(), DIFF_UNIT as i32);
             if diffing {
                 gl.active_texture(glow::TEXTURE0 + DIFF_UNIT);
@@ -1165,6 +1201,7 @@ impl Renderer {
             // Every other review overlay is off; they would all bin themselves.
             sharpness: false,
             diff: false,
+            diff_live: false,
             clip_overlay: false,
             guide_count: 0,
             // Clarity is a screen-space pass over the final viewport, so it has

@@ -42,6 +42,9 @@
 //!   * `IMGVWR_DEBUG_SEQ_RECALL` = `1` (with a playback override: once playing,
 //!     save the sequence to comparator slot 1 and recall it, so a capture proves
 //!     recall re-enters the player on the same frame)
+//!   * `IMGVWR_DEBUG_SEQ_DIFF` = `1` (self-diff the sequence in slot 1 — a
+//!     capture must be black) or `=<frame path>` (diff against that sequence, to
+//!     verify the live two-sequences diff)
 //!
 //! Two more, not `_DEBUG_` because they are useful in release builds too:
 //! `IMGVWR_PLAYBACK_WORKERS` (decode threads) and `IMGVWR_PLAYBACK_RING_BYTES`
@@ -308,6 +311,19 @@ impl Slot {
 struct SeqRecall {
     want_frame: i64,
     want_playing: bool,
+}
+
+/// The second sequence in a live two-sequences diff (`Alt+N` against a sequence
+/// slot while playing one). It has no clock of its own — it follows the primary
+/// player's frame number, decoding sequence B into its own cache and uploading
+/// B's current frame to the diff texture, which the shader subtracts from the
+/// primary (A) live. See [`App::toggle_slot_diff`] / [`App::tick_diff_playback`].
+struct DiffPlayback {
+    seq: Sequence,
+    frames: FrameSource,
+    /// The frame number currently in the diff texture, so it is re-uploaded only
+    /// when the playhead moves to a different frame.
+    uploaded: Option<i64>,
 }
 
 /// Colour-pick data computable without a GPU readback (see
@@ -766,6 +782,9 @@ pub struct App {
     /// finalize_adopt (the recall it triggers would otherwise recurse forever).
     #[cfg(debug_assertions)]
     debug_seq_recalled: bool,
+    /// One-shot guard for `IMGVWR_DEBUG_SEQ_DIFF` (set up the live diff once).
+    #[cfg(debug_assertions)]
+    debug_seq_diffed: bool,
     /// The cache bar's slot states, refreshed in `render` before the immutable
     /// UI snapshot is taken (`ui_inputs` is `&self`, and rebuilding this needs
     /// `&mut`). Shared by `Arc`, so a frame on which nothing changed costs a
@@ -784,6 +803,10 @@ pub struct App {
     active_slot: Option<usize>,
     /// Slot being shown as a difference against the current image (Alt+N).
     diff_slot: Option<usize>,
+    /// The live two-sequences diff, when `diff_slot` names a sequence and we are
+    /// playing one: sequence B, following the primary playhead. `None` for the
+    /// still (precomputed) diff, which is what runs when not in playback.
+    diff_playback: Option<DiffPlayback>,
 
     // F2 metadata box hover-reveal (near the top-right corner).
     metadata_hover: bool,
@@ -948,12 +971,15 @@ impl App {
             debug_stop_after: None,
             #[cfg(debug_assertions)]
             debug_seq_recalled: false,
+            #[cfg(debug_assertions)]
+            debug_seq_diffed: false,
             playback_states: None,
             slots: std::array::from_fn(|_| None),
             pending_seq_recall: None,
             compare_prev: None,
             active_slot: None,
             diff_slot: None,
+            diff_playback: None,
             metadata_hover: false,
             metadata_hide_deadline: None,
             metadata_menu_grace: None,
@@ -1727,10 +1753,8 @@ impl App {
         self.abandon_playback();
         // Changing the displayed image (folder navigation or a comparator-slot
         // recall) ends any active slot-difference view.
-        if self.diff_slot.take().is_some() {
-            if let Some(gfx) = &mut self.gfx {
-                gfx.renderer.set_diff_image(None);
-            }
+        if self.diff_slot.is_some() {
+            self.clear_diff();
         }
         if !for_compare {
             log::info!(
@@ -2128,13 +2152,10 @@ impl App {
         let is_seq = matches!(slot, Slot::Sequence(_));
         self.slots[n - 1] = Some(slot);
         // Overwriting the slot currently being diffed against would otherwise leave
-        // a stale precomputed diff (vs the old slot content) on screen — turn it
-        // off so the comparison can't silently go wrong.
+        // a stale diff (vs the old slot content) on screen — turn it off so the
+        // comparison can't silently go wrong.
         if self.diff_slot == Some(n - 1) {
-            self.diff_slot = None;
-            if let Some(gfx) = &mut self.gfx {
-                gfx.renderer.set_diff_image(None);
-            }
+            self.clear_diff();
         }
         self.recompute_active_slot();
         self.show_toast(if is_seq {
@@ -2145,32 +2166,58 @@ impl App {
         self.request_redraw();
     }
 
-    /// Alt+N: toggle showing the absolute difference between the current image
-    /// and comparator slot `n`. The diff is PRECOMPUTED at base resolution (so the
-    /// GPU mip chain shows the average of the per-pixel differences — identical
-    /// regions read 0 at every zoom) and uploaded as the renderer's diff texture;
-    /// exposure/clarity/etc then act on the displayed difference.
+    /// Alt+N: toggle the difference against comparator slot `n`. Two shapes:
+    ///
+    /// * **Live two-sequences diff** — playing a sequence and the slot holds one
+    ///   too: both play in sync (same frame number) and the shader subtracts B's
+    ///   current frame from A's each frame (see [`DiffPlayback`]). Best-effort on
+    ///   mismatched ranges: a frame B lacks simply isn't updated.
+    /// * **Still diff** — otherwise: the current frame minus the slot's image,
+    ///   PRECOMPUTED at base resolution (so the GPU mip chain shows the *average*
+    ///   of the per-pixel differences — identical regions read 0 at every zoom).
+    ///
+    /// Either way exposure / clarity then act on the displayed difference.
     fn toggle_slot_diff(&mut self, n: usize) {
         let idx = n - 1;
-        // The diff is a full-resolution CPU precompute; it cannot keep up with a
-        // frame changing 24 times a second. Pausing makes it available again.
-        if self.playback.as_ref().is_some_and(|p| p.playing()) {
-            self.show_toast("Pause to compare a difference".to_string());
-            return;
-        }
+        // Toggle off — whichever kind of diff is up.
         if self.diff_slot == Some(idx) {
-            self.diff_slot = None;
-            if let Some(gfx) = &mut self.gfx {
-                gfx.renderer.set_diff_image(None);
-            }
+            self.clear_diff();
             self.show_toast("Diff off".to_string());
             self.request_redraw();
             return;
         }
-        let Some(slot) = self.slots[idx].as_ref().map(|s| s.image().clone()) else {
+        let Some(slot) = self.slots[idx].clone() else {
             self.show_toast(format!("Slot {n} empty"));
             return;
         };
+        // Live two-sequences diff: A (the player) and B (the slot) are both file
+        // sequences, and we are in the player (playing or paused). Set up B to
+        // follow A's playhead; the shader diffs them live.
+        let a_is_file_seq = self
+            .playback
+            .as_ref()
+            .is_some_and(|p| !p.seq.is_in_memory());
+        if self.playback_active() && a_is_file_seq {
+            if let Some(b) = slot.as_sequence().filter(|s| s.image.animation.is_none()) {
+                match self.start_diff_playback(b) {
+                    Ok(()) => {
+                        self.diff_slot = Some(idx);
+                        self.show_toast(format!("Diff vs slot {n}"));
+                    }
+                    Err(msg) => self.show_toast(msg),
+                }
+                self.request_redraw();
+                return;
+            }
+            // A moving sequence against a still / animation can't be diffed live;
+            // the precompute below needs a frame that holds still.
+            if self.playback.as_ref().is_some_and(|p| p.playing()) {
+                self.show_toast("Pause to compare a difference".to_string());
+                return;
+            }
+        }
+        // Still (precomputed) diff: the current frame minus the slot's image.
+        let slot = slot.image().clone();
         let Some(current) = self.current_image.clone() else {
             return;
         };
@@ -2202,6 +2249,73 @@ impl App {
             self.show_toast("Image too large to diff".to_string());
         }
         self.request_redraw();
+    }
+
+    /// Turn off any comparator difference — the still precompute and the live
+    /// two-sequences diff alike — freeing the diff texture and B's decode pool.
+    fn clear_diff(&mut self) {
+        self.diff_slot = None;
+        if let Some(diff) = self.diff_playback.take() {
+            diff.frames.cancel_wakeups();
+        }
+        if let Some(gfx) = &mut self.gfx {
+            gfx.renderer.set_diff_image(None);
+        }
+    }
+
+    /// Spin up sequence B for a live two-sequences diff: detect it from the
+    /// slot's saved frame, give it its own decode pool, and seed the saved frame
+    /// so a matching playhead has something to show at once. The primary player's
+    /// tick then drives it (see [`App::tick_diff_playback`]).
+    fn start_diff_playback(&mut self, b: &SlotSequence) -> Result<(), String> {
+        let seq = Sequence::detect(&b.image.path).map_err(|e| e.message())?;
+        let proxy = self.proxy.clone();
+        let mut frames = FrameSource::Files(Box::new(FrameCache::new(
+            self.playback_cache_budget(),
+            cache::default_worker_count(),
+            Arc::new(move || {
+                let _ = proxy.send_event(UserEvent::FrameDecoded);
+            }),
+        )));
+        frames.seed(b.frame, b.image.clone());
+        self.diff_playback = Some(DiffPlayback {
+            seq,
+            frames,
+            uploaded: None,
+        });
+        Ok(())
+    }
+
+    /// Advance sequence B to the primary player's frame: land its decodes, keep
+    /// its cache window centred on the playhead, and upload its current frame to
+    /// the diff texture when the playhead has moved to one it can show. Called
+    /// each render from `tick_playback`. A frame B lacks (a hole, or a shorter
+    /// sequence) simply leaves the previous diff up — best-effort, as asked.
+    fn tick_diff_playback(&mut self) {
+        let Some(playhead) = self.playback.as_ref().map(|p| p.frame()) else {
+            return;
+        };
+        let b_frame = {
+            let Some(diff) = self.diff_playback.as_mut() else {
+                return;
+            };
+            diff.frames.poll(&mut diff.seq);
+            diff.frames.schedule(&mut diff.seq, playhead, true);
+            if diff.uploaded == Some(playhead) || !diff.frames.is_ready(playhead) {
+                return;
+            }
+            diff.frames.image(playhead)
+        };
+        let Some(b_frame) = b_frame else {
+            return;
+        };
+        if let Some(gfx) = self.gfx.as_mut() {
+            if gfx.renderer.upload_diff_frame(&b_frame) {
+                if let Some(diff) = self.diff_playback.as_mut() {
+                    diff.uploaded = Some(playhead);
+                }
+            }
+        }
     }
 
     /// N: recall comparator slot `n`. Pressing it again while already viewing
@@ -2602,10 +2716,7 @@ impl App {
         // since-cleared guide (the gesture's release, if any, becomes a no-op).
         self.guide_drag = None;
         self.ui_state.guide_spawn = None;
-        self.diff_slot = None;
-        if let Some(gfx) = &mut self.gfx {
-            gfx.renderer.set_diff_image(None);
-        }
+        self.clear_diff();
         self.show_toast("Adjustments reset".to_string());
         self.request_redraw();
     }
@@ -4926,6 +5037,34 @@ impl App {
                 self.recall_slot(1, false);
                 log::info!("debug: saved + recalled the sequence via slot 1");
             }
+            // Live two-sequences diff against slot 1. With one test sequence this
+            // is a self-diff, which must render (near) black — the same proof the
+            // still-diff self-diff uses. Point IMGVWR_DEBUG_SEQ_DIFF at a second
+            // sequence's frame (=<path>) to diff two different sequences.
+            if let Some(other) = std::env::var_os("IMGVWR_DEBUG_SEQ_DIFF") {
+                if self.playback.is_some() && !self.debug_seq_diffed {
+                    self.debug_seq_diffed = true;
+                    let b = std::path::PathBuf::from(&other);
+                    if b.as_os_str() == "1" {
+                        self.save_slot(1); // self-diff
+                    } else if let Ok(img) = load_image(
+                        &b,
+                        &Arc::new(crate::image_loader::ReadProgress::default()),
+                        DecodeIntent::Latency,
+                    ) {
+                        let img = Arc::new(img);
+                        if let Ok(seq) = Sequence::detect(&b) {
+                            self.slots[0] = Some(Slot::Sequence(SlotSequence {
+                                identity: seq.identity(),
+                                frame: Sequence::frame_of(&b).unwrap_or(0),
+                                image: img,
+                            }));
+                        }
+                    }
+                    self.toggle_slot_diff(1);
+                    log::info!("debug: live diff vs slot 1");
+                }
+            }
         }
     }
 
@@ -5711,6 +5850,11 @@ impl App {
     /// rate, at the cost of doubling the cached bytes per frame. Worth doing;
     /// not worth blocking on.)
     fn sync_diff_with_playback(&mut self) {
+        // The live two-sequences diff follows the same clock, so it plays fine and
+        // must not be suspended; only the still CPU precompute needs pausing.
+        if self.diff_playback.is_some() {
+            return;
+        }
         let playing = self.playback.as_ref().is_some_and(|p| p.playing());
         if playing {
             if let Some(slot) = self.diff_slot.take() {
@@ -5859,6 +6003,11 @@ impl App {
         let Some(pb) = self.playback.take() else {
             return;
         };
+        // A live two-sequences diff has no primary sequence to compare against
+        // once the player is gone — end it (and free B's decode pool).
+        if self.diff_playback.is_some() {
+            self.clear_diff();
+        }
         // Keep the frame actually on screen, not the playhead — a seek may have
         // moved the playhead onto a frame that has not decoded yet, and keeping
         // that one would leave a blank window.
@@ -6007,6 +6156,9 @@ impl App {
             self.show_playback_frame(frame);
         }
         self.upload_frame_lookahead();
+        // A live two-sequences diff follows the same playhead: land B's decodes
+        // and upload B's current frame to the diff texture.
+        self.tick_diff_playback();
         self.refresh_playback_states();
         self.log_playback_stats(now);
         // Dev-only: leave playback once the pinned frame is on screen, so a
@@ -6267,6 +6419,7 @@ impl App {
             stretch: [self.image_stretch.x, self.image_stretch.y],
             sharpness: self.sharpness,
             diff: self.diff_slot.is_some(),
+            diff_live: self.diff_playback.is_some(),
             guides: guide_arr,
             guide_count: guide_n as i32,
             guide_color: srgb_u8_to_f32(self.prefs.guide_color),
@@ -6462,6 +6615,7 @@ impl App {
                     stretch: [1.0, 1.0],
                     sharpness: false,
                     diff: false,
+                    diff_live: false,
                     guide_count: 0,
                     guide_hover: -1,
                     clarity_amount: 0.0,

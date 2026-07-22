@@ -892,6 +892,64 @@ pub unsafe fn upload_diff_texture(
     Some(tex)
 }
 
+/// Refresh the live-diff texture with `data`, reusing `*tex` when its stored
+/// `(w, h, internal)` `*spec` still matches (only re-uploading pixels and
+/// regenerating mips) so a per-frame upload never reallocates; on a size or
+/// format change (or the first upload) it deletes and reallocates via
+/// [`upload_diff_texture`], updating `*tex` and `*spec` in place. Returns whether
+/// a diff texture is present afterwards. # Safety: a GL context must be current.
+pub unsafe fn refresh_diff_texture(
+    gl: &glow::Context,
+    tex: &mut Option<glow::Texture>,
+    spec: &mut Option<(i32, i32, u32)>,
+    data: &ImageData,
+    max_size: i32,
+) -> bool {
+    let (w, h) = (data.width as i32, data.height as i32);
+    if w <= 0 || h <= 0 || w.max(h) > max_size {
+        return false;
+    }
+    let (internal, format, ty, _bpp, bytes) = pixel_format(data);
+    if *spec == Some((w, h, internal)) {
+        if let Some(t) = *tex {
+            gl.bind_texture(glow::TEXTURE_2D, Some(t));
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                w,
+                h,
+                format,
+                ty,
+                glow::PixelUnpackData::Slice(Some(bytes)),
+            );
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            return true;
+        }
+    }
+    if let Some(t) = tex.take() {
+        gl.delete_texture(t);
+    }
+    *tex = upload_diff_texture(gl, data, max_size);
+    if let Some(t) = *tex {
+        // Match the playback ring's sampler exactly — REPEAT on S (the ring's
+        // wrap) and anisotropy — so the live diff samples B the same way the
+        // image sampler samples A. Without this, identical frames trace faint
+        // edges wherever the two samplers disagreed (aniso vs isotropic when
+        // minified, REPEAT vs CLAMP at the horizontal border) instead of coming
+        // out black. The still-diff precompute keeps `upload_diff_texture`'s
+        // defaults; only this live path re-matches the ring.
+        gl.bind_texture(glow::TEXTURE_2D, Some(t));
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+        set_anisotropy(gl, glow::TEXTURE_2D);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+    }
+    *spec = tex.map(|_| (w, h, internal));
+    tex.is_some()
+}
+
 /// Build a per-channel clipping MASK texture with a **max-reduced** mip pyramid:
 /// each texel is `255` in a channel whose original value is within `margin` of
 /// that channel's format max (`data.clip_max`). Downsampling takes the MAX (not

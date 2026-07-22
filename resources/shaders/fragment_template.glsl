@@ -18,7 +18,8 @@ uniform bool  u_wrap_2d;             // 2D mode: repeat the image instead of cla
 uniform int   u_isolate_channel;     // -1 = all channels; 0=R 1=G 2=B 3=A shown as greyscale
 uniform vec2  u_stretch;             // per-axis image squash/stretch (1,1 = none)
 uniform int   u_sharpness;           // 1 = show the original-resolution high-pass
-uniform int   u_diff;                // 1 = show |image - slot| (the slot diff checker)
+uniform int   u_diff;                // 1 = show the slot difference (the slot diff checker)
+uniform int   u_diff_live;           // 1 = u_diff_image is sequence B's raw frame; subtract it live
 uniform sampler2D u_diff_image;      // the comparator slot's image (for u_diff)
 // Guide lines, each .x = image coordinate (0..1), .y = 0 vertical / 1 horizontal.
 uniform int   u_guide_count;
@@ -148,14 +149,19 @@ void main() {
     // f32::MAX (never) for unbounded 32-bit float / HDR.
     vec4 clip_src = texel;
 
-    // Slot difference: the absolute per-pixel difference vs the comparator slot,
-    // PRECOMPUTED at base resolution on the CPU and uploaded as u_diff_image with
-    // its own mip chain. Sampling it normally (implicit-derivative mip selection)
-    // therefore shows the *average of the differences* when minified — identical
-    // regions stay exactly 0 at every zoom. (Differencing two separately
-    // mip-averaged images instead bled nearby differences into identical regions
-    // when zoomed out, vanishing only at LOD 0.) Kept in source space so the
-    // exposure / view / clarity below still amplify it.
+    // Slot difference. Two ways in:
+    //   * Still diff (u_diff_live == 0): u_diff_image holds the absolute per-pixel
+    //     difference, PRECOMPUTED at base resolution on the CPU with its own mip
+    //     chain. Sampling it normally shows the *average of the differences* when
+    //     minified, so identical regions stay exactly 0 at every zoom. (Diffing
+    //     two separately mip-averaged images instead bled nearby differences into
+    //     identical regions when zoomed out, vanishing only at LOD 0.)
+    //   * Live sequence diff (u_diff_live != 0): u_diff_image holds sequence B's
+    //     raw frame (the primary sequence A is the image sampled above), so we
+    //     subtract them here per frame — no CPU precompute can keep up at 24 fps.
+    //     Correct at LOD 0; when minified each side is box-averaged before the
+    //     subtract, which is the best-effort the playing comparison accepts.
+    // Either way it is kept in source space so exposure / view / clarity amplify it.
     if (u_diff != 0) {
         // Sample with a seam-corrected gradient (the same longitude unwrap the
         // image sampler uses), so a minified panorama diff doesn't flash the
@@ -170,7 +176,19 @@ void main() {
         // Sample in SOURCE space (src_uv = uv rotated) so the diff lines up with
         // the displayed, rotated image. The 2D gradient is a pure axis swap under a
         // 90° turn, so the displayed-space derivatives select the same mip.
-        texel = vec4(textureGrad(u_diff_image, src_uv, ddxd, ddyd).rgb, 1.0);
+        vec3 other = textureGrad(u_diff_image, src_uv, ddxd, ddyd).rgb;
+        if (u_diff_live != 0) {
+            // Re-sample A (the image) with the SAME operation as B — a plain
+            // trilinear textureGrad at src_uv, NOT the Lanczos/bilinear display
+            // path `texel` came from — so two identical frames cancel to exactly
+            // black at every zoom instead of tracing faint edges where the two
+            // samplers (Lanczos vs trilinear) disagreed. `sample_image_grad` is
+            // that textureGrad, and the diff texture is configured to match the
+            // image sampler (wrap + anisotropy), so the two sides are identical.
+            texel = vec4(abs(sample_image_grad(src_uv, ddxd, ddyd).rgb - other), 1.0);
+        } else {
+            texel = vec4(other, 1.0);
+        }
     }
     // Sharpness checker: |original - 2px-blurred original|, from the ORIGINAL
     // full-resolution pixels (LOD 0), not the displayed mip. Done here in source

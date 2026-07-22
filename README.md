@@ -179,7 +179,7 @@ controls above); the frame cache's share of memory is in *Settings → Playback*
 |---|---|
 | `Ctrl` + `1`–`9` | Save to a comparator slot — the whole sequence when you're playing one, otherwise the current image |
 | `1`–`9` (top row) | Recall a saved slot; a sequence slot resumes in the player (a still toggles back on a second press) |
-| `Alt` + `1`–`9` | Show the difference vs that slot's image (processing applies to the diff) |
+| `Alt` + `1`–`9` | Show the difference vs that slot (processing applies to the diff). Two sequences diff **live** — both play in sync and each frame shows their difference; otherwise it's the current frame vs the slot's image |
 | `L` | Lock zoom/pan across images |
 | `H` | Show keyboard / mouse help (with version + GitHub link) |
 
@@ -199,6 +199,13 @@ not just the frame you're on — recalling it puts you back in the player. If yo
 were playing, it keeps playing and lands on the same frame number (so you can
 flip between two renders of a shot and watch them at the same point); if you
 were paused, or looking at a still, it stays paused.
+
+`Alt`+`N` against a sequence slot while you're playing one **diffs the two
+sequences live**: both play in sync on the same frame number and every frame
+shows their per-pixel difference (amplify it with exposure). Sequences of
+different lengths or frame ranges are handled best-effort — a frame the other
+sequence doesn't have simply isn't updated — and the timeline stays that of the
+sequence you're playing.
 
 ## Supported formats
 

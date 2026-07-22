@@ -185,6 +185,18 @@ Built **locally** (vcpkg deps are too slow for CI). With `VCPKG_ROOT` set: bump 
   This was a silent no-op on EXR/HDR (8-bit looked fine only because its clipped display value is
   already 1.0). Also: 16-bit-half EXR clips at `65504` (`HALF_MAX`), not 1.0 — integer 16-bit
   PNG/TIFF uses 1.0 (`CLIP_MAX_NORM`); they are different clip thresholds.
+- **The live two-sequences diff must sample A and B with the *same* operation, or identical
+  frames don't cancel.** Alt+N between two playing sequences diffs on the GPU: sequence A is the
+  ring texture, B rides in the diff texture (`upload_diff_frame`, reused frame-to-frame), and the
+  shader does `abs(A − B)` when `u_diff_live`. The trap: the display path samples A through the
+  *Lanczos* minifier and the ring's sampler carries REPEAT-wrap + anisotropy, while the diff texture
+  was plain trilinear/CLAMP/no-aniso — so a self-diff traced faint edges instead of pure black. Fix
+  is twofold: the shader re-samples A via `sample_image_grad` (plain `textureGrad`, matching B) in
+  the live branch instead of reusing the Lanczos `texel`; and `refresh_diff_texture` re-matches the
+  ring's wrap+anisotropy on B. Verified: a fit-view self-diff is exactly 0 (`IMGVWR_DEBUG_SEQ_DIFF=1`).
+  Only the *live* path re-matches — the still precompute keeps `upload_diff_texture`'s defaults. The
+  live diff is deliberately not suspended while playing (unlike the CPU precompute); `sync_diff_with_playback`
+  early-returns when `diff_playback` is set.
 - **Out-of-band adopts (slot recall, drop, open dialog) must bump `load_gen` and clear
   `nav_pending` before `begin_adopt`.** Otherwise a still-running nav decode's result passes
   `poll_loads`'s gen check and clobbers the recall.
